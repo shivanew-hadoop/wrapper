@@ -1,0 +1,69 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Topper Interview Setup</title>
+  <link rel="stylesheet" href="setup.css">
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="brand">TOPPER</div>
+      <div>
+        <h1>Prepare interview context</h1>
+        <p>Resume + JD are processed once before listening so live answers can use fast, relevant retrieval.</p>
+      </div>
+    </header>
+
+    <section class="card">
+      <label>Email used for Topper license</label>
+      <div class="row emailRow">
+        <input id="email" type="email" placeholder="demo@example.com" autocomplete="email">
+        <button id="verifyBtn" class="secondary">Verify</button>
+      </div>
+      <div id="licenseStatus" class="status">License not verified.</div>
+    </section>
+
+    <section class="card grid">
+      <div class="field">
+        <label>Resume <span>PDF, DOC, DOCX, RTF and common text formats</span></label>
+        <input id="resume" type="file" accept="*/*">
+        <small id="resumeMeta">Required · max 6 MB</small>
+      </div>
+      <div class="field">
+        <label>Job description <span>PDF, DOC, DOCX, RTF and common text formats</span></label>
+        <input id="jd" type="file" accept="*/*">
+        <small id="jdMeta">Upload a JD or paste it below.</small>
+      </div>
+      <div class="field compact">
+        <label>Years of experience</label>
+        <input id="years" type="number" min="0" max="60" step="0.5" placeholder="8">
+      </div>
+      <div class="field compact">
+        <label>Target role <span>optional</span></label>
+        <input id="role" type="text" placeholder="Senior Java Developer">
+      </div>
+      <div class="field full">
+        <label>Or paste job description</label>
+        <textarea id="jdText" rows="5" placeholder="Paste the JD here if you do not upload a file..."></textarea>
+      </div>
+    </section>
+
+    <section class="card prepareCard">
+      <div>
+        <strong>Live latency strategy</strong>
+        <p>Documents are parsed, summarized and embedded now. During the interview only the spoken question is embedded, searched against in-memory vectors, then sent to the LLM with the top matching context.</p>
+      </div>
+      <button id="prepareBtn" class="primary">Prepare Interview</button>
+    </section>
+
+    <div id="progress" class="progress hidden">
+      <div class="spinner"></div>
+      <div><strong id="progressTitle">Preparing context…</strong><div id="progressText">Parsing documents and creating embeddings.</div></div>
+    </div>
+    <div id="error" class="error hidden"></div>
+    <footer>Resume/JD content is kept in backend memory for this runtime. License is validated here before the listening screen opens.</footer>
+  </main>
+  <script src="setup.js"></script>
+</body>
+</html>

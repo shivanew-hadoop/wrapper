@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Topper Interview Copilot</title>
+  <link rel="stylesheet" href="overlay.css">
+</head>
+<body>
+<div id="app" class="card v6Card">
+  <div class="header">
+    <span class="dot"></span><span class="title">TOPPER · INTERVIEW COPILOT</span>
+    <div class="fontControls"><button id="fontDown" class="miniBtn">A−</button><span id="fontSizeLabel" class="fontSizeLabel">16</span><button id="fontUp" class="miniBtn">A+</button></div>
+    <span class="spacer"></span><span id="creditTimer" class="modelLabel">Credits: --:--</span>
+    <button id="leaveBtn" class="leave hidden">■ Stop</button>
+    <button id="collapseBtn" class="collapseBtn">−</button>
+    <button id="closeBtn" class="closeBtn">×</button>
+  </div>
+
+  <section id="joinPanel" class="joinPanel">
+    <div class="startBox">
+      <div><span>Windows system audio</span><div class="muted">Your license and interview context were validated on the setup screen. Start when the interview/call is ready.</div></div>
+      <button id="joinBtn">Start Listening</button>
+    </div>
+  </section>
+
+  <section id="livePanel" class="live hidden v6Live">
+    <div id="status" class="status">Idle</div>
+
+    <div class="v6AnswerPane">
+      <div class="paneTitle"><span>LLM ANSWER</span><span id="modelLabel" class="modelLabel"></span></div>
+      <div id="answer" class="answer v6Answer">Waiting for a complete question...</div>
+    </div>
+
+    <div id="transcriptPane" class="v7TranscriptPane">
+      <div class="paneTitle transcriptTitle"><span>LIVE QUESTIONS</span><span id="sendFeedback" class="sendFeedback"></span></div>
+      <div id="transcript" class="transcript v7Transcript"><div class="transcriptEmpty">Waiting for system audio...</div></div>
+      <div id="transcriptResize" class="transcriptResize" title="Drag to increase or shrink question history"></div>
+    </div>
+
+    <div class="v6Controls">
+      <div class="controlToolbar">
+        <button id="captureWindowBtn" class="actionBtn captureBtn" title="Capture the current physical screen and append its visible content to the prompt">Capture Screen</button>
+        <button id="autoSendBtn" class="actionBtn autoOn" title="Automatically send after the question is stable">Auto Send: ON</button>
+        <button id="sendBtn" class="actionBtn sendBtn" title="Send only unsent transcript or typed text">Send</button>
+      </div>
+      <textarea id="manualPrompt" class="manualPrompt" rows="3" placeholder="Type a question, or capture one or more screens..." autocomplete="off"></textarea>
+    </div>
+  </section>
+</div>
+<script src="overlay.js"></script>
+</body>
+</html>

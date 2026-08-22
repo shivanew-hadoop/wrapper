@@ -1,17 +1,65 @@
 {
-  "name": "meeting-caption-backend",
-  "version": "1.0.0",
-  "description": "License validation and Deepgram proxy backend for Meeting Caption Service",
-  "main": "server.js",
+  "name": "topper",
+  "version": "14.0.0",
+  "description": "Topper interview copilot with plain-text low-latency streaming, Windows system audio, RAG, and multi-screen capture-to-prompt.",
+  "main": "main.js",
+  "productName": "Topper",
+  "author": "Topper",
   "scripts": {
-    "start": "node server.js",
-    "create-license": "node scripts/create-license.js"
+    "start": "electron .",
+    "dist": "electron-builder --win portable --x64"
   },
   "dependencies": {
-    "@deepgram/sdk": "^3.3.0",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
+    "22": "^0.0.0",
     "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "electron": "^30.5.1",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.topper.meetingcaption",
+    "directories": {
+      "output": "dist/Topper-v${version}"
+    },
+    "productName": "Topper",
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Topper-v${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Topper-v${version}.${ext}"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "app-config.json",
+      "setup/**/*",
+      "overlay/**/*",
+      "meet-controller/**/*",
+      "transcriber/**/*",
+      "audio-ws/**/*",
+      "system-audio/**/*",
+      "package.json",
+      "!**/*.map",
+      "!**/*.md",
+      "!**/*.txt",
+      "!**/*.log",
+      "!**/test/**/*",
+      "!**/tests/**/*",
+      "!**/__tests__/**/*",
+      "!**/docs/**/*",
+      "!dist/**/*",
+      "!*.zip"
+    ],
+    "asar": true,
+    "compression": "maximum"
   }
 }
