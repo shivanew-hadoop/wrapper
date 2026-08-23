@@ -42,7 +42,7 @@ const USERS_FILE = path.join(__dirname, 'users.json');
 const DATA_DIR = String(process.env.DATA_DIR || path.join(__dirname, 'data'));
 fs.mkdirSync(DATA_DIR, { recursive:true });
 
-// Per-process, per-user interview context. Nothing is persisted to disk.
+// Per-process, per-user interview context. Nothing is persisted to disk always.
 const interviewSessions = new Map();
 const queryEmbeddingCache = new Map();
 
