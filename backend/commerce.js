@@ -37,8 +37,30 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
   });
   const credit = db.transaction((userId,seconds,reason,reference) => { const u=db.prepare('SELECT credit_seconds FROM users WHERE id=?').get(userId);if(!u)throw new Error('User not found');const applied=Math.max(-u.credit_seconds,Math.trunc(seconds));db.prepare('UPDATE users SET credit_seconds=credit_seconds+? WHERE id=?').run(applied,userId);db.prepare('INSERT INTO credit_ledger(user_id,delta_seconds,reason,reference) VALUES(?,?,?,?)').run(userId,applied,reason,reference||null); });
 
-  const adminEmail=emailOf(process.env.ADMIN_EMAIL), adminPassword=String(process.env.ADMIN_PASSWORD||'');
-  if(adminEmail&&adminPassword&&!db.prepare('SELECT 1 FROM users WHERE email=?').get(adminEmail)) db.prepare("INSERT INTO users(email,password_hash,name,role) VALUES(?,?,?,'admin')").run(adminEmail,bcrypt.hashSync(adminPassword,12),'Administrator');
+  const adminEmail = emailOf(process.env.ADMIN_EMAIL);
+const adminPassword = String(process.env.ADMIN_PASSWORD || '');
+
+if (adminEmail && adminPassword) {
+  const passwordHash = bcrypt.hashSync(adminPassword, 12);
+  const existingAdmin = db.prepare(
+    'SELECT id FROM users WHERE email = ?'
+  ).get(adminEmail);
+
+  if (existingAdmin) {
+    db.prepare(`
+      UPDATE users
+      SET role = 'admin',
+          status = 'active',
+          password_hash = ?
+      WHERE id = ?
+    `).run(passwordHash, existingAdmin.id);
+  } else {
+    db.prepare(`
+      INSERT INTO users(email, password_hash, name, role, status)
+      VALUES (?, ?, 'Administrator', 'admin', 'active')
+    `).run(adminEmail, passwordHash);
+  }
+}
 
   app.use('/portal', require('express').static(publicDir, {extensions:['html']}));
   app.post('/api/auth/register',(req,res)=>{ try { const email=emailOf(req.body.email), password=String(req.body.password||''); if(!/^\S+@\S+\.\S+$/.test(email)||password.length<8)return res.status(400).json({ok:false,error:'Use a valid email and an 8+ character password'}); const info=db.prepare('INSERT INTO users(email,password_hash,name) VALUES(?,?,?)').run(email,bcrypt.hashSync(password,12),String(req.body.name||'').trim().slice(0,80)); const u=db.prepare('SELECT * FROM users WHERE id=?').get(info.lastInsertRowid); res.json({ok:true,token:sign(u),user:publicUser(u)}); }catch(e){res.status(409).json({ok:false,error:'Email is already registered'});} });
