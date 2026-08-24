@@ -959,3 +959,45 @@ text-decoration:underline;
   .controlToolbar .actionBtn { min-width: 0; padding: 0 8px; }
   .captureBtn { min-width: 96px !important; }
 }
+
+/* v14.3 durable sizing and interview-flow layout. */
+html, body, .card { overflow-x: hidden !important; }
+.v6Card {
+  border: 1px solid rgba(124,209,255,.42) !important;
+  box-shadow: 0 18px 55px rgba(0,0,0,.48), 0 0 0 1px rgba(255,255,255,.05) inset !important;
+}
+.v6Live { grid-template-rows: 18px minmax(210px, 1fr) var(--transcript-pane-height) 112px; }
+.v7TranscriptPane { max-height: 320px; }
+.v7Transcript, .v6Answer, .manualPrompt { overflow-x: hidden !important; }
+.v6Controls {
+  grid-template-rows: minmax(66px, 1fr) 38px;
+  grid-template-columns: minmax(0, 1fr);
+}
+.manualPrompt,
+.manualPrompt.hidden {
+  grid-row: 1;
+  min-height: 66px;
+  height: 66px;
+  max-height: 66px;
+}
+.controlToolbar { grid-row: 2; }
+.controlToolbar .sendBtn { order: 99; margin-left: auto; }
+.transcriptResize {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 8px;
+  background: transparent !important;
+  border-radius: 0;
+}
+.transcriptResize:hover { background: rgba(124,209,255,.08) !important; }
+.resizeHint {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 15px;
+  height: 15px;
+  pointer-events: none;
+  opacity: .75;
+  background: linear-gradient(135deg, transparent 48%, rgba(150,220,255,.75) 50%, transparent 56%), linear-gradient(135deg, transparent 66%, rgba(150,220,255,.5) 68%, transparent 74%);
+}

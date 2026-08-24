@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cancelLLMStream: (requestId) => ipcRenderer.send('cancel-llm-stream', requestId),
   onLLMStream: (cb) => ipcRenderer.on('llm-stream', (_, data) => cb(data)),
   setOverlayCollapsed: (collapsed) => ipcRenderer.invoke('overlay-set-collapsed', collapsed),
+  resizeOverlayForTranscript: (delta) => ipcRenderer.invoke('overlay-resize-transcript', delta),
   onTranscript: (cb) => ipcRenderer.on('transcript', (_, data) => cb(data)),
   onStatus: (cb) => ipcRenderer.on('status', (_, msg) => cb(msg)),
   onSpeechStart: (cb) => ipcRenderer.on('speech-started', () => cb()),

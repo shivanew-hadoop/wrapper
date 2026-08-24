@@ -18,6 +18,9 @@ const { startRemoteTranscriptStream, sendAudioChunk, stopRemoteTranscriptStream 
 let overlayWindow = null;
 let setupWindow = null;
 let captureWindow = null;
+let overlayCollapsed = false;
+let expandedOverlayBounds = null;
+let boundsSaveTimer = null;
 let started = false;
 let remoteSttStarted = false;
 let transcriptLimitReached = false;
@@ -151,11 +154,21 @@ function createSetupWindow() {
 function createOverlayWindow() {
   if (overlayWindow && !overlayWindow.isDestroyed()) { overlayWindow.show(); return; }
   const { workArea } = screen.getPrimaryDisplay();
-  const overlayWidth = 760;
+  const defaultBounds = {
+    width: Math.min(1050, workArea.width - 32),
+    height: Math.min(620, workArea.height - 48),
+    x: workArea.x + Math.max(16, workArea.width - Math.min(1050, workArea.width - 32) - 16),
+    y: workArea.y + 32
+  };
+  try {
+    const saved = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'overlay-bounds.json'), 'utf8'));
+    const visible = screen.getAllDisplays().some(d => saved.x < d.bounds.x + d.bounds.width && saved.x + saved.width > d.bounds.x && saved.y < d.bounds.y + d.bounds.height && saved.y + saved.height > d.bounds.y);
+    if (visible && saved.width >= 900 && saved.height >= 520) expandedOverlayBounds = saved;
+  } catch (_) {}
+  const initialBounds = expandedOverlayBounds || defaultBounds;
   overlayWindow = new BrowserWindow({
-    width: overlayWidth, height: 430, minWidth: 520, minHeight: 48,
-    x: workArea.x + workArea.width - overlayWidth - 16, y: workArea.y + 80,
-    frame: false, transparent: true, alwaysOnTop: true, skipTaskbar: true, resizable: true, show: true,
+    ...initialBounds, minWidth: 680, minHeight: 48,
+    frame: false, transparent: true, thickFrame: true, hasShadow: true, alwaysOnTop: true, skipTaskbar: true, resizable: true, maximizable: true, minimizable: true, show: true,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false }
   });
   overlayWindow.setContentProtection(true);
@@ -166,6 +179,19 @@ function createOverlayWindow() {
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlayWindow.on('blur', () => { if (overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible()) { overlayWindow.setAlwaysOnTop(true, 'screen-saver'); overlayWindow.moveTop(); } });
   overlayWindow.on('show', () => { if (overlayWindow && !overlayWindow.isDestroyed()) { overlayWindow.setAlwaysOnTop(true, 'screen-saver'); overlayWindow.moveTop(); } });
+  const rememberBounds = () => {
+    if (!overlayWindow || overlayWindow.isDestroyed() || overlayCollapsed || overlayWindow.isMinimized() || overlayWindow.isMaximized()) return;
+    const b = overlayWindow.getBounds();
+    if (b.height < 430) return;
+    expandedOverlayBounds = b;
+    clearTimeout(boundsSaveTimer);
+    boundsSaveTimer = setTimeout(() => {
+      try { fs.writeFileSync(path.join(app.getPath('userData'), 'overlay-bounds.json'), JSON.stringify(expandedOverlayBounds), {mode:0o600}); } catch (_) {}
+    }, 250);
+  };
+  overlayWindow.on('resize', rememberBounds);
+  overlayWindow.on('move', rememberBounds);
+  overlayWindow.on('unmaximize', () => { if (expandedOverlayBounds) overlayWindow.setBounds(expandedOverlayBounds); });
   overlayWindow.on('closed', () => { overlayWindow = null; });
 }
 
@@ -452,11 +478,27 @@ ipcMain.handle('close-overlay', async () => {
 ipcMain.handle('overlay-set-collapsed', async (_, collapsed) => {
   if (!overlayWindow || overlayWindow.isDestroyed()) return true;
   const b = overlayWindow.getBounds();
-  overlayWindow.setResizable(!collapsed);
-  overlayWindow.setBounds({ x: b.x, y: b.y, width: b.width, height: collapsed ? 48 : Math.max(430, b.height) });
+  if (collapsed && !overlayCollapsed && b.height >= 430) expandedOverlayBounds = b;
+  overlayCollapsed = !!collapsed;
+  overlayWindow.setResizable(!overlayCollapsed);
+  if (overlayCollapsed) overlayWindow.setBounds({x:b.x,y:b.y,width:b.width,height:48});
+  else if (expandedOverlayBounds) overlayWindow.setBounds(expandedOverlayBounds);
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   overlayWindow.moveTop();
   return true;
+});
+
+ipcMain.handle('overlay-resize-transcript', async (_, delta) => {
+  if (!overlayWindow || overlayWindow.isDestroyed() || overlayCollapsed) return 0;
+  const requested = Math.trunc(Number(delta) || 0);
+  if (!requested) return 0;
+  const b = overlayWindow.getBounds();
+  const display = screen.getDisplayMatching(b);
+  const maxHeight = Math.max(430, display.workArea.y + display.workArea.height - b.y - 12);
+  const nextHeight = Math.max(430, Math.min(maxHeight, b.height + requested));
+  const applied = nextHeight - b.height;
+  if (applied) overlayWindow.setBounds({...b,height:nextHeight});
+  return applied;
 });
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();

@@ -49,7 +49,11 @@ function appendPlainAnswerDelta(delta) {
   answerEl.appendChild(document.createTextNode(clean));
 }
 
-let autoSend = localStorage.getItem('autoSend') !== 'false';
+if (!localStorage.getItem('autoSendDefaultV143')) {
+  localStorage.setItem('autoSend', 'false');
+  localStorage.setItem('autoSendDefaultV143', '1');
+}
+let autoSend = localStorage.getItem('autoSend') === 'true';
 let lastTranscriptAt = 0;
 let lastFinalAt = 0;
 // Fast auto-submit: start quickly after a short pause, but keep a continuation window so
@@ -191,25 +195,37 @@ function getCompleteUnsentTranscript() {
   return utteranceParts.join(' ').replace(/\s+/g, ' ').trim();
 }
 
-// Transcript pane is independently resizable; default is roughly one question high.
-let transcriptHeight = Number(localStorage.getItem('transcriptPaneHeight') || 96);
+// Growing Live Questions grows the whole overlay by the same amount, preserving LLM answer room.
+let transcriptHeight = Number(localStorage.getItem('transcriptPaneHeight') || 104);
 function applyTranscriptHeight() {
-  transcriptHeight = Math.max(72, Math.min(230, transcriptHeight));
+  transcriptHeight = Math.max(88, Math.min(320, transcriptHeight));
   document.documentElement.style.setProperty('--transcript-pane-height', `${transcriptHeight}px`);
   localStorage.setItem('transcriptPaneHeight', String(transcriptHeight));
 }
 applyTranscriptHeight();
 let resizingTranscript = false;
+let transcriptPointerY = 0;
+let transcriptResizePending = false;
 transcriptResize.addEventListener('pointerdown', e => {
   resizingTranscript = true;
+  transcriptPointerY = e.clientY;
   transcriptResize.setPointerCapture(e.pointerId);
   e.preventDefault();
 });
-transcriptResize.addEventListener('pointermove', e => {
-  if (!resizingTranscript) return;
-  const rect = transcriptPane.getBoundingClientRect();
-  transcriptHeight = e.clientY - rect.top;
-  applyTranscriptHeight();
+transcriptResize.addEventListener('pointermove', async e => {
+  if (!resizingTranscript || transcriptResizePending) return;
+  const delta = Math.trunc(e.clientY - transcriptPointerY);
+  if (!delta) return;
+  const target = Math.max(88, Math.min(320, transcriptHeight + delta));
+  const requested = target - transcriptHeight;
+  if (!requested) return;
+  transcriptPointerY = e.clientY;
+  transcriptResizePending = true;
+  try {
+    const applied = await window.electronAPI.resizeOverlayForTranscript(requested);
+    transcriptHeight += Number(applied) || 0;
+    applyTranscriptHeight();
+  } finally { transcriptResizePending = false; }
 });
 transcriptResize.addEventListener('pointerup', e => {
   resizingTranscript = false;

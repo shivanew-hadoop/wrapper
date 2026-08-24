@@ -55,8 +55,8 @@ console.log('[BOOT] OPENAI_API_KEY present:', !!OPENAI_API_KEY);
 console.log('[BOOT] LLM model: Terra-only ->', LLM_DEFAULT_MODEL, '| profile:', LLM_PROFILE_MODEL, '| vision-extract:', LLM_VISION_EXTRACT_MODEL, '| embedding:', EMBEDDING_MODEL, '| dims:', EMBEDDING_DIMENSIONS);
 
 const app = express();
-const allowedOrigin = String(process.env.CORS_ORIGIN || '').trim();
-app.use(cors({ origin:(origin,cb) => cb(null,!origin || !allowedOrigin || origin === allowedOrigin) }));
+const allowedOrigins = new Set(String(process.env.CORS_ORIGIN || '').split(',').map(value => value.trim()).filter(Boolean));
+app.use(cors({ origin:(origin,cb) => cb(null,!origin || allowedOrigins.size===0 || allowedOrigins.has(origin)) }));
 app.use(express.json({ limit: '18mb', verify:(req,_res,buf) => { req.rawBody = Buffer.from(buf); } }));
 const commerce = require('./commerce')({ app, dataDir:DATA_DIR, publicDir:path.join(__dirname, 'portal') });
 

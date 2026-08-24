@@ -71,16 +71,9 @@ if (adminEmail && adminPassword) {
   }
 }
 
-  // app.use('/portal', require('express').static(publicDir, {extensions:['html']}));
-  const express = require('express');
-
-app.use('/portal', express.static(publicDir, {
-  extensions: ['html']
-}));
-
-app.use('/', express.static(publicDir, {
-  extensions: ['html']
-}));
+  const express=require('express');
+  app.use('/portal',express.static(publicDir,{extensions:['html']}));
+  app.use('/',express.static(publicDir,{extensions:['html']}));
   app.post('/api/auth/register',(req,res)=>{ try { const email=emailOf(req.body.email), password=String(req.body.password||''); if(!/^\S+@\S+\.\S+$/.test(email)||password.length<8)return res.status(400).json({ok:false,error:'Use a valid email and an 8+ character password'}); const info=db.prepare('INSERT INTO users(email,password_hash,name) VALUES(?,?,?)').run(email,bcrypt.hashSync(password,12),String(req.body.name||'').trim().slice(0,80)); const u=db.prepare('SELECT * FROM users WHERE id=?').get(info.lastInsertRowid); res.json({ok:true,token:sign(u),user:publicUser(u)}); }catch(e){res.status(409).json({ok:false,error:'Email is already registered'});} });
   app.post('/api/auth/login',(req,res)=>{ const u=db.prepare('SELECT * FROM users WHERE email=?').get(emailOf(req.body.email)); if(!u||!bcrypt.compareSync(String(req.body.password||''),u.password_hash)||u.status!=='active')return res.status(401).json({ok:false,error:'Invalid email or password'}); res.json({ok:true,token:sign(u),user:publicUser(u)}); });
   app.get('/api/account',auth(),(req,res)=>{ const u=db.prepare('SELECT * FROM users WHERE id=?').get(req.authUser.id); const orders=db.prepare('SELECT provider_order_id,provider_payment_id,amount_paise,credits_seconds,status,created_at,paid_at FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 50').all(u.id); const ledger=db.prepare('SELECT delta_seconds,reason,reference,created_at FROM credit_ledger WHERE user_id=? ORDER BY id DESC LIMIT 100').all(u.id); res.json({ok:true,user:publicUser(u),orders,ledger,plan:{pricePaise:planPaise,creditsSeconds:planSeconds,keyId:process.env.RAZORPAY_KEY_ID||''}}); });
