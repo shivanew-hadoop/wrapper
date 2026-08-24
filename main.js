@@ -1,5 +1,5 @@
 // main.js — Electron main process: setup -> Windows system audio -> STT -> low-latency RAG LLM overlay
-const { app, BrowserWindow, ipcMain, screen, globalShortcut, desktopCapturer, session, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, globalShortcut, desktopCapturer, session, clipboard, safeStorage, shell } = require('electron');
 const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -26,6 +26,9 @@ let usageHeartbeatTimer = null;
 let creditHardStopTimer = null;
 const deviceId = crypto.createHash('sha256').update(app.getPath('userData')).digest('hex');
 const activeLLMStreams = new Map();
+let desktopAccessToken = '';
+let desktopAccount = null;
+const pendingLaunchUrl = process.argv.find(x => String(x).startsWith('topper://')) || '';
 
 function readAppConfig() {
   const defaults = { backendUrl: 'http://localhost:8080' };
@@ -50,11 +53,36 @@ function normalizeBackendHttpUrl(rawUrl) {
 
 function backendBase() { return normalizeBackendHttpUrl(readAppConfig().backendUrl); }
 
+function desktopSessionPath() { return path.join(app.getPath('userData'), 'desktop-session.bin'); }
+function saveDesktopSession() {
+  if (!desktopAccessToken || !safeStorage.isEncryptionAvailable()) return;
+  const encrypted = safeStorage.encryptString(JSON.stringify({accessToken:desktopAccessToken,account:desktopAccount}));
+  fs.writeFileSync(desktopSessionPath(), encrypted, {mode:0o600});
+}
+function loadDesktopSession() {
+  try { const saved=JSON.parse(safeStorage.decryptString(fs.readFileSync(desktopSessionPath())));desktopAccessToken=String(saved.accessToken||'');desktopAccount=saved.account||null;global.currentLicenseEmail=desktopAccount?.email||''; } catch (_) {}
+}
+async function desktopRequest(route, options={}) {
+  const headers={'content-type':'application/json',...(desktopAccessToken?{authorization:`Bearer ${desktopAccessToken}`}:{}) ,...(options.headers||{})};
+  const res=await fetch(`${backendBase()}${route}`,{...options,headers});const data=await res.json().catch(()=>({}));
+  if(!res.ok||!data.ok)throw new Error(data.error||`Desktop account request failed (${res.status})`);return data;
+}
+async function refreshDesktopAccount() {
+  if(!desktopAccessToken)return null;const data=await desktopRequest('/api/desktop/account');desktopAccount=data.account;global.currentLicenseEmail=desktopAccount.email;saveDesktopSession();return desktopAccount;
+}
+async function handleLaunchUrl(rawUrl) {
+  let parsed;try{parsed=new URL(String(rawUrl||''));}catch(_){return;}
+  if(parsed.protocol!=='topper:'||parsed.hostname!=='launch')return;
+  const token=String(parsed.searchParams.get('token')||'');if(token.length<32||token.length>200)return;
+  try { const data=await desktopRequest('/api/desktop/exchange',{method:'POST',body:JSON.stringify({token,deviceId,appVersion:app.getVersion()})});desktopAccessToken=data.accessToken;desktopAccount=data.account;global.currentLicenseEmail=desktopAccount.email;saveDesktopSession();createSetupWindow();setupWindow?.webContents.send('desktop-account-updated',desktopAccount); }
+  catch(err){createSetupWindow();setupWindow?.webContents.send('desktop-account-error',err.message||'Launch link is invalid or expired.');}
+}
+
 function sendStatus(msg) {
   if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.webContents.send('status', msg);
 }
 function sendCredits(data) { if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.webContents.send('credits', data); }
-async function usageCall(route, body) { const r=await fetch(`${backendBase()}${route}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}); const d=await r.json().catch(()=>({})); return {...d,httpStatus:r.status}; }
+async function usageCall(route, body) { const r=await fetch(`${backendBase()}${route}`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${desktopAccessToken}`},body:JSON.stringify(body)}); const d=await r.json().catch(()=>({})); return {...d,httpStatus:r.status}; }
 function armCreditHardStop(remainingSeconds) { clearTimeout(creditHardStopTimer); if(Number.isFinite(remainingSeconds)) creditHardStopTimer=setTimeout(()=>hardStopCredits(),Math.max(0,remainingSeconds)*1000+500); }
 async function hardStopCredits() { if(!started)return; resetRuntimeFlags(); await stopSystemAudioCapture().catch(()=>{}); stopRemoteTranscriptStream(); await stopUsageSession(); sendCredits({remainingSeconds:0,status:'exhausted'}); sendStatus('Credits exhausted. Listening stopped.'); }
 async function stopUsageSession() { clearInterval(usageHeartbeatTimer);clearTimeout(creditHardStopTimer);usageHeartbeatTimer=null;creditHardStopTimer=null;if(usageSessionId){const id=usageSessionId;usageSessionId='';await usageCall('/api/usage/stop',{sessionId:id}).catch(()=>{});} }
@@ -67,6 +95,7 @@ function resetRuntimeFlags() {
 }
 
 async function validateLicenseWithBackend({ licenseEmail }) {
+  if(desktopAccessToken){try{const account=await refreshDesktopAccount();return {success:true,user:account};}catch(err){return {success:false,error:err.message};}}
   const res = await fetch(`${backendBase()}/validate-license`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email: String(licenseEmail || '').trim().toLowerCase() })
@@ -218,6 +247,8 @@ ipcMain.handle('get-session-info', async () => ({
   contextPrepared: !!global.contextPrepared,
   contextMeta: global.contextMeta || null,
 }));
+ipcMain.handle('get-desktop-account', async () => { try { const account=await refreshDesktopAccount();return account?{success:true,account}:{success:false,error:'Launch Topper from the customer portal first.'}; } catch(err) { return {success:false,error:err.message||'Account validation failed.'}; } });
+ipcMain.handle('open-customer-portal', () => shell.openExternal(`${backendBase()}/portal/`));
 
 ipcMain.handle('validate-license', async (_, data) => {
   try { return await validateLicenseWithBackend(data || {}); }
@@ -431,14 +462,16 @@ ipcMain.handle('overlay-set-collapsed', async (_, collapsed) => {
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) app.quit();
 else app.on('second-instance', (_event, argv) => {
-  const launchUrl=argv.find(x=>String(x).startsWith('topper://')); if(launchUrl){try{global.currentLicenseEmail=new URL(launchUrl).searchParams.get('email')||global.currentLicenseEmail;}catch(_){}}
+  const launchUrl=argv.find(x=>String(x).startsWith('topper://')); if(launchUrl)handleLaunchUrl(launchUrl);
   const win = overlayWindow || setupWindow;
   if (win && !win.isDestroyed()) { win.show(); win.focus(); if (win === overlayWindow) win.setAlwaysOnTop(true, 'screen-saver'); win.moveTop(); }
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  loadDesktopSession();
   configureSystemAudioCapture();
   createSetupWindow();
+  if(pendingLaunchUrl)await handleLaunchUrl(pendingLaunchUrl);
   globalShortcut.register('CommandOrControl+Shift+T', () => {
     if (!overlayWindow) return;
     overlayWindow.isVisible() ? overlayWindow.hide() : overlayWindow.show();

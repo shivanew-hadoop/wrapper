@@ -16,12 +16,10 @@
     </header>
 
     <section class="card">
-      <label>Email used for Topper license</label>
-      <div class="row emailRow">
-        <input id="email" type="email" placeholder="demo@example.com" autocomplete="email">
-        <button id="verifyBtn" class="secondary">Verify</button>
-      </div>
-      <div id="licenseStatus" class="status">License not verified.</div>
+      <label>Topper account</label>
+      <div class="accountRow"><div><span>Licensed email</span><strong id="accountEmail">Not connected</strong></div><div><span>Credits remaining</span><strong id="accountCredits">--</strong></div></div>
+      <div id="licenseStatus" class="status">Launch Topper from the customer portal to connect this device.</div>
+      <button id="portalBtn" class="secondary compactButton">Open Topper Portal</button>
     </section>
 
     <section class="card grid">
@@ -62,7 +60,7 @@
       <div><strong id="progressTitle">Preparing context…</strong><div id="progressText">Parsing documents and creating embeddings.</div></div>
     </div>
     <div id="error" class="error hidden"></div>
-    <footer>Resume/JD content is kept in backend memory for this runtime. License is validated here before the listening screen opens.</footer>
+    <footer>Resume/JD content is kept in backend memory for this runtime. Your portal account is validated before listening starts.</footer>
   </main>
   <script src="setup.js"></script>
 </body>

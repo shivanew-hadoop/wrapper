@@ -12,6 +12,11 @@ input:focus, textarea:focus { border-color:#5d9dff; box-shadow:0 0 0 3px rgba(93
 input[type=file] { padding:8px; color:#aab9cd; }
 textarea { resize:vertical; min-height:105px; }
 .row { display:flex; gap:9px; } .emailRow input { flex:1; }
+.accountRow { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.accountRow div { background:#0d1420; border:1px solid #2a3a50; border-radius:10px; padding:11px 12px; }
+.accountRow span { display:block; color:#71849d; font-size:11px; margin-bottom:5px; }
+.accountRow strong { color:#eef4ff; font-size:14px; overflow-wrap:anywhere; }
+.compactButton { margin-top:10px; padding:0 14px; }
 button { border:0; border-radius:10px; cursor:pointer; font-weight:900; padding:0 18px; min-height:38px; }
 button:disabled { opacity:.55; cursor:wait; }
 .secondary { color:#cfe4ff; background:#20324a; border:1px solid #355477; }

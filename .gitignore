@@ -16,3 +16,8 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+dist/
+release/
+*.exe
+*.blockmap
+latest.yml
