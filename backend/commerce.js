@@ -38,7 +38,7 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
     const s=db.prepare("SELECT * FROM usage_sessions WHERE id=? AND status='active'").get(sessionId); if(!s) return null;
     const u=db.prepare('SELECT * FROM users WHERE id=?').get(s.user_id); if(!u) return null;
     const elapsed=Math.max(0,Math.floor((now-s.last_billed_at_ms)/1000)); const debit=Math.min(elapsed,u.credit_seconds);
-    if(debit){ db.prepare('UPDATE users SET credit_seconds=credit_seconds-? WHERE id=?').run(debit,u.id); db.prepare("INSERT INTO credit_ledger(user_id,delta_seconds,reason,reference) VALUES(?,?,'usage',?)").run(u.id,-debit,s.id); }
+    if(debit){ db.prepare('UPDATE users SET credit_seconds=credit_seconds-? WHERE id=?').run(debit,u.id); const updated=db.prepare("UPDATE credit_ledger SET delta_seconds=delta_seconds-?,created_at=CURRENT_TIMESTAMP WHERE user_id=? AND reason='usage' AND reference=?").run(debit,u.id,s.id); if(!updated.changes)db.prepare("INSERT INTO credit_ledger(user_id,delta_seconds,reason,reference) VALUES(?,?,'usage',?)").run(u.id,-debit,s.id); }
     const remaining=u.credit_seconds-debit, billedAt=s.last_billed_at_ms+debit*1000;
     if(remaining<=0){ db.prepare("UPDATE usage_sessions SET last_billed_at_ms=?,ended_at_ms=?,status='exhausted' WHERE id=?").run(billedAt,now,s.id); }
     else db.prepare('UPDATE usage_sessions SET last_billed_at_ms=? WHERE id=?').run(billedAt,s.id);
@@ -76,7 +76,14 @@ if (adminEmail && adminPassword) {
   app.use('/',express.static(publicDir,{extensions:['html']}));
   app.post('/api/auth/register',(req,res)=>{ try { const email=emailOf(req.body.email), password=String(req.body.password||''); if(!/^\S+@\S+\.\S+$/.test(email)||password.length<8)return res.status(400).json({ok:false,error:'Use a valid email and an 8+ character password'}); const info=db.prepare('INSERT INTO users(email,password_hash,name) VALUES(?,?,?)').run(email,bcrypt.hashSync(password,12),String(req.body.name||'').trim().slice(0,80)); const u=db.prepare('SELECT * FROM users WHERE id=?').get(info.lastInsertRowid); res.json({ok:true,token:sign(u),user:publicUser(u)}); }catch(e){res.status(409).json({ok:false,error:'Email is already registered'});} });
   app.post('/api/auth/login',(req,res)=>{ const u=db.prepare('SELECT * FROM users WHERE email=?').get(emailOf(req.body.email)); if(!u||!bcrypt.compareSync(String(req.body.password||''),u.password_hash)||u.status!=='active')return res.status(401).json({ok:false,error:'Invalid email or password'}); res.json({ok:true,token:sign(u),user:publicUser(u)}); });
-  app.get('/api/account',auth(),(req,res)=>{ const u=db.prepare('SELECT * FROM users WHERE id=?').get(req.authUser.id); const orders=db.prepare('SELECT provider_order_id,provider_payment_id,amount_paise,credits_seconds,status,created_at,paid_at FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 50').all(u.id); const ledger=db.prepare('SELECT delta_seconds,reason,reference,created_at FROM credit_ledger WHERE user_id=? ORDER BY id DESC LIMIT 100').all(u.id); res.json({ok:true,user:publicUser(u),orders,ledger,plan:{pricePaise:planPaise,creditsSeconds:planSeconds,keyId:process.env.RAZORPAY_KEY_ID||''}}); });
+  app.get('/api/account',auth(),(req,res)=>{
+    const u=db.prepare('SELECT * FROM users WHERE id=?').get(req.authUser.id);
+    const orders=db.prepare('SELECT provider_order_id,provider_payment_id,amount_paise,credits_seconds,status,created_at,paid_at FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 50').all(u.id);
+    const adjustments=db.prepare("SELECT id sort_id,delta_seconds,reason,reference,created_at FROM credit_ledger WHERE user_id=? AND reason!='usage' ORDER BY id DESC LIMIT 100").all(u.id);
+    const usage=db.prepare("SELECT MAX(id) sort_id,SUM(delta_seconds) delta_seconds,'usage' reason,reference,MAX(created_at) created_at FROM credit_ledger WHERE user_id=? AND reason='usage' GROUP BY reference ORDER BY sort_id DESC LIMIT 100").all(u.id);
+    const ledger=[...adjustments,...usage].sort((a,b)=>b.sort_id-a.sort_id).slice(0,100).map(({sort_id,...row})=>row);
+    res.json({ok:true,user:publicUser(u),orders,ledger,plan:{pricePaise:planPaise,creditsSeconds:planSeconds,keyId:process.env.RAZORPAY_KEY_ID||''}});
+  });
   app.post('/api/desktop/launch-token',auth(),(req,res)=>{
     const now=Date.now(), raw=crypto.randomBytes(32).toString('base64url');
     db.prepare('DELETE FROM desktop_launch_tokens WHERE user_id=? AND used_at_ms IS NULL').run(req.authUser.id);

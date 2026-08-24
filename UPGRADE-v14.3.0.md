@@ -1,4 +1,4 @@
-# Topper v14.3.0 upgrade
+# Topper v14.3.1 upgrade
 
 ## What changed
 
@@ -11,7 +11,9 @@
 - Visible overlay border and bottom-right resize cue.
 - Manual prompt moved below Live Questions and above the button row.
 - Buttons remain Capture Screen, Auto Send and Send, with Send last.
-- Auto Send defaults to OFF once when upgrading to v14.3.0.
+- Auto Send defaults to OFF once when upgrading to v14.3.x.
+- Logged-in users no longer see Login or Sign up navigation.
+- Activity history groups heartbeat deductions into one compact interview-session entry and initially shows only five recent activities.
 - Live Questions has vertical scrolling and no horizontal scrolling.
 - Dragging the Live Questions resize area grows the entire overlay by the same amount, preserving LLM answer space.
 
@@ -36,7 +38,7 @@ npm install
 npm run dist:installer
 ```
 
-Publish both `Topper-Setup-v14.3.0.exe` and an identical copy named `Topper-Setup.exe` in a normal GitHub Release tagged `v14.3.0`.
+Publish both `Topper-Setup-v14.3.1.exe` and an identical copy named `Topper-Setup.exe` in a normal GitHub Release tagged `v14.3.1`.
 
 ## Acceptance test
 
@@ -44,7 +46,7 @@ Publish both `Topper-Setup-v14.3.0.exe` and an identical copy named `Topper-Setu
 2. Log in and verify existing credits/history.
 3. Verify Buy Credits opens Razorpay Checkout.
 4. Verify Download Topper resolves without 404.
-5. Install v14.3.0 over the previous version and launch from the portal.
+5. Install v14.3.1 over the previous version and launch from the portal.
 6. Verify secure account email and credits.
 7. Start Listening and confirm Auto Send initially shows OFF.
 8. Resize and move the overlay, collapse/expand it, then restart and confirm the bounds persist.
