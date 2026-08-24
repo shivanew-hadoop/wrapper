@@ -1,16 +1,17 @@
 {
   "name": "topper",
-  "version": "14.0.0",
+  "version": "14.1.0",
   "description": "Topper interview copilot with plain-text low-latency streaming, Windows system audio, RAG, and multi-screen capture-to-prompt.",
   "main": "main.js",
   "productName": "Topper",
   "author": "Topper",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win portable --x64"
+    "dist": "npm run dist:installer",
+    "dist:installer": "electron-builder --win nsis --x64",
+    "dist:portable": "electron-builder --win portable --x64"
   },
   "dependencies": {
-    "22": "^0.0.0",
     "ws": "^8.17.0"
   },
   "devDependencies": {
@@ -19,23 +20,43 @@
   },
   "build": {
     "appId": "com.topper.meetingcaption",
+    "productName": "Topper",
+    "protocols": [
+      {
+        "name": "Topper Interview Copilot",
+        "schemes": [
+          "topper"
+        ]
+      }
+    ],
     "directories": {
       "output": "dist/Topper-v${version}"
     },
-    "productName": "Topper",
     "win": {
       "target": [
         {
-          "target": "portable",
+          "target": "nsis",
           "arch": [
             "x64"
           ]
         }
       ],
-      "artifactName": "Topper-v${version}.${ext}"
+      "artifactName": "Topper-Setup-v${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": false,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "shortcutName": "Topper",
+      "artifactName": "Topper-Setup-v${version}.${ext}"
     },
     "portable": {
-      "artifactName": "Topper-v${version}.${ext}"
+      "artifactName": "Topper-v${version}-Portable.${ext}"
     },
     "files": [
       "main.js",
