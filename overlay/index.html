@@ -34,20 +34,22 @@
     <div id="transcriptPane" class="v7TranscriptPane">
       <div class="paneTitle transcriptTitle"><span>LIVE QUESTIONS</span><span id="sendFeedback" class="sendFeedback"></span></div>
       <div id="transcript" class="transcript v7Transcript"><div class="transcriptEmpty">Waiting for system audio...</div></div>
-      <div id="transcriptResize" class="transcriptResize" title="Drag to increase or shrink question history"></div>
+      <div id="transcriptResize" class="transcriptResize"></div>
     </div>
 
     <div class="v6Controls">
       <textarea id="manualPrompt" class="manualPrompt" rows="3" placeholder="Type a question, or capture one or more screens..." autocomplete="off"></textarea>
       <div class="controlToolbar">
-        <button id="captureWindowBtn" class="actionBtn captureBtn" title="Capture the current physical screen and append its visible content to the prompt">Capture Screen</button>
-        <button id="autoSendBtn" class="actionBtn" title="Automatically send after the question is stable">Auto Send: OFF</button>
-        <button id="sendBtn" class="actionBtn sendBtn" title="Send only unsent transcript or typed text">Send</button>
+        <button id="captureWindowBtn" class="actionBtn captureBtn">Capture Screen</button>
+        <button id="autoSendBtn" class="actionBtn">Auto Send: OFF</button>
+        <button id="sendBtn" class="actionBtn sendBtn">Send</button>
       </div>
     </div>
   </section>
   <div class="resizeHint" aria-hidden="true"></div>
 </div>
+<!-- Protected renderer-only pointer: visible locally, excluded from capture with Topper. -->
+<div id="privateCursor" class="privateCursor" aria-hidden="true"></div>
 <script src="overlay.js"></script>
 </body>
 </html>

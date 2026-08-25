@@ -1,5 +1,27 @@
 const $ = id => document.getElementById(id);
 const appEl = $('app');
+const privateCursor = $('privateCursor');
+let privateCursorHotspot={x:0,y:0};
+
+window.electronAPI.onPrivateCursorVisual(data => {
+  if (!privateCursor||!data?.dataUrl) return;
+  privateCursor.style.width=`${Number(data.width)||24}px`;
+  privateCursor.style.height=`${Number(data.height)||32}px`;
+  privateCursor.style.backgroundImage=`url("${data.dataUrl}")`;
+  privateCursorHotspot={x:Number(data.hotspotX)||0,y:Number(data.hotspotY)||0};
+});
+
+// Main-process screen-coordinate polling continues across draggable header and
+// native frame areas where Chromium mousemove events are intentionally absent.
+window.electronAPI.onPrivateCursorPosition(data => {
+  if (!privateCursor || !data?.visible) { privateCursor?.classList.remove('visible');return; }
+  privateCursor.style.transform=`translate3d(${(Number(data.x)||0)-privateCursorHotspot.x}px,${(Number(data.y)||0)-privateCursorHotspot.y}px,0)`;
+  privateCursor.classList.add('visible');
+});
+document.addEventListener('mousedown', () => privateCursor?.classList.add('pressed'), true);
+document.addEventListener('mouseup', () => privateCursor?.classList.remove('pressed'), true);
+// Disable browser/native title popups throughout the overlay.
+document.querySelectorAll('[title]').forEach(element => element.removeAttribute('title'));
 const joinPanel = $('joinPanel');
 const livePanel = $('livePanel');
 const joinBtn = $('joinBtn');
@@ -36,6 +58,14 @@ let llmRequestId = 0;
 let activeStreamRequestId = null;
 let streamHasText = false;
 let streamedAnswerText = '';
+let manualPromptContainsCapture = false;
+let manualPromptTaskType = 'other';
+let manualSendTimer = null;
+let manualSendStartedAt = 0;
+const MANUAL_SEND_QUIET_MS = 180;
+const MANUAL_SEND_MAX_WAIT_MS = 650;
+const MANUAL_COMMIT_DEDUPE_MS = 6500;
+let manualCommitGuard = { text:'', at:0 };
 
 function renderPlainAnswer(text) {
   streamedAnswerText = String(text || '').replace(/\*\*/g, '');
@@ -169,7 +199,7 @@ function renderTranscript({ followLatest = true } = {}) {
 
   const pendingItems = finalLines.filter(item => !item.sent);
   const pendingBase = pendingItems.map(item => item.text).join(' ').replace(/\s+/g, ' ').trim();
-  const pendingText = [pendingBase, interimText].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+  const pendingText = mergeTranscriptText(pendingBase,interimText);
   if (pendingText) {
     const pending = document.createElement('div');
     pending.className = `transcriptQuestion pendingQuestion${interimText ? ' interimQuestion' : ''}`;
@@ -179,6 +209,15 @@ function renderTranscript({ followLatest = true } = {}) {
   if (followLatest) requestAnimationFrame(() => { transcriptEl.scrollTop = transcriptEl.scrollHeight; });
 }
 function markPendingTranscriptSent() {
+  // Promote the visible interim tail into transcript history before clearing it.
+  // This keeps the exact words sent by Send/Ctrl+Enter visible and prevents the
+  // final line from remaining behind as a new unsent fragment.
+  if (interimText) {
+    const pendingIndex=finalLines.findIndex(item=>!item.sent);
+    if (pendingIndex>=0) finalLines[pendingIndex].text=mergeTranscriptText(finalLines[pendingIndex].text,interimText);
+    else finalLines.push({text:interimText,sent:false});
+    interimText='';
+  }
   finalLines.forEach(item => { if (!item.sent) item.sent = true; });
   renderTranscript();
 }
@@ -188,11 +227,53 @@ function getCompleteUnsentTranscript() {
   // the last send. Include the current interim tail so Send/Ctrl+Enter cannot lose
   // words that are already visible in Live Questions but not yet speech_final.
   const finalized = finalLines.filter(item => !item.sent).map(item => item.text).join(' ');
-  const visible = [finalized, interimText].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+  const visible = mergeTranscriptText(finalized,interimText);
   if (visible) return visible;
   // Fallback for an edge case where a finalized chunk reached the utterance buffer
   // before the transcript row was painted.
   return utteranceParts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function comparableWords(text) {
+  return String(text||'').trim().split(/\s+/).filter(Boolean).map(word=>word.toLowerCase().replace(/^[^a-z0-9+#]+|[^a-z0-9+#]+$/gi,'')).filter(Boolean);
+}
+
+function mergeTranscriptText(base,tail) {
+  const left=String(base||'').replace(/\s+/g,' ').trim();
+  const right=String(tail||'').replace(/\s+/g,' ').trim();
+  if(!left)return right;
+  if(!right)return left;
+  const leftOriginal=left.split(/\s+/),rightOriginal=right.split(/\s+/);
+  const leftWords=comparableWords(left),rightWords=comparableWords(right);
+  const maximum=Math.min(80,leftWords.length,rightWords.length);
+  for(let count=maximum;count>=2;count--){
+    if(leftWords.slice(-count).join(' ')===rightWords.slice(0,count).join(' ')){
+      return [...leftOriginal,...rightOriginal.slice(count)].join(' ').trim();
+    }
+  }
+  return `${left} ${right}`.trim();
+}
+
+function stripCommittedOverlap(incoming) {
+  const raw=String(incoming||'').trim();
+  if (!raw||!manualCommitGuard.text||Date.now()-manualCommitGuard.at>MANUAL_COMMIT_DEDUPE_MS) return raw;
+  const committed=comparableWords(manualCommitGuard.text);
+  const incomingOriginal=raw.split(/\s+/).filter(Boolean);
+  const incomingComparable=comparableWords(raw);
+  if (!committed.length||!incomingComparable.length) return raw;
+
+  // Deepgram can emit a late final containing the same cumulative words that
+  // were already visible and manually committed. Remove the longest exact
+  // suffix/prefix overlap; keep only genuinely new words spoken after Enter.
+  const maximum=Math.min(80,committed.length,incomingComparable.length);
+  for(let count=maximum;count>=2;count--){
+    const committedTail=committed.slice(-count).join(' ');
+    const incomingHead=incomingComparable.slice(0,count).join(' ');
+    if(committedTail===incomingHead)return incomingOriginal.slice(count).join(' ').trim();
+  }
+  // A short late interim can be fully contained at the committed tail.
+  if(incomingComparable.length>=2&&committed.slice(-incomingComparable.length).join(' ')===incomingComparable.join(' '))return '';
+  return raw;
 }
 
 // Growing Live Questions grows the whole overlay by the same amount, preserving LLM answer room.
@@ -237,16 +318,23 @@ function isLikelyContinuation(fragment) {
   return /^(and|also|but|or|then|so|because|which|where|when|with|without|using|for|from|in|on|to|if|while|plus|along with)\b/.test(q);
 }
 
-function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = '' } = {}) {
+function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = '', inputSource = '' } = {}) {
   clearTimeout(llmTimer);
+  clearTimeout(manualSendTimer);
+  manualSendTimer=null;
+  manualSendStartedAt=0;
   const spoken = (replacementText || getCompleteUnsentTranscript()).replace(/\s+/g, ' ').trim();
-  const typed = String(typedText || '').replace(/\s+/g, ' ').trim();
+  // Preserve line breaks and code indentation from typed/captured prompts.
+  const typed = String(typedText || '').replace(/\r/g,'').trim();
   const text = typed || spoken;
+  const source=inputSource||(typed?(manualPromptContainsCapture?`screen-capture-${manualPromptTaskType}`:'typed'):'system-audio');
 
   if (!text || text.length < 2) {
     feedback('Nothing to send.', true);
     return false;
   }
+
+  if (!typed&&!auto) manualCommitGuard={text,at:Date.now()};
 
   // A manually typed prompt is authoritative for this turn. When the user explicitly
   // presses Send/Enter, close any pending system-audio question as already read so it
@@ -254,7 +342,6 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   // is sent to the LLM; the pending speech remains visible below as dim history.
   if (typed) {
     utteranceParts = [];
-    interimText = '';
     markPendingTranscriptSent();
     clearTimeout(llmTimer);
     lastSendWasAuto = false;
@@ -263,6 +350,8 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
     activeAutoLineIndex = -1;
     clearTimeout(autoFinalizeTimer);
     manualPrompt.value = '';
+    manualPromptContainsCapture = false;
+    manualPromptTaskType = 'other';
   } else {
     utteranceParts = [];
     // Manual sends close the current transcript question immediately. Auto sends keep
@@ -308,7 +397,7 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   // The answer body is replaced only when the first token of the new answer arrives.
   modelLabel.textContent = 'Thinking… · retrieving context…';
   feedback(auto ? 'Auto sent' : 'Sent');
-  window.electronAPI.startLLMStream({ requestId, text, licenseEmail:effectiveEmail() });
+  window.electronAPI.startLLMStream({ requestId, text, inputSource:source, licenseEmail:effectiveEmail() });
   return true;
 }
 
@@ -339,24 +428,49 @@ autoSendBtn.onclick = () => {
 };
 function sendManualOrPending() {
   const typed = manualPrompt.value.trim();
-  if (typed) return sendUtteranceToLLM({ auto:false, typedText:typed });
-  const recent = getCompleteUnsentTranscript();
-  if (recent) return sendUtteranceToLLM({ auto:false, replacementText:recent });
-  feedback('Nothing to send.', true);
-  return false;
+  if (typed) return sendUtteranceToLLM({auto:false,typedText:typed,inputSource:manualPromptContainsCapture?`screen-capture-${manualPromptTaskType}`:'typed'});
+  clearTimeout(manualSendTimer);
+  if (!manualSendStartedAt) manualSendStartedAt=Date.now();
+  const run=()=>{
+    const quietFor=Date.now()-lastTranscriptAt;
+    const waited=Date.now()-manualSendStartedAt;
+    if (lastTranscriptAt&&quietFor<MANUAL_SEND_QUIET_MS&&waited<MANUAL_SEND_MAX_WAIT_MS) {
+      manualSendTimer=setTimeout(run,Math.min(MANUAL_SEND_QUIET_MS-quietFor,80));return;
+    }
+    manualSendStartedAt=0;
+    const recent=getCompleteUnsentTranscript();
+    if (recent) sendUtteranceToLLM({auto:false,replacementText:recent,inputSource:'system-audio'});
+    else feedback('Nothing to send.',true);
+  };
+  run();
+  return true;
 }
 
 async function copyRecentAndSend() {
-  const recent = getCompleteUnsentTranscript();
-  if (!recent) { feedback('Nothing to send.', true); return false; }
-
-  // Ctrl+Enter copies the latest unsent captured question to the Windows clipboard
-  // and sends the exact same question to the LLM. It intentionally does not alter
-  // or focus the manual input field, so the clipboard remains ready for Ctrl+V in
-  // another Windows application.
-  const copied = await window.electronAPI.copyToClipboard(recent).catch(() => ({ success:false }));
-  if (!copied?.success) feedback('Could not copy prompt to clipboard.', true);
-  return sendUtteranceToLLM({ auto:false, replacementText:recent });
+  const typed=manualPrompt.value.trim();
+  if (typed) {
+    const copied=await window.electronAPI.copyToClipboard(typed).catch(()=>({success:false}));
+    if (!copied?.success) feedback('Could not copy prompt to clipboard.',true);
+    return sendUtteranceToLLM({auto:false,typedText:typed,inputSource:manualPromptContainsCapture?`screen-capture-${manualPromptTaskType}`:'typed'});
+  }
+  clearTimeout(manualSendTimer);
+  if (!manualSendStartedAt) manualSendStartedAt=Date.now();
+  const run=async()=>{
+    const quietFor=Date.now()-lastTranscriptAt;
+    const waited=Date.now()-manualSendStartedAt;
+    if (lastTranscriptAt&&quietFor<MANUAL_SEND_QUIET_MS&&waited<MANUAL_SEND_MAX_WAIT_MS) {
+      manualSendTimer=setTimeout(run,Math.min(MANUAL_SEND_QUIET_MS-quietFor,80));return;
+    }
+    manualSendStartedAt=0;
+    const recent=getCompleteUnsentTranscript();
+    if (!recent) { feedback('Nothing to send.',true);return; }
+    // Copy and send the same complete snapshot after the short transcript flush.
+    const copied=await window.electronAPI.copyToClipboard(recent).catch(()=>({success:false}));
+    if (!copied?.success) feedback('Could not copy prompt to clipboard.',true);
+    sendUtteranceToLLM({auto:false,replacementText:recent,inputSource:'system-audio'});
+  };
+  run();
+  return true;
 }
 
 
@@ -390,6 +504,8 @@ async function captureWindowAndSolve() {
     const block = String(extracted.text).trim();
     const existing = manualPrompt.value.trim();
     manualPrompt.value = existing ? `${existing}\n\n--- CAPTURE ${Date.now()} ---\n${block}` : block;
+    manualPromptContainsCapture = true;
+    if(['code','diagram'].includes(extracted.taskType))manualPromptTaskType=extracted.taskType;
     // Captured text is deliberately staged, not auto-sent: repeated captures accumulate here.
     manualPrompt.classList.remove('hidden');
     manualPrompt.scrollTop = manualPrompt.scrollHeight;
@@ -406,6 +522,7 @@ async function captureWindowAndSolve() {
 }
 
 captureWindowBtn.onclick = captureWindowAndSolve;
+manualPrompt.addEventListener('input',()=>{if(!manualPrompt.value.trim()){manualPromptContainsCapture=false;manualPromptTaskType='other'}});
 
 sendBtn.onclick = sendManualOrPending;
 
@@ -438,6 +555,10 @@ window.electronAPI.onLLMStream(msg => {
     }
     // Append each provider delta immediately. Avoid rebuilding the whole answer on every token.
     appendPlainAnswerDelta(msg.delta || '');
+  } else if (msg.type === 'replace') {
+    streamHasText=true;
+    renderPlainAnswer(msg.text||'No answer returned.');
+    answerEl.scrollTop=0;
   } else if (msg.type === 'meta') {
     if (msg.phase === 'retrieval') {
       const bits = [];
@@ -447,6 +568,8 @@ window.electronAPI.onLLMStream(msg => {
       modelLabel.textContent = bits.join(' · ') || msg.model || '';
     } else if (msg.phase === 'retry') {
       modelLabel.textContent = 'provider retry…';
+    } else if (msg.phase === 'format-retry') {
+      modelLabel.textContent='completing required format…';
     } else if (msg.phase === 'complete' && msg.latency) {
       const first = msg.latency.firstTokenMs;
       modelLabel.textContent = `${msg.model || ''}${Number.isFinite(first) ? ` · first ${first}ms` : ''}`.trim();
@@ -470,7 +593,13 @@ window.electronAPI.onSpeechStart(() => { statusEl.textContent = 'Speech detected
 window.electronAPI.onCredits(updateCredits);
 window.electronAPI.onTranscript(({text,isFinal}) => {
   if (!text) return;
-  const clean = text.trim();
+  const clean = stripCommittedOverlap(text);
+  if (!clean) {
+    if (!isFinal) interimText='';
+    renderTranscript({followLatest:false});
+    return;
+  }
+  lastTranscriptAt = Date.now();
   if (isFinal) {
     const now = Date.now();
     const withinMergeWindow = lastSendWasAuto && lastAutoSentText && (now - lastAutoSentAt) <= AUTO_MERGE_WINDOW_MS;
@@ -479,7 +608,7 @@ window.electronAPI.onTranscript(({text,isFinal}) => {
     if (shouldMerge) {
       // Any speech that resumes during the continuation window belongs to the same auto question.
       // Keep one transcript line, cancel the stale generation, combine ALL fragments, and regenerate.
-      const combined = `${lastAutoSentText} ${clean}`.replace(/\s+/g, ' ').trim();
+      const combined = mergeTranscriptText(lastAutoSentText,clean);
       lastAutoSentText = combined;
       lastAutoSentAt = now;
       lastTranscriptAt = now;
@@ -506,7 +635,7 @@ window.electronAPI.onTranscript(({text,isFinal}) => {
       // A new line is created only after the previous question has actually been sent.
       const pendingIndex = finalLines.findIndex(item => !item.sent);
       if (pendingIndex >= 0) {
-        finalLines[pendingIndex].text = `${finalLines[pendingIndex].text} ${clean}`.replace(/\s+/g, ' ').trim();
+        finalLines[pendingIndex].text = mergeTranscriptText(finalLines[pendingIndex].text,clean);
       } else {
         finalLines.push({ text: clean, sent: false });
       }

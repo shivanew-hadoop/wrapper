@@ -1,5 +1,5 @@
 // main.js — Electron main process: setup -> Windows system audio -> STT -> low-latency RAG LLM overlay
-const { app, BrowserWindow, ipcMain, screen, globalShortcut, desktopCapturer, session, clipboard, safeStorage, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, globalShortcut, desktopCapturer, session, clipboard, safeStorage, shell, nativeImage } = require('electron');
 const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -16,6 +16,12 @@ else app.setAsDefaultProtocolClient('topper');
 const { startRemoteTranscriptStream, sendAudioChunk, stopRemoteTranscriptStream } = require('./transcriber/remoteDeepgram');
 
 let overlayWindow = null;
+let publicCursorWindow = null;
+let cursorTrackerTimer = null;
+let cursorInsideOverlay = false;
+let lastPrivateCursorPoint = '';
+const fallbackCursorSvg='<svg xmlns="http://www.w3.org/2000/svg" width="24" height="32" viewBox="0 0 24 32"><path d="M2 1v25l6.7-6.1 4.2 9.1 4-1.9-4.2-8.8H22z" fill="white" stroke="#111" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+let cursorVisual={dataUrl:`data:image/svg+xml;base64,${Buffer.from(fallbackCursorSvg).toString('base64')}`,width:24,height:32,hotspotX:2,hotspotY:1};
 let setupWindow = null;
 let captureWindow = null;
 let overlayCollapsed = false;
@@ -111,6 +117,107 @@ async function validateLicenseWithBackend({ licenseEmail }) {
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
+function queryWindowsRegistry(name) {
+  return new Promise(resolve => execFile('reg.exe',['query','HKCU\\Control Panel\\Cursors','/v',name],{windowsHide:true},(error,stdout) => {
+    if (error) return resolve('');
+    const match=String(stdout||'').match(/REG_(?:SZ|EXPAND_SZ|DWORD)\s+(.+)$/mi);
+    resolve(match ? match[1].trim() : '');
+  }));
+}
+
+async function loadSystemCursorVisual() {
+  if (process.platform!=='win32') return cursorVisual;
+  try {
+    let [cursorPath,baseSizeRaw]=await Promise.all([queryWindowsRegistry('Arrow'),queryWindowsRegistry('CursorBaseSize')]);
+    cursorPath=cursorPath.replace(/^"|"$/g,'').replace(/%([^%]+)%/g,(_match,name)=>{
+      const key=Object.keys(process.env).find(item=>item.toLowerCase()===String(name).toLowerCase());
+      return key?process.env[key]:_match;
+    });
+    if (!cursorPath) cursorPath=path.join(process.env.SystemRoot||'C:\\Windows','Cursors','aero_arrow.cur');
+    if (!fs.existsSync(cursorPath)) return cursorVisual;
+    const bytes=fs.readFileSync(cursorPath);
+    let image=nativeImage.createFromPath(cursorPath);
+    if (image.isEmpty()) image=nativeImage.createFromBuffer(bytes);
+    if (image.isEmpty()) return cursorVisual;
+    const sourceSize=image.getSize();
+    const configuredBase=/^0x/i.test(baseSizeRaw)?parseInt(baseSizeRaw,16):parseInt(baseSizeRaw,10);
+    const targetBase=Number.isFinite(configuredBase)?Math.max(16,Math.min(96,configuredBase)):0;
+    if (targetBase&&sourceSize.width!==targetBase) image=image.resize({width:targetBase,height:targetBase,quality:'best'});
+    const size=image.getSize();
+    const isCur=path.extname(cursorPath).toLowerCase()==='.cur'&&bytes.length>=22;
+    const entryWidth=isCur?(bytes[6]||256):(size.width||32),entryHeight=isCur?(bytes[7]||256):(size.height||32);
+    const hotspotX=isCur?bytes.readUInt16LE(10):0;
+    const hotspotY=isCur?bytes.readUInt16LE(12):0;
+    cursorVisual={
+      dataUrl:image.toDataURL(),
+      width:Math.max(16,Math.min(96,size.width||entryWidth)),
+      height:Math.max(16,Math.min(96,size.height||entryHeight)),
+      hotspotX:Math.round(hotspotX*((size.width||entryWidth)/entryWidth)),
+      hotspotY:Math.round(hotspotY*((size.height||entryHeight)/entryHeight))
+    };
+  } catch (err) { console.warn('[Cursor] Windows cursor fallback:',err.message); }
+  return cursorVisual;
+}
+
+function createPublicCursorWindow(point) {
+  if (publicCursorWindow && !publicCursorWindow.isDestroyed()) {
+    publicCursorWindow.setPosition(Math.round(point.x-cursorVisual.hotspotX),Math.round(point.y-cursorVisual.hotspotY),false);
+    publicCursorWindow.showInactive();
+    return;
+  }
+  publicCursorWindow = new BrowserWindow({
+    x:Math.round(point.x-cursorVisual.hotspotX),y:Math.round(point.y-cursorVisual.hotspotY),width:cursorVisual.width+2,height:cursorVisual.height+2,
+    frame:false, transparent:true, backgroundColor:'#00000000', show:false,
+    focusable:false, resizable:false, movable:false, minimizable:false,
+    maximizable:false, closable:false, skipTaskbar:true, alwaysOnTop:true,
+    webPreferences:{contextIsolation:true,nodeIntegration:false}
+  });
+  publicCursorWindow.setIgnoreMouseEvents(true);
+  publicCursorWindow.setAlwaysOnTop(true, 'floating');
+  publicCursorWindow.setVisibleOnAllWorkspaces(true, {visibleOnFullScreen:true});
+  // This window intentionally has no content protection. Screen-share viewers
+  // see this frozen pointer at the entry edge while Topper itself stays hidden.
+  const cursorHtml=`<!doctype html><style>html,body{margin:0;background:transparent;overflow:hidden}img{display:block;width:${cursorVisual.width}px;height:${cursorVisual.height}px}</style><img src="${cursorVisual.dataUrl}">`;
+  publicCursorWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(cursorHtml)}`);
+  publicCursorWindow.once('ready-to-show', () => publicCursorWindow?.showInactive());
+  publicCursorWindow.on('closed', () => { publicCursorWindow=null; });
+}
+
+function hidePublicCursorWindow() {
+  if (publicCursorWindow && !publicCursorWindow.isDestroyed()) publicCursorWindow.hide();
+}
+
+function stopPrivateCursorTracking() {
+  clearInterval(cursorTrackerTimer);
+  cursorTrackerTimer=null;
+  cursorInsideOverlay=false;
+  lastPrivateCursorPoint='';
+  hidePublicCursorWindow();
+}
+
+function startPrivateCursorTracking() {
+  stopPrivateCursorTracking();
+  if (overlayWindow&&!overlayWindow.isDestroyed()) overlayWindow.webContents.send('private-cursor-visual',cursorVisual);
+  cursorTrackerTimer=setInterval(() => {
+    if (!overlayWindow || overlayWindow.isDestroyed() || !overlayWindow.isVisible() || overlayWindow.isMinimized()) {
+      if (cursorInsideOverlay) overlayWindow?.webContents.send('private-cursor-position',{visible:false});
+      cursorInsideOverlay=false;lastPrivateCursorPoint='';hidePublicCursorWindow();return;
+    }
+    const point=screen.getCursorScreenPoint();
+    const bounds=overlayWindow.getBounds();
+    const inside=point.x>=bounds.x&&point.x<bounds.x+bounds.width&&point.y>=bounds.y&&point.y<bounds.y+bounds.height;
+    if (!inside) {
+      if (cursorInsideOverlay) overlayWindow.webContents.send('private-cursor-position',{visible:false});
+      cursorInsideOverlay=false;lastPrivateCursorPoint='';hidePublicCursorWindow();return;
+    }
+    if (!cursorInsideOverlay) createPublicCursorWindow(point);
+    cursorInsideOverlay=true;
+    const relative={visible:true,x:point.x-bounds.x,y:point.y-bounds.y};
+    const key=`${relative.x}:${relative.y}`;
+    if (key!==lastPrivateCursorPoint) { lastPrivateCursorPoint=key;overlayWindow.webContents.send('private-cursor-position',relative); }
+  },16);
+}
+
 async function captureCurrentScreen() {
   if (process.platform !== 'win32') throw new Error('Capture Screen currently requires Windows.');
   const startedAt = Date.now();
@@ -173,6 +280,7 @@ function createOverlayWindow() {
   });
   overlayWindow.setContentProtection(true);
   overlayWindow.loadFile(path.join(__dirname, 'overlay', 'index.html'));
+  overlayWindow.webContents.once('did-finish-load', startPrivateCursorTracking);
   overlayWindow.setContentProtection(true);
   // Use the strongest practical Windows top-most level and reassert it if another app steals Z-order.
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
@@ -192,7 +300,12 @@ function createOverlayWindow() {
   overlayWindow.on('resize', rememberBounds);
   overlayWindow.on('move', rememberBounds);
   overlayWindow.on('unmaximize', () => { if (expandedOverlayBounds) overlayWindow.setBounds(expandedOverlayBounds); });
-  overlayWindow.on('closed', () => { overlayWindow = null; });
+  overlayWindow.on('closed', () => {
+    stopPrivateCursorTracking();
+    if (publicCursorWindow && !publicCursorWindow.isDestroyed()) publicCursorWindow.destroy();
+    publicCursorWindow=null;
+    overlayWindow = null;
+  });
 }
 
 function configureSystemAudioCapture() {
@@ -389,6 +502,7 @@ ipcMain.on('ask-llm-stream', async (event, payload) => {
   const prompt = String(payload?.text || '').trim();
   const imageDataUrl = String(payload?.imageDataUrl || '').trim();
   const captureSource = String(payload?.captureSource || '').trim();
+  const inputSource = String(payload?.inputSource || '').trim().slice(0,40);
   const email = String(payload?.licenseEmail || global.currentLicenseEmail || '').trim().toLowerCase();
   const send = data => {
     try { if (!event.sender.isDestroyed()) event.sender.send('llm-stream', { requestId, ...data }); } catch (_) {}
@@ -401,7 +515,7 @@ ipcMain.on('ask-llm-stream', async (event, payload) => {
     const res = await fetch(`${backendBase()}/ask/stream`, {
       method:'POST', signal:controller.signal,
       headers:{'content-type':'application/json'},
-      body:JSON.stringify({ email, text:prompt, imageDataUrl, captureSource })
+      body:JSON.stringify({ email, text:prompt, imageDataUrl, captureSource, inputSource })
     });
     if (!res.ok) {
       const body = await res.text();
@@ -430,6 +544,7 @@ ipcMain.on('ask-llm-stream', async (event, payload) => {
         if (!dataLine) continue;
         let data; try { data = JSON.parse(dataLine); } catch (_) { data = { text:dataLine }; }
         if (eventName === 'delta') send({ type:'delta', delta:data.delta || '' });
+        else if (eventName === 'replace') send({type:'replace',text:data.text||''});
         else if (eventName === 'meta') send({ type:'meta', ...data });
         else if (eventName === 'done') send({ type:'done', ...data });
         else if (eventName === 'error') send({ type:'error', error:data.error || 'LLM stream failed' });
@@ -453,7 +568,7 @@ ipcMain.handle('extract-screen-text', async (_, payload) => {
     const res = await fetch(`${backendBase()}/extract-screen-text`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ email:String(payload?.licenseEmail || global.currentLicenseEmail || '').trim().toLowerCase(), imageDataUrl:String(payload?.imageDataUrl || ''), captureSource:String(payload?.captureSource || '') }) });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) return { success:false, error:data.error || `Screen text extraction failed (${res.status})` };
-    return { success:true, text:data.text || '', captureMs:data.captureMs || 0 };
+    return {success:true,text:data.text||'',taskType:String(data.taskType||'other').toLowerCase(),captureMs:data.captureMs||0};
   } catch (err) { return { success:false, error:err.message || 'Screen text extraction failed' }; }
 });
 
@@ -511,17 +626,18 @@ else app.on('second-instance', (_event, argv) => {
 
 app.whenReady().then(async () => {
   loadDesktopSession();
+  await loadSystemCursorVisual();
   configureSystemAudioCapture();
   createSetupWindow();
   if(pendingLaunchUrl)await handleLaunchUrl(pendingLaunchUrl);
   globalShortcut.register('CommandOrControl+Shift+T', () => {
     if (!overlayWindow) return;
     overlayWindow.isVisible() ? overlayWindow.hide() : overlayWindow.show();
-    overlayWindow.setAlwaysOnTop(true, 'floating');
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   });
 });
 
-app.on('will-quit', () => globalShortcut.unregisterAll());
+app.on('will-quit', () => { stopPrivateCursorTracking();globalShortcut.unregisterAll(); });
 app.on('window-all-closed', async () => {
   resetRuntimeFlags();
   await stopSystemAudioCapture().catch(() => {});

@@ -26,4 +26,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onStatus: (cb) => ipcRenderer.on('status', (_, msg) => cb(msg)),
   onSpeechStart: (cb) => ipcRenderer.on('speech-started', () => cb()),
   onCredits: (cb) => ipcRenderer.on('credits', (_, data) => cb(data)),
+  onPrivateCursorPosition: (cb) => ipcRenderer.on('private-cursor-position', (_, data) => cb(data)),
+  onPrivateCursorVisual: (cb) => ipcRenderer.on('private-cursor-visual', (_, data) => cb(data)),
 });
