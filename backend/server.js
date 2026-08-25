@@ -365,13 +365,65 @@ function isContextualFollowup(question) {
   const words = q.split(/\s+/).filter(Boolean);
   if (!q) return false;
   // Explicit references/modifiers are continuations even when they contain a technology name.
-  if (/\b(it|that|this|those|these|earlier|above|same|one example|another example|more detail|what about|how about|using|in java|in python|in c#|in c\+\+|show code|give code|show me|convert it|rewrite it|same in|do it in|instead|another one|dry run|time complexity|space complexity|edge cases?|optimi[sz]e)\b/.test(q)) return true;
+  if (/\b(it|that|this|those|these|earlier|above|same|one example|another example|more detail|what about|how about|show code|give code|convert it|rewrite it|same in|do it in|instead|another one|dry run|time complexity|space complexity|edge cases?|optimi[sz]e)\b/.test(q)) return true;
+  if (/^(?:in|using)\s+(?:java|python|c#|c\+\+|javascript|typescript|go|golang|rust|kotlin|swift)\??$/.test(q)) return true;
   if (/\b(explain|walk through|why did you|why have you|modify|change|fix)\b.*\b(code|logic|line|function|method|class|solution|algorithm|loop|map|array|string)\b/.test(q)) return true;
   // A clear standalone topic question should not be attached to the prior turn just because it is short.
   if (/^(what|who|why|when|where|which)\s+(is|are|was|were|do|does|did|can|could|should|would)\b/.test(q)) return false;
   if (/^(explain|define|describe|compare|differentiate|tell me about|difference between)\b/.test(q)) return false;
   // Very short fragments such as "why?", "how?", "example?" normally depend on the previous turn.
   return words.length <= 3;
+}
+function cleanIntentLead(value) {
+  let text=normalizeText(value)
+    .replace(/^(?:(?:okay|alright|right|well|so|and|then|now|you know|basically|actually)[,.:;]?\s+)+/i,'')
+    .replace(/\s+([?.!,;:])/g,'$1')
+    .trim();
+  if(text&&!/[?.!]$/.test(text))text+='?';
+  return text;
+}
+function reframeQuestionIntent(rawQuestion) {
+  const raw=normalizeText(rawQuestion);
+  if(!raw)return '';
+
+  // Select the last complete interviewer request locally. This avoids a second
+  // LLM/classifier request and prevents incidental earlier words from deciding
+  // the answer format.
+  const starter=/\b(?:have you|do you|did you|can you|could you|would you|will you|are you|were you|what|why|how|when|where|which|who|describe|explain|define|compare|tell me|walk me through|write|implement|find|solve|design|draw|create|show|debug|fix|calculate|return|print)\b/gi;
+  let candidate='';
+  const lastQuestionMark=raw.lastIndexOf('?');
+  if(lastQuestionMark>=0){
+    const priorBoundary=Math.max(raw.lastIndexOf('?',lastQuestionMark-1),raw.lastIndexOf('.',lastQuestionMark-1),raw.lastIndexOf('!',lastQuestionMark-1));
+    const segment=raw.slice(priorBoundary+1,lastQuestionMark+1);
+    const first=segment.match(starter);
+    candidate=first?segment.slice(segment.toLowerCase().indexOf(first[0].toLowerCase())):segment;
+  } else {
+    const pieces=raw.split(/(?<=[.!])\s+/).map(part=>part.trim()).filter(Boolean);
+    const lastRequest=[...pieces].reverse().find(part=>{starter.lastIndex=0;return starter.test(part);})||raw;
+    starter.lastIndex=0;
+    const matches=Array.from(lastRequest.matchAll(starter)).filter((match,index,all)=>{
+      if(!/^(?:have|do|did|can|could|would|will|are|were) you$/i.test(match[0]))return true;
+      const prior=all.filter(item=>(item.index||0)<(match.index||0)).at(-1);
+      return !prior||!/^(?:what|why|how|when|where|which|who)$/i.test(prior[0]);
+    });
+    const chosen=matches[matches.length-1];
+    candidate=chosen?lastRequest.slice(chosen.index):lastRequest;
+  }
+  candidate=cleanIntentLead(candidate);
+
+  // Resolve a common final-question pronoun from the same utterance. The raw
+  // transcript is still supplied to the answer model as context, never as the
+  // response-format signal.
+  if(/\b(?:that|it)\b/i.test(candidate)){
+    const before=raw.slice(0,Math.max(0,raw.toLowerCase().lastIndexOf(candidate.toLowerCase())));
+    const references=[
+      ...before.matchAll(/\b((?:agile|scrum|waterfall)\s+methodolog(?:y|ies))\b/gi),
+      ...before.matchAll(/\b([A-Za-z0-9+#./-]+(?:\s+(?:and\s+)?[A-Za-z0-9+#./-]+){0,4}\s+(?:integration|framework|platform|technology|module|process|approach))\b/gi)
+    ];
+    const reference=references.sort((a,b)=>(a.index||0)-(b.index||0)).at(-1)?.[1];
+    if(reference)candidate=candidate.replace(/\b(?:that|it)\b/i,reference);
+  }
+  return candidate.slice(0,2000);
 }
 function resolveFollowupIntent(session, question) {
   const previous = session?.turns?.[session.turns.length - 1];
@@ -397,12 +449,29 @@ function isDiagramQuestion(prompt) {
   return /\b(flow\s*chart|flow\s*diagram|architecture\s*(?:flow|diagram)|sequence\s*diagram|data\s*flow|component\s*diagram|block\s*diagram|draw\s+(?:the|a|an)?\s*(?:flow|architecture|diagram)|diagram\s+(?:for|of|showing)|draw\.io|drawio|notepad\s+diagram)\b/i.test(String(prompt||''));
 }
 function isCodingQuestion(prompt) {
-  const q=String(prompt||'');
-  if (/```|\b(write|provide|show|give|implement|complete|debug|fix|compile|runnable)\b.{0,35}\b(code|program|function|method|class|algorithm|solution)\b/i.test(q)) return true;
-  if (/\b(code|coding|programming|leetcode|hackerrank|pseudocode|algorithm)\b/i.test(q)) return true;
-  return /\b(find|return|print|calculate|check|remove|reverse|sort|search|merge|validate|count)\b.{0,55}\b(string|character|char|array|list|linked list|tree|graph|number|integer|duplicate|non[- ]?repeating|unique|palindrome|anagram|substring|subarray)\b/i.test(q)
-    || /\b(first|last)\s+(?:non[- ]?)?(?:duplicate|repeating|unique)\s+(?:character|char|element)\b/i.test(q)
-    || /\b(public|private|static|class|interface|def|function|method|main\s*\(|console\.log|system\.out|return)\b[^\n]{0,120}/i.test(q);
+  const q=normalizeText(prompt);
+  if(!q)return false;
+  const explicitRequest=/\b(?:write|provide|show|give|implement|complete|create|debug|fix|compile|solve)\b.{0,45}\b(?:code|program|function|method|class|algorithm|solution|implementation)\b|\b(?:code|program|function|method|algorithm|solution)\b.{0,35}\b(?:write|implement|debug|fix|complete|create)\b/i.test(q);
+  const experienceQuestion=/\b(?:have you|do you have|did you|experience (?:with|in)|worked (?:with|on)|used (?:it|that|this|these|those)?\s*(?:in|on)?\s*(?:a|any|past|previous|production)|which project|tell me about your experience)\b/i.test(q);
+  // Mentioning "code", "coding" or a "module" in an experience question is
+  // not a request to manufacture a program.
+  if(experienceQuestion&&!explicitRequest)return false;
+  if(explicitRequest||/```|\b(?:leetcode|hackerrank)\b/i.test(q))return true;
+  if(/\b(?:public|private|protected)\s+(?:static\s+)?(?:class|interface|void|int|string)|\bdef\s+\w+\s*\(|\bfunction\s+\w+\s*\(|\b(?:console\.log|system\.out\.println)\s*\(/i.test(q))return true;
+  return /\b(?:find|return|print|calculate|check|remove|reverse|sort|search|merge|validate|count|implement|solve)\b.{0,65}\b(?:string|character|char|array|list|linked list|tree|graph|number|integer|duplicate|non[- ]?repeating|unique|palindrome|anagram|substring|subarray)\b/i.test(q)
+    || /\bgiven\b.{0,55}\b(?:string|array|list|tree|graph|number|integer)\b.{0,100}\b(?:find|return|print|calculate|remove|reverse|sort|search|merge|count)\b/i.test(q)
+    || /\b(?:first|last)\s+(?:non[- ]?)?(?:duplicate|repeating|unique)\s+(?:character|char|element)\b/i.test(q);
+}
+function isCodingFollowupQuestion(question) {
+  const q=normalizeText(question);
+  if(!q)return false;
+  if(/\b(?:have you|do you have|experience (?:with|in)|worked (?:with|on)|which project|tell me about your experience)\b/i.test(q))return false;
+  return /\b(?:this|that|above|previous|earlier|same)\s+(?:code|program|function|method|class|algorithm|solution|line|loop|condition)\b/i.test(q)
+    || /\b(?:explain|change|modify|update|fix|debug|continue|rewrite|convert|optimi[sz]e|dry run)\b.{0,55}\b(?:code|program|function|method|class|algorithm|solution|line|loop|condition|hashmap|map|array|string)\b/i.test(q)
+    || /\b(?:why|how)\b.{0,55}\b(?:line|loop|condition|function|method|hashmap|map|array|stack|queue|recursion|time complexity|space complexity)\b/i.test(q)
+    || /\b(?:what|which)\b.{0,55}\b(?:line|loop|condition|function|method)\b/i.test(q)
+    || /^(?:in|using)\s+(?:java|python|c#|c\+\+|javascript|typescript|go|golang|rust|kotlin|swift)\??$/i.test(q)
+    || /\b(?:time|space) complexity\b|\bedge cases?\b/i.test(q);
 }
 function classifyResponseType(question,followupInfo=null,inputSource='') {
   const previous=followupInfo?.previous;
@@ -410,13 +479,15 @@ function classifyResponseType(question,followupInfo=null,inputSource='') {
   if(/screen-capture-diagram/i.test(inputSource))return 'diagram';
   if(/screen-capture-code/i.test(inputSource))return 'code';
   if (isDiagramQuestion(question)) return 'diagram';
-  if (isCodingQuestion(question)||(followupInfo?.isFollowup&&previousCoding)) return 'code';
+  if (isCodingQuestion(question)||(previousCoding&&isCodingFollowupQuestion(question))) return 'code';
   return 'spoken';
 }
 function responseMode(question, followupInfo=null, inputSource='') {
   const type=classifyResponseType(question,followupInfo,inputSource);
-  if (type==='code') return `CODING_REQUIRED${followupInfo?.isFollowup?'_FOLLOW_UP':''}: Start with "Logic:" and explain the simple approach in 1-2 concise lines. Then write "Complete code:" and provide one complete working solution in the requested or context-supported language. Include concise inline comments for every meaningful logical step. ${followupInfo?.isFollowup?'Explain the requested follow-up first, then repeat the complete prior solution with the required explanation/change so coding can continue without losing context.':''}`;
-  if (type==='diagram') return 'DRAWABLE_DIAGRAM_REQUIRED: Give a one-line overview, then a detailed monospaced ASCII flow that can be copied into Notepad or redrawn in draw.io. Use clearly named boxes, vertical arrows, branch labels, data/control direction, external systems and failure/return paths where relevant. Follow the diagram with only the essential explanation.';
+  const codingFollowup=type==='code'&&!!followupInfo?.previous&&isCodingFollowupQuestion(question);
+  if (type==='code'&&codingFollowup) return 'CODING_REQUIRED_FOLLOW_UP: Answer the current follow-up directly in 1-3 short sentences. Then write "Logic:" with the simple approach in 1-2 concise lines, followed by "Complete code:" and the entire previous working solution, updated only when the follow-up requests a change. Include concise inline comments for every meaningful logical step so coding can continue without losing context.';
+  if (type==='code') return 'CODING_REQUIRED: Start with "Logic:" and explain the simple approach in 1-2 concise lines. Then write "Complete code:" and provide one complete working solution in the requested or context-supported language. Include concise inline comments for every meaningful logical step.';
+  if (type==='diagram') return 'DRAWABLE_DIAGRAM_REQUIRED: Give a one-line overview, then a detailed monospaced Unicode box-drawing flow that can be copied into Notepad or redrawn in draw.io. Use boxes made with ┌ ─ ┐ │ └ ┘, directional arrows, branch labels, data/control direction, external systems and failure/return paths where relevant. Follow the diagram with only the essential explanation.';
   return `SPOKEN_CONCISE${String(inputSource).startsWith('screen-capture')?' (screen-captured input; apply exactly the same quality and format rules as typed input)':''}`;
 }
 function answerTokenBudget(question, hasImage=false,responseType='') {
@@ -428,7 +499,7 @@ function answerTokenBudget(question, hasImage=false,responseType='') {
   return 260;
 }
 
-function buildPrompt(session, question, retrieved, followupInfo=null, correctedQuestion=question, inputSource='') {
+function buildPrompt(session, question, retrieved, followupInfo=null, correctedQuestion=question, inputSource='',intentQuestion=correctedQuestion) {
   const profile = session.profile || {};
   const history = session.turns.slice(-MAX_HISTORY_TURNS).map((t,i) => `Turn ${i+1}\nInterviewer: ${t.question}\nCandidate: ${t.answer}`).join('\n\n');
   const evidence = retrieved.map((c,i) => `[${i+1}] ${c.source.toUpperCase()} · ${c.section}\n${c.text.slice(0, 900)}`).join('\n\n');
@@ -436,12 +507,14 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
   const followup = info.isFollowup
     ? `YES. Treat the current words as a continuation/modifier of the immediately previous interviewer request. Resolved intent:\n${info.resolvedQuestion}`
     : 'NO';
-  return `CANDIDATE PROFILE\nYears: ${session.yearsExperience}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || ''}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'No previous turns.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(question,info,inputSource)}\n\nCURRENT INTERVIEWER WORDS (canonical terminology already resolved where confidence is high)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(question) ? 'Expanded answer requested.' : 'Default: concise spoken answer.'}`;
+  return `CANDIDATE PROFILE\nYears: ${session.yearsExperience}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || ''}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'No previous turns.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: concise spoken answer.'}`;
 }
 const COPILOT_INSTRUCTIONS = `You are the candidate in a live senior/lead engineer interview. Return one directly usable answer. Normal answers must be immediately speakable; coding and diagram questions must use the exact practical formats below. Never mention AI, ChatGPT, copilot, prompts, retrieval, resume, CV, JD, transcription correction, evidence matching, or how you inferred the question. Never say "based on my CV/JD", "the resume confirms", "not listed", or similar meta commentary.
 
 UNDERSTAND THE INTERVIEWER, NOT THE RAW TRANSCRIPT:
 The input is noisy live speech. Remove repetitions, fillers and false starts such as "okay", "basically", "you know", duplicated words and incomplete lead-ins. Infer the final intended technical question from the complete current utterance plus recent interview turns. Silently repair phonetic technology names from the canonical Resume/JD vocabulary and surrounding topic. Never say "you mean", "not X", "I assume", or ask for confirmation when one interpretation is clearly supported by context.
+
+Use REFRAMED CURRENT INTENT as the authoritative current question and RESPONSE MODE as the authoritative output format. RAW CURRENT TRANSCRIPT is context only. The mere presence of words such as code, coding, development, DevOps, program, class, module, Java or Python never makes an experience, behavioral, conceptual or project question a coding task. Do not carry a prior coding format into a new topic. Continue in coding format only when the current intent explicitly requests implementation/code or clearly asks about the immediately previous code.
 
 Treat adjacent/continued interviewer fragments as one intent only when they are clearly related. If the current fragment completes the prior question, answer the combined question. If one captured utterance contains two or more unrelated questions/topics, treat the LAST complete question as the intentional current request and ignore the earlier unrelated question(s). Combine multiple questions only when the interviewer explicitly asks to answer both/all of them or they are clearly parts of one request. Pronouns/modifiers such as "it", "that", "this", "those", "same", "using Java", "give one example", "give me two", "the second one", "what about security", and "how does that flow work" inherit the immediately preceding topic. Preserve explicit constraints exactly: requested count, language, format, scenario, flow, comparison, code contract, or output.
 
@@ -469,7 +542,7 @@ CODING QUESTIONS:
 When RESPONSE MODE says CODING_REQUIRED, code is mandatory even if the question came from screen capture and even if the interviewer did not literally say "code". Start with "Logic:" and give the simple approach in 1-2 concise lines. Then write "Complete code:" and provide one complete working end-to-end solution. Add concise inline comments to every meaningful logical step so I can explain it line by line. Preserve the requested language, visible method/class signatures, input/output contract and constraints. Never return explanation alone for an algorithmic problem. For a coding follow-up, place the requested explanation/change first and then repeat the complete earlier code, updated when required, so the candidate can continue from the full solution. A language-only follow-up preserves the previous task exactly and rewrites the complete solution in that language. For a visible error/edit, identify the exact failing block and still provide the complete corrected program when enough context is available. Mention complexity and edge cases briefly after code when useful.
 
 FLOW / ARCHITECTURE DIAGRAM QUESTIONS:
-When RESPONSE MODE says DRAWABLE_DIAGRAM_REQUIRED, a diagram is mandatory. Give one short overview line, then provide a detailed monospaced ASCII diagram designed to be copied into Notepad or redrawn in draw.io. Use readable boxes such as [Component], vertical layout where possible, arrows with direction, numbered steps, labelled decision branches, request/data paths, external dependencies, storage and error/return paths relevant to the question. Do not substitute a prose-only architecture explanation. After the diagram, add only the concise explanation needed to present the flow.
+When RESPONSE MODE says DRAWABLE_DIAGRAM_REQUIRED, a diagram is mandatory. Give one short overview line, then provide a detailed monospaced Unicode box-drawing diagram designed to be copied into Notepad or redrawn in draw.io. Build real boxes with ┌ ─ ┐ │ └ ┘, use a vertical layout where possible, and include arrows with direction, numbered steps, labelled decision branches, request/data paths, external dependencies, storage and error/return paths relevant to the question. Do not use a one-line arrow sentence or bracket-only placeholders such as [Component]. Do not substitute a prose-only architecture explanation. After the diagram, add only the concise explanation needed to present the flow.
 
 FORMAT:
 Return plain text only. Do not use Markdown bold/italic markers, decorative emphasis or colour-oriented formatting. The minimal labels "Logic:", "Complete code:" and "Flow diagram:" are required only for their matching response modes. Fenced code blocks are allowed when needed to preserve runnable code. Do not give competing solutions unless explicitly asked. Avoid generic transitions such as 'First', 'Second', 'Finally' unless sequence itself matters. Prefer concrete production nouns, exact roles/operations and the reason they were used. If the request is unclear, corrupted, unrelated to an interview, or cannot be answered reliably from the question and supplied context, say that briefly and ask for a clearer interview question; never invent missing facts. The final output must be accurate, brief and question-specific. Before returning, silently remove every sentence that does not directly help answer the exact current question.
@@ -477,10 +550,13 @@ Return plain text only. Do not use Markdown bold/italic markers, decorative emph
 CALIBRATION EXAMPLES:
 Interviewer: "Do you need Contributor at runtime?" Candidate: "No. Runtime only needs the least-privileged data-plane role required for reads. Contributor is needed only for deployment or management operations that change resources."
 Interviewer: "Have you used ToolX in production?" Candidate: "I haven't used ToolX in production. I understand its core pattern and would validate it first with a small POC covering integration, failure handling, security, and observability."
+Interviewer: "You mentioned code in your DevOps project. Have you used Agile methodology?" Candidate format: normal concise spoken experience answer; never Logic/Complete code.
+Interviewer: "Find the first non-repeating character in a string." Candidate format: Logic plus complete runnable code with inline comments.
+After a coding turn, interviewer: "Do you have experience with Xpedition and Capital integration?" Candidate format: normal concise spoken experience answer; never repeat the earlier code.
 Interviewer: "asdf asdf asdf" Candidate: "I’m not sure what you’re asking. Please rephrase the question."`
 function strictModeInstructions(responseType) {
   if(responseType==='code')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This is a coding response. Explanation without a complete compilable/runnable solution is invalid. Output Logic:, then Complete code:, then the full code with meaningful inline comments. For a follow-up, include the entire previous solution again after the explanation.';
-  if(responseType==='diagram')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This is a diagram response. A prose chain on one line is invalid. Output Flow diagram:, then a multi-line Notepad-friendly diagram containing at least three [Named boxes] connected by vertical or directional arrows. Include relevant branches and supporting components.';
+  if(responseType==='diagram')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This is a diagram response. A prose chain on one line is invalid. Output Flow diagram:, then a multi-line Notepad-friendly Unicode diagram containing at least three real boxes made with ┌ ─ ┐ │ └ ┘ and connected by directional arrows. Include relevant labelled branches and supporting components.';
   return '';
 }
 function removeExactRepeatedOutput(value) {
@@ -504,9 +580,34 @@ function hasCompleteCode(answer) {
 }
 function hasDrawableDiagram(answer) {
   const text=String(answer||'');
-  const boxes=(text.match(/\[[^\]\n]{2,}\]/g)||[]).length;
-  const connectors=(text.match(/(?:--?>|→|↓|\n\s*\|\s*\n|\n\s*v\s*\n)/g)||[]).length;
-  return boxes>=3&&connectors>=2;
+  const tops=(text.match(/^\s*┌[─-]{3,}┐\s*$/gm)||[]).length;
+  const bottoms=(text.match(/^\s*└[─-]{3,}┘\s*$/gm)||[]).length;
+  const connectors=(text.match(/[↓↑→←↔]|(?:--?>)|(?:\n\s*[│|]\s*\n)/g)||[]).length;
+  return Math.min(tops,bottoms)>=3&&connectors>=2;
+}
+function wrapDiagramLabel(value,maxWidth=48) {
+  const words=normalizeText(value).replace(/^\[[\s]*|[\s]*\]$/g,'').split(/\s+/).filter(Boolean);
+  const lines=[];
+  let line='';
+  for(const word of words){
+    if(!line){line=word.slice(0,maxWidth);continue;}
+    if(`${line} ${word}`.length<=maxWidth)line+=` ${word}`;
+    else {lines.push(line);line=word.slice(0,maxWidth);}
+  }
+  if(line)lines.push(line);
+  return lines.length?lines:['Step'];
+}
+function renderDiagramBox(label) {
+  const lines=wrapDiagramLabel(label);
+  const width=Math.max(24,Math.min(48,Math.max(...lines.map(line=>line.length))));
+  const fitted=[];
+  for(const line of lines){
+    if(line.length<=width)fitted.push(line);
+    else for(let start=0;start<line.length;start+=width)fitted.push(line.slice(start,start+width));
+  }
+  const finalWidth=Math.max(24,...fitted.map(line=>line.length));
+  const rule='─'.repeat(finalWidth+2);
+  return [`┌${rule}┐`,...fitted.map(line=>`│ ${line.padEnd(finalWidth)} │`),`└${rule}┘`].join('\n');
 }
 function makeDrawableDiagram(answer) {
   const clean=removeExactRepeatedOutput(answer);
@@ -516,10 +617,10 @@ function makeDrawableDiagram(answer) {
   let chainText=chain.includes(':')?chain.slice(chain.indexOf(':')+1):chain;
   const parts=chainText.split(/\s*(?:→|--?>)\s*/).map(item=>item.replace(/^[,;:\s]+|[.;:\s]+$/g,'').trim()).filter(Boolean);
   if(parts.length<3)return clean;
-  const diagram=parts.map((item,index)=>`${index?'   |\n   v\n':''}[${item}]`).join('\n');
+  const diagram=parts.map((item,index)=>`${index?'             ↓\n':''}${renderDiagramBox(item)}`).join('\n');
   const foundation=segments.find(item=>/\b(master[- ]data foundation|below that|supporting components?)\b/i.test(item));
-  const foundationBoxes=foundation?foundation.replace(/^.*?:\s*/,'').replace(/[.]$/,'').split(/\s*,\s*|\s+and\s+/i).map(item=>item.trim()).filter(Boolean).map(item=>`[${item}]`).join('   '):'';
-  return `Flow diagram:\n\n${diagram}${foundationBoxes?`\n\nSupporting foundation:\n${foundationBoxes}\n        \\____________ supports the complete flow ____________/`:''}`;
+  const foundationBoxes=foundation?foundation.replace(/^.*?:\s*/,'').replace(/[.]$/,'').split(/\s*,\s*|\s+and\s+/i).map(item=>item.trim()).filter(Boolean).map(renderDiagramBox).join('\n       ↓ supports\n'):'';
+  return `Flow diagram:\n\n${diagram}${foundationBoxes?`\n\nSupporting foundation:\n${foundationBoxes}\n       ↓ supports the complete flow`:''}`;
 }
 async function ensureModeConformance({answer,responseType,prompt,model,effort}) {
   let clean=removeExactRepeatedOutput(answer);
@@ -555,18 +656,19 @@ function addTurn(session, question, answer, retrieved=[],responseType='spoken') 
 async function prepareQuestion(email, question, {inputSource=''}={}) {
   const startedAt = Date.now();
   const session = interviewSessions.get(email);
-  const rejection = rejectLowConfidenceInput(question);
   let retrieved = [];
   let embeddingMs = 0, retrievalMs = 0;
   let retrievalMode = 'none';
   const canonical = session ? resolveCanonicalQuestion(session, question) : { corrected:question, replacements:[] };
   const correctedQuestion = canonical.corrected || question;
-  const followupInfo = session ? resolveFollowupIntent(session, correctedQuestion) : { isFollowup:false, resolvedQuestion:correctedQuestion, previous:null };
-  const responseType=classifyResponseType(correctedQuestion,followupInfo,inputSource);
+  const intentQuestion=reframeQuestionIntent(correctedQuestion)||correctedQuestion;
+  const rejection = rejectLowConfidenceInput(intentQuestion);
+  const followupInfo = session ? resolveFollowupIntent(session, intentQuestion) : { isFollowup:false, resolvedQuestion:intentQuestion, previous:null };
+  const responseType=classifyResponseType(intentQuestion,followupInfo,inputSource);
 
   if (!rejection && session?.chunks?.length) {
     const previous = followupInfo.previous;
-    const retrievalBase = followupInfo.isFollowup ? followupInfo.resolvedQuestion : correctedQuestion;
+    const retrievalBase = followupInfo.isFollowup ? followupInfo.resolvedQuestion : intentQuestion;
     const retrievalQuery = expandQuestionWithCanonicalTerms(session, retrievalBase);
 
     if (followupInfo.isFollowup && previous?.retrieved?.length) {
@@ -588,8 +690,8 @@ async function prepareQuestion(email, question, {inputSource=''}={}) {
       retrievalMode = 'vector-hybrid';
     }
   }
-  const prompt = session ? buildPrompt(session, question, retrieved, followupInfo, correctedQuestion,inputSource) : `INPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(question,followupInfo,inputSource)}\n\nINTERVIEWER QUESTION\n${question}\n\nDEPTH\n${wantsExpandedAnswer(question) ? 'Expanded answer requested.' : 'Default: concise spoken answer.'}`;
-  return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt } };
+  const prompt = session ? buildPrompt(session, question, retrieved, followupInfo, correctedQuestion,inputSource,intentQuestion) : `INPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,followupInfo,inputSource)}\n\nREFRAMED CURRENT INTENT\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: concise spoken answer.'}`;
+  return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, intentQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt } };
 }
 app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmModel:LLM_DEFAULT_MODEL, llmRouting:{enabled:false,mode:'terra-only',default:LLM_DEFAULT_MODEL}, embeddingModel:EMBEDDING_MODEL }));
 app.get('/health', (_req, res) => res.json({ ok:true }));
@@ -662,7 +764,7 @@ app.post('/ask', async (req, res) => {
     });
     let answer=outputText(data);
     answer=(await ensureModeConformance({answer,responseType:prepared.responseType,prompt:prepared.prompt,model:route.model,effort:route.effort})).answer;
-    if (prepared.session && answer) addTurn(prepared.session,text,answer,prepared.retrieved,prepared.responseType);
+    if (prepared.session && answer) addTurn(prepared.session,prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
     const latency = { embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, retrievalMode:prepared.latency.retrievalMode, promptReadyMs:prepared.latency.promptReadyMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt };
     console.log(`[LLM] ${email} model=${route.model} tier=${route.tier} total=${latency.totalMs}ms embed=${latency.embeddingMs}ms retrieve=${latency.retrievalMs}ms mode=${prepared.latency.retrievalMode} llm=${latency.llmMs}ms`);
     return res.json({ ok:true, answer, model:route.model, modelTier:route.tier, contextPrepared:!!prepared.session, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})), latency });
@@ -683,7 +785,7 @@ function buildCaptureContext(session) {
 
 function buildVisionInput(text, imageDataUrl, session, captureSource='') {
   const context = buildCaptureContext(session);
-  const instruction = normalizeText(`${text || 'Analyze and solve the captured screen.'}\n\nCAPTURE CONTEXT\n${captureSource ? `Window: ${captureSource}\n` : ''}${context ? `${context}\n` : ''}Rules for screen/code tasks:\n- Read the screenshot directly; do not ask me to transcribe visible code or question text.\n- Identify the exact task before answering.\n- For coding problems, always start with Logic (1-2 lines), then provide complete runnable code in the language visible in the screenshot unless another language is requested. Never return explanation alone.\n- Preserve method/class signatures shown in the screenshot when they are part of the problem contract.\n- Cover edge cases and complexity briefly when relevant.\n- Add concise inline comments to meaningful code statements so the solution can be explained in an interview.\n- For flowchart, architecture-flow or diagram requests, provide a detailed drawable ASCII flow with named boxes, arrows, branches and data direction; never return prose alone.\n- If the screenshot contains an error, diagnose the actual failing line/behavior and provide the corrected code.\n- Keep the answer practical, concise, and directly usable.`);
+  const instruction = normalizeText(`${text || 'Analyze and solve the captured screen.'}\n\nCAPTURE CONTEXT\n${captureSource ? `Window: ${captureSource}\n` : ''}${context ? `${context}\n` : ''}Rules for screen tasks:\n- Read the screenshot directly; do not ask me to transcribe visible code or question text.\n- Identify the last complete question intent before choosing an answer format.\n- A mention of code, coding, development, DevOps, a programming language or a module inside an experience/conceptual question does not make it a coding task.\n- For genuine coding problems, always start with Logic (1-2 lines), then provide complete runnable code in the language visible in the screenshot unless another language is requested. Never return explanation alone.\n- Preserve method/class signatures shown in the screenshot when they are part of the problem contract.\n- Cover edge cases and complexity briefly when relevant.\n- Add concise inline comments to meaningful code statements so the solution can be explained in an interview.\n- For flowchart, architecture-flow or diagram requests, provide a detailed drawable Unicode box flow using ┌ ─ ┐ │ └ ┘, arrows, branches and data direction; never return prose alone.\n- If the screenshot contains an error, diagnose the actual failing line/behavior and provide the corrected code.\n- Keep the answer practical, concise, and directly usable.`);
   return [{ role:'user', content:[
     { type:'input_text', text:instruction },
     { type:'input_image', image_url:imageDataUrl, detail:'high' }
@@ -699,7 +801,7 @@ app.post('/extract-screen-text', async (req, res) => {
   if (!OPENAI_API_KEY) return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend'});
   const session = interviewSessions.get(email);
   const recent = (session?.turns || []).slice(-3).map(t => `Q: ${t.question}\nA: ${t.answer}`).join('\n');
-  const extractionRules = `Extract the useful visible content from this screenshot so it can be used as the next interview prompt. The FIRST line must be exactly one of TASK_TYPE: CODING, TASK_TYPE: DIAGRAM, or TASK_TYPE: OTHER. After that first line return only the extracted/normalized prompt text, no analysis and no markdown fences.\n- Use CODING for algorithms, coding problems, source code, debugging, implementation or program-output tasks even when the word code is absent.\n- Use DIAGRAM for flowchart, architecture-flow, sequence, component, block or draw.io-style requests.\n- Preserve code exactly enough to solve it, including identifiers, method/class signatures, error text and visible line numbers when present.\n- Preserve explicit constraints and requested output.\n- Ignore Topper UI text, browser chrome, taskbar, notifications and unrelated navigation.\n- If this is a continuation of earlier captured content, keep only what is visible now; the desktop app will append multiple captures.\n- Do not answer the content. Extract it only.\nRecent interview context for disambiguation only:\n${recent}`;
+  const extractionRules = `Extract the useful visible content from this screenshot so it can be used as the next interview prompt. The FIRST line must be exactly one of TASK_TYPE: CODING, TASK_TYPE: DIAGRAM, or TASK_TYPE: OTHER. After that first line return only the extracted/normalized prompt text, no analysis and no markdown fences.\n- First identify the last complete question intent; earlier conversational lead-ins do not control TASK_TYPE.\n- Use CODING only for an actual request to write, implement, complete, debug, analyze or run code, or solve an algorithm/data-structure programming task.\n- A question about experience, projects, Agile, DevOps, integrations or concepts is OTHER even when its transcript mentions code, coding, development, a programming language, class or module.\n- Use DIAGRAM for flowchart, architecture-flow, sequence, component, block or draw.io-style requests.\n- Preserve code exactly enough to solve it, including identifiers, method/class signatures, error text and visible line numbers when present.\n- Preserve explicit constraints and requested output.\n- Ignore Topper UI text, browser chrome, taskbar, notifications and unrelated navigation.\n- If this is a continuation of earlier captured content, keep only what is visible now; the desktop app will append multiple captures.\n- Do not answer the content. Extract it only.\nRecent interview context for disambiguation only:\n${recent}`;
   try {
     const r = await fetch('https://api.openai.com/v1/responses', {method:'POST', headers:{'authorization':`Bearer ${OPENAI_API_KEY}`,'content-type':'application/json'}, body:JSON.stringify({model:LLM_VISION_EXTRACT_MODEL, instructions:extractionRules, input:[{role:'user',content:[{type:'input_text',text:'Extract the screen content.'},{type:'input_image',image_url:imageDataUrl,detail:'high'}]}], reasoning:{effort:'none'}, text:{verbosity:'low'}, max_output_tokens:1600})});
     const data = await r.json().catch(()=>({}));
@@ -729,9 +831,11 @@ app.post('/ask/stream', async (req, res) => {
     if (hasImage) {
       const startedAt = Date.now();
       const session = interviewSessions.get(email);
+      const intentQuestion=reframeQuestionIntent(text)||text;
       prepared = {
         session,
-        responseType:classifyResponseType(text,session?resolveFollowupIntent(session,text):null,inputSource),
+        intentQuestion,
+        responseType:classifyResponseType(intentQuestion,session?resolveFollowupIntent(session,intentQuestion):null,inputSource),
         prompt:buildVisionInput(text, imageDataUrl, session, captureSource),
         retrieved:[],
         latency:{ startedAt, embeddingMs:0, retrievalMs:0, retrievalMode:'vision-direct', promptReadyMs:Date.now()-startedAt }
@@ -832,7 +936,7 @@ app.post('/ask/stream', async (req, res) => {
     const conformance=await ensureModeConformance({answer,responseType:prepared.responseType,prompt:prepared.prompt,model:route.model,effort:route.effort});
     answer=conformance.answer;
     if(conformance.repaired)emit('replace',{text:answer});
-    if (!clientClosed && prepared.session && answer) addTurn(prepared.session,hasImage?`[Captured window${captureSource?`: ${captureSource}`:''}] ${text}`:text,answer,prepared.retrieved,prepared.responseType);
+    if (!clientClosed && prepared.session && answer) addTurn(prepared.session,hasImage?`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`:prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
     const latency = { embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, retrievalMode:prepared.latency.retrievalMode, promptReadyMs:prepared.latency.promptReadyMs, firstTokenMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt, attempts:streamAttempt };
     console.log(`[LLM stream] ${email} model=${route.model} tier=${route.tier} first=${firstTokenMs ?? '-'}ms total=${latency.totalMs}ms embed=${latency.embeddingMs}ms retrieve=${latency.retrievalMs}ms mode=${prepared.latency.retrievalMode} attempts=${streamAttempt}`);
     emit('meta', { model:route.model, modelTier:route.tier, phase:'complete', latency, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})) });

@@ -4,6 +4,7 @@ node_modules/
 # Backend secrets / local data
 backend/.env
 backend/.envbkup
+backend/users.json
 backend/data/
 
 # Build output
