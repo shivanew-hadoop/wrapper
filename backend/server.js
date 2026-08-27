@@ -23,6 +23,10 @@ const LLM_VISION_EXTRACT_MODEL = OPENAI_MODEL;
 const LLM_ROUTING_ENABLED = false;
 const LLM_REASONING_EFFORT = String(process.env.LLM_REASONING_EFFORT || 'low').trim();
 const LLM_VERBOSITY = String(process.env.LLM_VERBOSITY || 'low').trim();
+const OPENAI_SERVICE_TIER_RAW = String(process.env.OPENAI_SERVICE_TIER || 'fast').trim().toLowerCase();
+const OPENAI_SERVICE_TIER = new Set(['fast','priority','default','auto']).has(OPENAI_SERVICE_TIER_RAW)
+  ? OPENAI_SERVICE_TIER_RAW
+  : 'fast';
 const EMBEDDING_MODEL = String(process.env.EMBEDDING_MODEL || 'text-embedding-3-small').trim();
 const EMBEDDING_DIMENSIONS = Math.max(256, Number(process.env.EMBEDDING_DIMENSIONS || 512));
 const MAX_CONTEXT_FILE_BYTES = 6 * 1024 * 1024;
@@ -53,6 +57,7 @@ else {
 }
 console.log('[BOOT] OPENAI_API_KEY present:', !!OPENAI_API_KEY);
 console.log('[BOOT] LLM model: Terra-only ->', LLM_DEFAULT_MODEL, '| profile:', LLM_PROFILE_MODEL, '| vision-extract:', LLM_VISION_EXTRACT_MODEL, '| embedding:', EMBEDDING_MODEL, '| dims:', EMBEDDING_DIMENSIONS);
+console.log('[BOOT] OpenAI answer service tier:', OPENAI_SERVICE_TIER, '(embeddings remain standard)');
 
 const app = express();
 const allowedOrigins = new Set(String(process.env.CORS_ORIGIN || '').split(',').map(value => value.trim()).filter(Boolean));
@@ -633,6 +638,7 @@ async function ensureModeConformance({answer,responseType,prompt,model,effort}) 
   try {
     const correction=await openAIJson('https://api.openai.com/v1/responses',{
       model,
+      service_tier:OPENAI_SERVICE_TIER,
       instructions:`${COPILOT_INSTRUCTIONS}\n\n${strictModeInstructions(responseType)}`,
       input:`Produce the required final answer now. The earlier output violated the mandatory ${responseType} format. Do not discuss the violation.\n\nORIGINAL REQUEST AND CONTEXT:\n${typeof prompt==='string'?prompt:JSON.stringify(prompt)}\n\nINCOMPLETE OUTPUT TO REPLACE:\n${clean}`,
       reasoning:{effort},text:{verbosity:'medium'},max_output_tokens:1800
@@ -693,8 +699,8 @@ async function prepareQuestion(email, question, {inputSource=''}={}) {
   const prompt = session ? buildPrompt(session, question, retrieved, followupInfo, correctedQuestion,inputSource,intentQuestion) : `INPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,followupInfo,inputSource)}\n\nREFRAMED CURRENT INTENT\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: concise spoken answer.'}`;
   return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, intentQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt } };
 }
-app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmModel:LLM_DEFAULT_MODEL, llmRouting:{enabled:false,mode:'terra-only',default:LLM_DEFAULT_MODEL}, embeddingModel:EMBEDDING_MODEL }));
-app.get('/health', (_req, res) => res.json({ ok:true }));
+app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmModel:LLM_DEFAULT_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, llmRouting:{enabled:false,mode:'terra-only',default:LLM_DEFAULT_MODEL}, embeddingModel:EMBEDDING_MODEL }));
+app.get('/health', (_req, res) => res.json({ ok:true, openaiServiceTier:OPENAI_SERVICE_TIER }));
 
 app.post('/validate-license', (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
@@ -759,15 +765,16 @@ app.post('/ask', async (req, res) => {
     const route = selectAnswerRoute(text, prepared);
     const llmStart = Date.now();
     const data = await openAIJson('https://api.openai.com/v1/responses', {
-      model:route.model,instructions:`${COPILOT_INSTRUCTIONS}\n\n${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,
+      model:route.model,service_tier:OPENAI_SERVICE_TIER,instructions:`${COPILOT_INSTRUCTIONS}\n\n${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,
       reasoning:{effort:route.effort},text:{verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium'},max_output_tokens:answerTokenBudget(text,false,prepared.responseType)
     });
     let answer=outputText(data);
     answer=(await ensureModeConformance({answer,responseType:prepared.responseType,prompt:prepared.prompt,model:route.model,effort:route.effort})).answer;
     if (prepared.session && answer) addTurn(prepared.session,prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
     const latency = { embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, retrievalMode:prepared.latency.retrievalMode, promptReadyMs:prepared.latency.promptReadyMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt };
-    console.log(`[LLM] ${email} model=${route.model} tier=${route.tier} total=${latency.totalMs}ms embed=${latency.embeddingMs}ms retrieve=${latency.retrievalMs}ms mode=${prepared.latency.retrievalMode} llm=${latency.llmMs}ms`);
-    return res.json({ ok:true, answer, model:route.model, modelTier:route.tier, contextPrepared:!!prepared.session, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})), latency });
+    const providerServiceTier=String(data?.service_tier||OPENAI_SERVICE_TIER);
+    console.log(`[LLM] ${email} model=${route.model} modelTier=${route.tier} serviceTier=${providerServiceTier} total=${latency.totalMs}ms embed=${latency.embeddingMs}ms retrieve=${latency.retrievalMs}ms mode=${prepared.latency.retrievalMode} llm=${latency.llmMs}ms`);
+    return res.json({ ok:true, answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, contextPrepared:!!prepared.session, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})), latency });
   } catch (err) {
     console.error('[LLM] Request error:', err.message);
     return res.status(502).json({ ok:false, error:err.message || 'LLM request failed' });
@@ -803,7 +810,7 @@ app.post('/extract-screen-text', async (req, res) => {
   const recent = (session?.turns || []).slice(-3).map(t => `Q: ${t.question}\nA: ${t.answer}`).join('\n');
   const extractionRules = `Extract the useful visible content from this screenshot so it can be used as the next interview prompt. The FIRST line must be exactly one of TASK_TYPE: CODING, TASK_TYPE: DIAGRAM, or TASK_TYPE: OTHER. After that first line return only the extracted/normalized prompt text, no analysis and no markdown fences.\n- First identify the last complete question intent; earlier conversational lead-ins do not control TASK_TYPE.\n- Use CODING only for an actual request to write, implement, complete, debug, analyze or run code, or solve an algorithm/data-structure programming task.\n- A question about experience, projects, Agile, DevOps, integrations or concepts is OTHER even when its transcript mentions code, coding, development, a programming language, class or module.\n- Use DIAGRAM for flowchart, architecture-flow, sequence, component, block or draw.io-style requests.\n- Preserve code exactly enough to solve it, including identifiers, method/class signatures, error text and visible line numbers when present.\n- Preserve explicit constraints and requested output.\n- Ignore Topper UI text, browser chrome, taskbar, notifications and unrelated navigation.\n- If this is a continuation of earlier captured content, keep only what is visible now; the desktop app will append multiple captures.\n- Do not answer the content. Extract it only.\nRecent interview context for disambiguation only:\n${recent}`;
   try {
-    const r = await fetch('https://api.openai.com/v1/responses', {method:'POST', headers:{'authorization':`Bearer ${OPENAI_API_KEY}`,'content-type':'application/json'}, body:JSON.stringify({model:LLM_VISION_EXTRACT_MODEL, instructions:extractionRules, input:[{role:'user',content:[{type:'input_text',text:'Extract the screen content.'},{type:'input_image',image_url:imageDataUrl,detail:'high'}]}], reasoning:{effort:'none'}, text:{verbosity:'low'}, max_output_tokens:1600})});
+    const r = await fetch('https://api.openai.com/v1/responses', {method:'POST', headers:{'authorization':`Bearer ${OPENAI_API_KEY}`,'content-type':'application/json'}, body:JSON.stringify({model:LLM_VISION_EXTRACT_MODEL, service_tier:OPENAI_SERVICE_TIER, instructions:extractionRules, input:[{role:'user',content:[{type:'input_text',text:'Extract the screen content.'},{type:'input_image',image_url:imageDataUrl,detail:'high'}]}], reasoning:{effort:'none'}, text:{verbosity:'low'}, max_output_tokens:1600})});
     const data = await r.json().catch(()=>({}));
     if (!r.ok) return res.status(r.status).json({ok:false,error:data?.error?.message || `Vision extraction failed (${r.status})`});
     const raw=outputText(data).trim();
@@ -856,7 +863,7 @@ app.post('/ask/stream', async (req, res) => {
   let activeUpstreamController = null;
   res.on('close', () => { clientClosed = true; try { activeUpstreamController?.abort('client-disconnected'); } catch (_) {} });
   const emit = (event, data) => { if (!clientClosed && !res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
-  emit('meta', { model:route.model, modelTier:route.tier, routeReason:route.reason, phase:'retrieval', contextPrepared:!!prepared.session, embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, promptReadyMs:prepared.latency.promptReadyMs, retrievalMode:prepared.latency.retrievalMode });
+  emit('meta', { model:route.model, modelTier:route.tier, serviceTierRequested:OPENAI_SERVICE_TIER, routeReason:route.reason, phase:'retrieval', contextPrepared:!!prepared.session, embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, promptReadyMs:prepared.latency.promptReadyMs, retrievalMode:prepared.latency.retrievalMode });
 
   if (prepared.rejection) {
     const latency = { ...prepared.latency, firstTokenMs:Date.now()-prepared.latency.startedAt, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt, attempts:0 };
@@ -870,6 +877,7 @@ app.post('/ask/stream', async (req, res) => {
   let firstTokenMs = null;
   let answer = '';
   let streamAttempt = 0;
+  let providerServiceTier = '';
   try {
     // Retry once when the provider accepts a request but stalls before producing any text.
     // Normal fast responses are untouched; this only caps the rare 30-60s first-token stalls.
@@ -884,7 +892,7 @@ app.post('/ask/stream', async (req, res) => {
         upstream = await fetch('https://api.openai.com/v1/responses', {
           method:'POST', signal:upstreamController.signal,
           headers:{'content-type':'application/json', authorization:`Bearer ${OPENAI_API_KEY}`},
-          body:JSON.stringify({model:route.model,instructions:`${COPILOT_INSTRUCTIONS}\n\n${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasoning:{effort:route.effort},text:{verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium'},max_output_tokens:answerTokenBudget(text,hasImage,prepared.responseType),stream:true})
+          body:JSON.stringify({model:route.model,service_tier:OPENAI_SERVICE_TIER,instructions:`${COPILOT_INSTRUCTIONS}\n\n${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasoning:{effort:route.effort},text:{verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium'},max_output_tokens:answerTokenBudget(text,hasImage,prepared.responseType),stream:true})
         });
         if (!upstream.ok) {
           clearTimeout(firstTokenTimer);
@@ -915,6 +923,8 @@ app.post('/ask/stream', async (req, res) => {
               emit('delta', { delta:evt.delta });
             } else if (evt.type === 'error') {
               throw new Error(evt.error?.message || evt.message || 'OpenAI stream error');
+            } else if (evt.type === 'response.completed') {
+              providerServiceTier=String(evt.response?.service_tier||providerServiceTier||'');
             }
           }
         }
@@ -938,9 +948,10 @@ app.post('/ask/stream', async (req, res) => {
     if(conformance.repaired)emit('replace',{text:answer});
     if (!clientClosed && prepared.session && answer) addTurn(prepared.session,hasImage?`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`:prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
     const latency = { embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, retrievalMode:prepared.latency.retrievalMode, promptReadyMs:prepared.latency.promptReadyMs, firstTokenMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt, attempts:streamAttempt };
-    console.log(`[LLM stream] ${email} model=${route.model} tier=${route.tier} first=${firstTokenMs ?? '-'}ms total=${latency.totalMs}ms embed=${latency.embeddingMs}ms retrieve=${latency.retrievalMs}ms mode=${prepared.latency.retrievalMode} attempts=${streamAttempt}`);
-    emit('meta', { model:route.model, modelTier:route.tier, phase:'complete', latency, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})) });
-    emit('done', { answer, model:route.model, modelTier:route.tier, latency });
+    providerServiceTier=providerServiceTier||OPENAI_SERVICE_TIER;
+    console.log(`[LLM stream] ${email} model=${route.model} modelTier=${route.tier} serviceTier=${providerServiceTier} first=${firstTokenMs ?? '-'}ms total=${latency.totalMs}ms embed=${latency.embeddingMs}ms retrieve=${latency.retrievalMs}ms mode=${prepared.latency.retrievalMode} attempts=${streamAttempt}`);
+    emit('meta', { model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, phase:'complete', latency, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})) });
+    emit('done', { answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, latency });
   } catch (err) {
     console.error('[LLM stream] Error:', err.message);
     emit('error', { error:err.message || 'LLM stream failed' });
