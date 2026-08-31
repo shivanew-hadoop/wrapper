@@ -67,16 +67,126 @@ const MANUAL_SEND_MAX_WAIT_MS = 650;
 const MANUAL_COMMIT_DEDUPE_MS = 6500;
 let manualCommitGuard = { text:'', at:0 };
 
+let interviewStartedAt = null;
+let sessionTurns = []; // completed/in-progress Q&A retained only in renderer memory until Stop/End Session
+let activeAnswerTurn = null;
+
+function formatTurnTime(ms) {
+  const d = new Date(Number(ms) || Date.now());
+  return d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+}
+
+function scrollTurnToTop(turn) {
+  if (!turn?.element) return;
+  requestAnimationFrame(() => {
+    const top = Math.max(0, turn.element.offsetTop);
+    answerEl.scrollTop = top;
+  });
+}
+
+function buildTurnElement(turn) {
+  const wrap = document.createElement('section');
+  wrap.className = 'qaTurn';
+  wrap.dataset.turnId = turn.id;
+
+  const meta = document.createElement('div');
+  meta.className = 'qaMeta';
+  meta.textContent = formatTurnTime(turn.askedAt);
+
+  const question = document.createElement('div');
+  question.className = 'qaQuestion';
+  question.textContent = turn.question;
+
+  const response = document.createElement('div');
+  response.className = 'qaResponse';
+  response.textContent = turn.answer || 'Thinking…';
+
+  const separator = document.createElement('div');
+  separator.className = 'qaSeparator';
+  separator.textContent = '· · · · · · · · · · · ·';
+
+  wrap.append(meta, question, response, separator);
+  turn.element = wrap;
+  turn.questionElement = question;
+  turn.responseElement = response;
+  return wrap;
+}
+
+function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=false }) {
+  const cleanQuestion = String(question || '').trim();
+  if (reuseAuto && activeAnswerTurn) {
+    activeAnswerTurn.requestId = requestId;
+    activeAnswerTurn.question = cleanQuestion;
+    activeAnswerTurn.answer = '';
+    activeAnswerTurn.answeredAt = null;
+    activeAnswerTurn.questionElement.textContent = cleanQuestion;
+    activeAnswerTurn.responseElement.textContent = 'Thinking…';
+    activeAnswerTurn.auto = true;
+    scrollTurnToTop(activeAnswerTurn);
+    return activeAnswerTurn;
+  }
+  const turn = {
+    id:`turn-${Date.now()}-${sessionTurns.length+1}`,
+    requestId,
+    question:cleanQuestion,
+    answer:'',
+    askedAt:Date.now(),
+    answeredAt:null,
+    auto:!!auto,
+    element:null,
+    questionElement:null,
+    responseElement:null
+  };
+  sessionTurns.push(turn);
+  activeAnswerTurn = turn;
+  if (answerEl.querySelector('.answerPlaceholder')) answerEl.textContent = '';
+  answerEl.appendChild(buildTurnElement(turn));
+  scrollTurnToTop(turn);
+  return turn;
+}
+
 function renderPlainAnswer(text) {
   streamedAnswerText = String(text || '').replace(/\*\*/g, '');
-  answerEl.textContent = streamedAnswerText;
+  if (!activeAnswerTurn) {
+    answerEl.textContent = streamedAnswerText;
+    return;
+  }
+  activeAnswerTurn.answer = streamedAnswerText;
+  activeAnswerTurn.responseElement.textContent = streamedAnswerText;
 }
 
 function appendPlainAnswerDelta(delta) {
   const clean = String(delta || '').replace(/\*\*/g, '');
   if (!clean) return;
   streamedAnswerText += clean;
-  answerEl.appendChild(document.createTextNode(clean));
+  if (!activeAnswerTurn) {
+    answerEl.appendChild(document.createTextNode(clean));
+    return;
+  }
+  activeAnswerTurn.answer = streamedAnswerText;
+  if (activeAnswerTurn.responseElement.textContent === 'Thinking…') activeAnswerTurn.responseElement.textContent = '';
+  activeAnswerTurn.responseElement.appendChild(document.createTextNode(clean));
+}
+
+function serializableSessionTurns() {
+  return sessionTurns
+    .filter(turn => String(turn.question || '').trim() && String(turn.answer || '').trim())
+    .map(turn => ({
+      question:String(turn.question || '').trim(),
+      answer:String(turn.answer || '').trim(),
+      askedAt:Number(turn.askedAt) || Date.now(),
+      answeredAt:Number(turn.answeredAt) || Number(turn.askedAt) || Date.now()
+    }));
+}
+
+async function saveCompletedInterviewSession() {
+  const turns = serializableSessionTurns();
+  if (!turns.length || !interviewStartedAt) return { success:true, skipped:true };
+  return window.electronAPI.saveInterviewTranscript({
+    startedAt:interviewStartedAt,
+    endedAt:Date.now(),
+    turns
+  }).catch(() => ({ success:false }));
 }
 
 if (!localStorage.getItem('autoSendDefaultV143')) {
@@ -145,6 +255,13 @@ joinBtn.onclick = async () => {
   joinBtn.disabled = true;
   showLive('Validating license and connecting speech recognition...');
   const res = await window.electronAPI.startListening({ licenseEmail: effectiveEmail() });
+  if (res.success) {
+    interviewStartedAt = Date.now();
+    sessionTurns = [];
+    activeAnswerTurn = null;
+    streamedAnswerText = '';
+    answerEl.innerHTML = '<div class="answerPlaceholder">Waiting for a complete question...</div>';
+  }
   if (!res.success) {
     joinBtn.disabled = false;
     statusEl.textContent = res.error || 'Failed to start';
@@ -163,9 +280,16 @@ leaveBtn.onclick = async () => {
   if (activeStreamRequestId) window.electronAPI.cancelLLMStream(activeStreamRequestId);
   activeStreamRequestId = null;
   clearTimeout(llmTimer);
+  await saveCompletedInterviewSession();
   await window.electronAPI.stopAndReturnSetup();
 };
-closeBtn.onclick = () => window.electronAPI.closeOverlay();
+closeBtn.onclick = async () => {
+  if (activeStreamRequestId) window.electronAPI.cancelLLMStream(activeStreamRequestId);
+  activeStreamRequestId = null;
+  clearTimeout(llmTimer);
+  await saveCompletedInterviewSession();
+  await window.electronAPI.closeOverlay();
+};
 
 let collapsed = localStorage.getItem('overlayCollapsed') === 'true';
 async function applyCollapsed() {
@@ -335,6 +459,9 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   }
 
   if (!typed&&!auto) manualCommitGuard={text,at:Date.now()};
+  // Auto-send continuations regenerate the same logical question. Reuse the existing
+  // visible turn instead of leaving a stale partial answer in history.
+  const reuseAutoTurn = !!(auto && lastSendWasAuto && activeAnswerTurn?.auto && activeAutoLineIndex >= 0);
 
   // A manually typed prompt is authoritative for this turn. When the user explicitly
   // presses Send/Enter, close any pending system-audio question as already read so it
@@ -393,6 +520,8 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   const requestId = `q-${Date.now()}-${++llmRequestId}`;
   activeStreamRequestId = requestId;
   streamHasText = false;
+  streamedAnswerText = '';
+  startOrRefreshAnswerTurn({ requestId, question:text, auto, reuseAuto:reuseAutoTurn });
   // Keep the previous answer readable while the next request is being prepared.
   // The answer body is replaced only when the first token of the new answer arrives.
   modelLabel.textContent = 'Thinking… · retrieving context…';
@@ -550,15 +679,13 @@ window.electronAPI.onLLMStream(msg => {
     if (!streamHasText) {
       streamedAnswerText = '';
       streamHasText = true;
-      answerEl.textContent = '';
-      answerEl.scrollTop = 0;
+      if (activeAnswerTurn?.responseElement) activeAnswerTurn.responseElement.textContent = '';
     }
     // Append each provider delta immediately. Avoid rebuilding the whole answer on every token.
     appendPlainAnswerDelta(msg.delta || '');
   } else if (msg.type === 'replace') {
     streamHasText=true;
     renderPlainAnswer(msg.text||'No answer returned.');
-    answerEl.scrollTop=0;
   } else if (msg.type === 'meta') {
     if (msg.phase === 'retrieval') {
       const bits = [];
@@ -580,9 +707,16 @@ window.electronAPI.onLLMStream(msg => {
       const first = msg.latency?.firstTokenMs;
       modelLabel.textContent = `${msg.model}${Number.isFinite(first) ? ` · first ${first}ms` : ''}`;
     }
+    if (activeAnswerTurn && activeAnswerTurn.requestId === msg.requestId) activeAnswerTurn.answeredAt = Date.now();
     activeStreamRequestId = null;
   } else if (msg.type === 'error') {
-    answerEl.textContent = `LLM error: ${msg.error || 'Request failed'}`;
+    const errorText = `LLM error: ${msg.error || 'Request failed'}`;
+    streamedAnswerText = errorText;
+    if (activeAnswerTurn?.responseElement) {
+      activeAnswerTurn.answer = errorText;
+      activeAnswerTurn.answeredAt = Date.now();
+      activeAnswerTurn.responseElement.textContent = errorText;
+    } else answerEl.textContent = errorText;
     modelLabel.textContent = '';
     activeStreamRequestId = null;
   }

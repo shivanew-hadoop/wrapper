@@ -456,6 +456,26 @@ ipcMain.handle('start-listening', async (_, { licenseEmail }) => {
   }
 });
 
+ipcMain.handle('save-interview-transcript', async (_, payload) => {
+  try {
+    const turns = Array.isArray(payload?.turns) ? payload.turns : [];
+    if (!turns.length) return { success:true, skipped:true };
+    if (!desktopAccessToken) return { success:false, error:'Launch Topper from the customer portal to save interview history.' };
+    const data = await desktopRequest('/api/desktop/interview-transcripts', {
+      method:'POST',
+      body:JSON.stringify({
+        startedAt:Number(payload?.startedAt) || Date.now(),
+        endedAt:Number(payload?.endedAt) || Date.now(),
+        turns
+      })
+    });
+    return { success:true, transcriptId:data.transcriptId };
+  } catch (err) {
+    console.warn('[Transcript] Could not save completed interview:', err.message);
+    return { success:false, error:err.message || 'Could not save interview history.' };
+  }
+});
+
 ipcMain.handle('stop-listening', async () => {
   resetRuntimeFlags();
   await stopSystemAudioCapture();

@@ -4,7 +4,7 @@ Topper captures Windows loopback/system audio, sends PCM to the backend for Deep
 
 ## v14 commercial portal and credit metering
 
-- Customer registration/login, ₹599 Razorpay checkout for 60 minutes, signed checkout verification and idempotent signed webhook recovery.
+- Customer registration/login, ₹599 PhonePe Business Payment Gateway checkout for 60 minutes, server-side order-status verification and idempotent authenticated webhook recovery.
 - Durable second-based credit balance, append-only ledger, payment history and listening-session history in SQLite WAL.
 - Credits start deducting only after Start Listening; Stop settles the partial interval. One account cannot listen concurrently on two devices.
 - Overlay countdown plus one-time warnings at 30, 10, 5 and 1 minute; audio/STT hard-stop at zero.

@@ -3,6 +3,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startListening: (data) => ipcRenderer.invoke('start-listening', data),
   stopListening: () => ipcRenderer.invoke('stop-listening'),
   stopAndReturnSetup: () => ipcRenderer.invoke('stop-and-return-setup'),
+  saveInterviewTranscript: (data) => ipcRenderer.invoke('save-interview-transcript', data),
   closeOverlay: () => ipcRenderer.invoke('close-overlay'),
   copyToClipboard: (text) => ipcRenderer.invoke('copy-to-clipboard', text),
   captureCurrentWindow: () => ipcRenderer.invoke('capture-current-window'),
