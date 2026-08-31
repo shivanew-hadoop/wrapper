@@ -63,6 +63,27 @@ function normalizeBackendHttpUrl(rawUrl) {
 function backendBase() { return normalizeBackendHttpUrl(readAppConfig().backendUrl); }
 
 function desktopSessionPath() { return path.join(app.getPath('userData'), 'desktop-session.bin'); }
+function setupDefaultsPath() { return path.join(app.getPath('userData'), 'setup-defaults.bin'); }
+function saveSetupDefaults(payload) {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return;
+    const compact={
+      resume:payload?.resume||null,
+      jd:payload?.jd||null,
+      jdText:String(payload?.jdText||''),
+      yearsExperience:payload?.yearsExperience,
+      role:String(payload?.role||''),
+      savedAt:Date.now()
+    };
+    fs.writeFileSync(setupDefaultsPath(), safeStorage.encryptString(JSON.stringify(compact)), {mode:0o600});
+  } catch (err) { console.warn('[SetupDefaults] Could not save previous interview inputs:', err.message); }
+}
+function loadSetupDefaults() {
+  try {
+    if (!safeStorage.isEncryptionAvailable() || !fs.existsSync(setupDefaultsPath())) return null;
+    return JSON.parse(safeStorage.decryptString(fs.readFileSync(setupDefaultsPath())));
+  } catch (_) { return null; }
+}
 function saveDesktopSession() {
   if (!desktopAccessToken || !safeStorage.isEncryptionAvailable()) return;
   const encrypted = safeStorage.encryptString(JSON.stringify({accessToken:desktopAccessToken,account:desktopAccount}));
@@ -381,6 +402,7 @@ ipcMain.on('system-audio-status', (_event, msg) => sendStatus(String(msg || ''))
 ipcMain.on('system-audio-error', (_event, msg) => sendStatus('System audio error: ' + String(msg || 'Unknown error')));
 
 ipcMain.handle('get-app-config', async () => readAppConfig());
+ipcMain.handle('get-setup-defaults', async () => ({ success:true, defaults:loadSetupDefaults() }));
 ipcMain.handle('get-session-info', async () => ({
   licenseEmail: global.currentLicenseEmail || '',
   contextPrepared: !!global.contextPrepared,
@@ -415,6 +437,8 @@ ipcMain.handle('prepare-context', async (_, payload) => {
     global.currentLicenseEmail = email;
     global.contextPrepared = true;
     global.contextMeta = data;
+    // Persist only after successful preparation; encrypted with Electron safeStorage.
+    saveSetupDefaults(payload);
     return { success:true, ...data };
   } catch (err) {
     return { success:false, error:err.message || 'Context preparation failed' };

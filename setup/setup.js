@@ -2,9 +2,18 @@ const $ = id => document.getElementById(id);
 const accountEmail=$('accountEmail'),accountCredits=$('accountCredits'),licenseStatus=$('licenseStatus'),portalBtn=$('portalBtn');
 const resumeInput=$('resume'),jdInput=$('jd'),jdText=$('jdText'),years=$('years'),role=$('role'),prepareBtn=$('prepareBtn');
 const progress=$('progress'),progressTitle=$('progressTitle'),progressText=$('progressText'),errorEl=$('error');
-const MAX_FILE_BYTES=6*1024*1024;let currentAccount=null;
+const MAX_FILE_BYTES=6*1024*1024;let currentAccount=null,previousSetup=null;
 
 years.value=localStorage.getItem('yearsExperience')||'';role.value=localStorage.getItem('targetRole')||'';
+async function loadPreviousSetup(){
+  const result=await window.electronAPI.getSetupDefaults?.().catch(()=>null);previousSetup=result?.defaults||null;if(!previousSetup)return;
+  if(previousSetup.yearsExperience!==undefined&&previousSetup.yearsExperience!==null)years.value=String(previousSetup.yearsExperience);
+  if(previousSetup.role!==undefined)role.value=String(previousSetup.role||'');
+  if(previousSetup.jdText)jdText.value=String(previousSetup.jdText);
+  if(previousSetup.resume?.name)$('resumeMeta').textContent=`Previous resume ready · ${previousSetup.resume.name} · choose a file only to replace it`;
+  if(previousSetup.jd?.name)$('jdMeta').textContent=`Previous JD ready · ${previousSetup.jd.name} · choose a file only to replace it`;
+}
+loadPreviousSetup();
 const minutes=seconds=>`${Math.floor(Math.max(0,Number(seconds)||0)/60)} min`;
 function showError(message){errorEl.textContent=message;errorEl.classList.toggle('hidden',!message)}
 function showAccount(account){currentAccount=account||null;accountEmail.textContent=account?.email||'Not connected';accountCredits.textContent=account?minutes(account.remainingSeconds):'--';licenseStatus.className=`status ${account?'ok':'err'}`;licenseStatus.textContent=account?'Account connected securely through the Topper portal.':'Launch Topper from the customer portal to connect this device.';prepareBtn.disabled=!account;portalBtn.classList.toggle('hidden',!!account)}
@@ -18,10 +27,10 @@ async function fileToPayload(file){if(!file)return null;if(file.size>MAX_FILE_BY
 
 prepareBtn.onclick=async()=>{showError('');const resumeFile=resumeInput.files?.[0],jdFile=jdInput.files?.[0],pastedJd=jdText.value.trim(),exp=Number(years.value);
   if(!currentAccount)return showError('Launch Topper from the customer portal first.');
-  if(!resumeFile)return showError('Upload your resume. Common formats including PDF, DOC, DOCX, RTF and text-based files are supported.');
-  if(!jdFile&&!pastedJd)return showError('Upload a job description or paste the JD text.');
+  if(!resumeFile&&!previousSetup?.resume)return showError('Upload your resume. Common formats including PDF, DOC, DOCX, RTF and text-based files are supported.');
+  if(!jdFile&&!pastedJd&&!previousSetup?.jd)return showError('Upload a job description or paste the JD text.');
   if(!Number.isFinite(exp)||exp<0||exp>60)return showError('Enter a valid number of years of experience.');
   prepareBtn.disabled=true;progress.classList.remove('hidden');progressTitle.textContent='Preparing interview context…';progressText.textContent='Reading resume and job description…';
-  try{const[resume,jd]=await Promise.all([fileToPayload(resumeFile),fileToPayload(jdFile)]);progressText.textContent='Parsing, summarizing and creating vectors. This is done only once before listening…';const result=await window.electronAPI.prepareContext({licenseEmail:currentAccount.email,resume,jd,jdText:pastedJd,yearsExperience:exp,role:role.value.trim()});if(!result.success)throw new Error(result.error||'Context preparation failed.');localStorage.setItem('yearsExperience',String(exp));localStorage.setItem('targetRole',role.value.trim());progressTitle.textContent='Interview context ready';progressText.textContent=`${result.chunkCount||0} searchable chunks prepared. Opening live overlay…`;await new Promise(r=>setTimeout(r,250));const opened=await window.electronAPI.openOverlayAfterSetup();if(!opened?.success)throw new Error(opened?.error||'Account validation failed before opening the listening screen.');}
+  try{const[newResume,newJd]=await Promise.all([fileToPayload(resumeFile),fileToPayload(jdFile)]);const resume=newResume||previousSetup?.resume||null,jd=newJd||previousSetup?.jd||null;progressText.textContent='Parsing, summarizing and creating vectors. This is done only once before listening…';const result=await window.electronAPI.prepareContext({licenseEmail:currentAccount.email,resume,jd,jdText:pastedJd,yearsExperience:exp,role:role.value.trim()});if(!result.success)throw new Error(result.error||'Context preparation failed.');localStorage.setItem('yearsExperience',String(exp));localStorage.setItem('targetRole',role.value.trim());progressTitle.textContent='Interview context ready';progressText.textContent=`${result.chunkCount||0} searchable chunks prepared. Opening live overlay…`;await new Promise(r=>setTimeout(r,250));const opened=await window.electronAPI.openOverlayAfterSetup();if(!opened?.success)throw new Error(opened?.error||'Account validation failed before opening the listening screen.');}
   catch(err){progress.classList.add('hidden');showError(err.message||'Context preparation failed.');prepareBtn.disabled=!currentAccount;}
 };

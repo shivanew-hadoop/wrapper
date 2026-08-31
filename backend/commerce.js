@@ -21,6 +21,8 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
     CREATE INDEX IF NOT EXISTS idx_launch_token_hash ON desktop_launch_tokens(token_hash);
     CREATE INDEX IF NOT EXISTS idx_desktop_session_user ON desktop_sessions(user_id,revoked_at_ms);
   `);
+  // Backward-compatible migration for transcript summaries.
+  try { db.prepare("ALTER TABLE interview_transcripts ADD COLUMN summary_json TEXT NOT NULL DEFAULT '{}'").run(); } catch (_) {}
   const jwtSecret = String(process.env.JWT_SECRET || '');
   if (jwtSecret.length < 32) console.warn('[COMMERCE] JWT_SECRET must be at least 32 characters in production.');
   const secret = jwtSecret || crypto.randomBytes(48).toString('hex');
@@ -125,18 +127,43 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
     if(!turns.length)throw new Error('No completed interview questions to save');
     return turns;
   };
+  function summarizeTranscript(turns){
+    const buckets={coding:0,architecture:0,troubleshooting:0,security:0,behavioral:0,domain:0};
+    for(const turn of turns){
+      const q=String(turn.question||'').toLowerCase();
+      if(/\b(code|coding|implement|algorithm|data structure|write a (function|program|class)|leetcode|sql query)\b/.test(q))buckets.coding++;
+      if(/\b(architecture|system design|design a|scalab|high availability|microservice|component|sequence diagram|flow diagram)\b/.test(q))buckets.architecture++;
+      if(/\b(debug|troubleshoot|issue|failure|latency|not coming|not working|diagnos|root cause|performance)\b/.test(q))buckets.troubleshooting++;
+      if(/\b(security|authentication|authorization|oauth|saml|oidc|integration|api|rest|encryption|access control)\b/.test(q))buckets.security++;
+      if(/\b(tell me about|experience|project|challenge|conflict|leadership|handled|worked with|responsib)\b/.test(q))buckets.behavioral++;
+      if(/\b(pega|constellation|java|spring|aws|azure|kubernetes|database|data page|dx api|domain|sme)\b/.test(q))buckets.domain++;
+    }
+    const labels={coding:'coding/problem solving',architecture:'architecture/system design',troubleshooting:'debugging/troubleshooting',security:'security/integration',behavioral:'experience/ownership',domain:'SME/domain knowledge'};
+    const ranked=Object.entries(buckets).filter(([,n])=>n>0).sort((a,b)=>b[1]-a[1]);
+    const focus=ranked.slice(0,3).map(([k,n])=>`${labels[k]} (${n})`);
+    const advanced=(buckets.architecture+buckets.security+buckets.troubleshooting)>=Math.max(2,Math.ceil(turns.length/3));
+    const level=advanced?'Senior/advanced':'Mixed practical';
+    return {
+      level,
+      focus:focus.length?focus:['general technical discussion'],
+      overview:`This session tested ${focus.length?focus.join(', '):'general technical discussion'} across ${turns.length} completed question${turns.length===1?'':'s'}.`,
+      assessment:advanced?'The questioning leaned toward implementation depth, production reasoning, trade-offs and troubleshooting rather than only definitions.':'The questioning mixed practical knowledge, implementation understanding and experience-based discussion.'
+    };
+  }
+
   const saveTranscript = db.transaction((userId,startedAt,endedAt,turns) => {
     const id=crypto.randomUUID();
-    db.prepare('INSERT INTO interview_transcripts(id,user_id,started_at_ms,ended_at_ms,turn_count,transcript_json) VALUES(?,?,?,?,?,?)')
-      .run(id,userId,startedAt,endedAt,turns.length,JSON.stringify(turns));
+    const summary=summarizeTranscript(turns);
+    db.prepare('INSERT INTO interview_transcripts(id,user_id,started_at_ms,ended_at_ms,turn_count,transcript_json,summary_json) VALUES(?,?,?,?,?,?,?)')
+      .run(id,userId,startedAt,endedAt,turns.length,JSON.stringify(turns),JSON.stringify(summary));
     db.prepare(`DELETE FROM interview_transcripts
       WHERE user_id=? AND id NOT IN (
         SELECT id FROM interview_transcripts WHERE user_id=? ORDER BY ended_at_ms DESC, created_at DESC LIMIT 3
       )`).run(userId,userId);
     return id;
   });
-  const transcriptRows = userId => db.prepare('SELECT id,started_at_ms,ended_at_ms,turn_count,transcript_json,created_at FROM interview_transcripts WHERE user_id=? ORDER BY ended_at_ms DESC,created_at DESC LIMIT 3').all(userId)
-    .map(row=>{let turns=[];try{turns=JSON.parse(row.transcript_json)||[]}catch(_){}return {id:row.id,startedAt:row.started_at_ms,endedAt:row.ended_at_ms,turnCount:row.turn_count,createdAt:row.created_at,turns};});
+  const transcriptRows = userId => db.prepare('SELECT id,started_at_ms,ended_at_ms,turn_count,transcript_json,summary_json,created_at FROM interview_transcripts WHERE user_id=? ORDER BY ended_at_ms DESC,created_at DESC LIMIT 3').all(userId)
+    .map(row=>{let turns=[],summary={};try{turns=JSON.parse(row.transcript_json)||[]}catch(_){}try{summary=JSON.parse(row.summary_json||'{}')||{}}catch(_){}return {id:row.id,startedAt:row.started_at_ms,endedAt:row.ended_at_ms,turnCount:row.turn_count,createdAt:row.created_at,summary,turns};});
 
   function pdfSafe(value){
     return String(value??'')
@@ -172,6 +199,13 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
   function buildTranscriptPdf(session,user){
     const dateText=new Date(session.endedAt).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'});
     const lines=['TOPPER INTERVIEW TRANSCRIPT',`Account: ${pdfSafe(user.email)}`,`Session: ${pdfSafe(dateText)}`,`Questions: ${session.turnCount}`,''];
+    if(session.summary?.overview){
+      lines.push('SESSION SUMMARY');
+      lines.push(...wrapPdfLine(session.summary.overview));
+      if(session.summary.level) lines.push(...wrapPdfLine(`Level: ${session.summary.level}`));
+      if(session.summary.assessment) lines.push(...wrapPdfLine(session.summary.assessment));
+      lines.push('');
+    }
     const stamp=ms=>new Date(Number(ms)||Date.now()).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit'});
     session.turns.forEach((turn,index)=>{
       lines.push(`Q${index+1}  [${stamp(turn.askedAt)}]`);
@@ -289,10 +323,10 @@ if (adminEmail && adminPassword) {
   });
   app.get('/api/interview-transcripts',auth(),(req,res)=>res.set('Cache-Control','no-store').json({ok:true,sessions:transcriptRows(req.authUser.id)}));
   app.get('/api/interview-transcripts/:id/pdf',auth(),(req,res)=>{
-    const row=db.prepare('SELECT id,started_at_ms,ended_at_ms,turn_count,transcript_json FROM interview_transcripts WHERE id=? AND user_id=?').get(String(req.params.id||''),req.authUser.id);
+    const row=db.prepare('SELECT id,started_at_ms,ended_at_ms,turn_count,transcript_json,summary_json FROM interview_transcripts WHERE id=? AND user_id=?').get(String(req.params.id||''),req.authUser.id);
     if(!row)return res.status(404).json({ok:false,error:'Interview transcript not found'});
-    let turns=[];try{turns=JSON.parse(row.transcript_json)||[]}catch(_){}
-    const session={id:row.id,startedAt:row.started_at_ms,endedAt:row.ended_at_ms,turnCount:row.turn_count,turns};
+    let turns=[],summary={};try{turns=JSON.parse(row.transcript_json)||[]}catch(_){}try{summary=JSON.parse(row.summary_json||'{}')||{}}catch(_){}
+    const session={id:row.id,startedAt:row.started_at_ms,endedAt:row.ended_at_ms,turnCount:row.turn_count,summary,turns};
     const pdf=buildTranscriptPdf(session,req.authUser);
     const day=new Date(session.endedAt).toISOString().slice(0,10);
     res.set({'Content-Type':'application/pdf','Content-Disposition':`attachment; filename="Topper-Interview-${day}.pdf"`,'Cache-Control':'no-store','Content-Length':String(pdf.length)});

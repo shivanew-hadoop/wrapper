@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   extractScreenText: (data) => ipcRenderer.invoke('extract-screen-text', data),
   getAppConfig: () => ipcRenderer.invoke('get-app-config'),
   getSessionInfo: () => ipcRenderer.invoke('get-session-info'),
+  getSetupDefaults: () => ipcRenderer.invoke('get-setup-defaults'),
   getDesktopAccount: () => ipcRenderer.invoke('get-desktop-account'),
   openCustomerPortal: () => ipcRenderer.invoke('open-customer-portal'),
   onDesktopAccountUpdated: (cb) => ipcRenderer.on('desktop-account-updated', (_, data) => cb(data)),

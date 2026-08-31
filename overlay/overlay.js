@@ -78,10 +78,9 @@ function formatTurnTime(ms) {
 
 function scrollTurnToTop(turn) {
   if (!turn?.element) return;
-  requestAnimationFrame(() => {
-    const top = Math.max(0, turn.element.offsetTop);
-    answerEl.scrollTop = top;
-  });
+  // The answer pane has a bottom spacer, so even the newest/last turn can be aligned
+  // exactly to the top instead of remaining at the bottom of the viewport.
+  requestAnimationFrame(() => { answerEl.scrollTop = Math.max(0, turn.element.offsetTop); });
 }
 
 function buildTurnElement(turn) {
@@ -93,21 +92,18 @@ function buildTurnElement(turn) {
   meta.className = 'qaMeta';
   meta.textContent = formatTurnTime(turn.askedAt);
 
-  const question = document.createElement('div');
-  question.className = 'qaQuestion';
-  question.textContent = turn.question;
-
+  // Do not duplicate the interviewer prompt in the answer pane. The prompt remains
+  // in renderer memory only for end-session history/PDF persistence.
   const response = document.createElement('div');
   response.className = 'qaResponse';
-  response.textContent = turn.answer || 'Thinking…';
+  response.textContent = '';
 
   const separator = document.createElement('div');
   separator.className = 'qaSeparator';
   separator.textContent = '· · · · · · · · · · · ·';
 
-  wrap.append(meta, question, response, separator);
+  wrap.append(meta, response, separator);
   turn.element = wrap;
-  turn.questionElement = question;
   turn.responseElement = response;
   return wrap;
 }
@@ -119,8 +115,7 @@ function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=f
     activeAnswerTurn.question = cleanQuestion;
     activeAnswerTurn.answer = '';
     activeAnswerTurn.answeredAt = null;
-    activeAnswerTurn.questionElement.textContent = cleanQuestion;
-    activeAnswerTurn.responseElement.textContent = 'Thinking…';
+    activeAnswerTurn.responseElement.textContent = '';
     activeAnswerTurn.auto = true;
     scrollTurnToTop(activeAnswerTurn);
     return activeAnswerTurn;
@@ -134,7 +129,6 @@ function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=f
     answeredAt:null,
     auto:!!auto,
     element:null,
-    questionElement:null,
     responseElement:null
   };
   sessionTurns.push(turn);
@@ -164,7 +158,6 @@ function appendPlainAnswerDelta(delta) {
     return;
   }
   activeAnswerTurn.answer = streamedAnswerText;
-  if (activeAnswerTurn.responseElement.textContent === 'Thinking…') activeAnswerTurn.responseElement.textContent = '';
   activeAnswerTurn.responseElement.appendChild(document.createTextNode(clean));
 }
 
@@ -524,7 +517,8 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   startOrRefreshAnswerTurn({ requestId, question:text, auto, reuseAuto:reuseAutoTurn });
   // Keep the previous answer readable while the next request is being prepared.
   // The answer body is replaced only when the first token of the new answer arrives.
-  modelLabel.textContent = 'Thinking… · retrieving context…';
+  // Do not insert a local 'Thinking' state. The first provider delta is rendered immediately.
+  modelLabel.textContent = '';
   feedback(auto ? 'Auto sent' : 'Sent');
   window.electronAPI.startLLMStream({ requestId, text, inputSource:source, licenseEmail:effectiveEmail() });
   return true;
