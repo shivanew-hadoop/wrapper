@@ -58,12 +58,40 @@ let llmRequestId = 0;
 let activeStreamRequestId = null;
 let streamHasText = false;
 let streamedAnswerText = '';
+let pendingRenderDelta = '';
+let renderFramePending = false;
+
+function flushPendingAnswerDelta() {
+  renderFramePending = false;
+  if (!pendingRenderDelta) return;
+  const clean = pendingRenderDelta;
+  pendingRenderDelta = '';
+  streamedAnswerText += clean;
+  if (!activeAnswerTurn) {
+    answerEl.appendChild(document.createTextNode(clean));
+    return;
+  }
+  activeAnswerTurn.answer = streamedAnswerText;
+  activeAnswerTurn.responseElement.appendChild(document.createTextNode(clean));
+}
+
+function queuePlainAnswerDelta(delta) {
+  const clean = String(delta || '').replace(/\*\*/g, '');
+  if (!clean) return;
+  pendingRenderDelta += clean;
+  // Coalesce token-sized provider events into one browser paint. This does not
+  // delay network/model streaming; first visible paint is the next animation frame.
+  if (!renderFramePending) {
+    renderFramePending = true;
+    requestAnimationFrame(flushPendingAnswerDelta);
+  }
+}
 let manualPromptContainsCapture = false;
 let manualPromptTaskType = 'other';
 let manualSendTimer = null;
 let manualSendStartedAt = 0;
-const MANUAL_SEND_QUIET_MS = 180;
-const MANUAL_SEND_MAX_WAIT_MS = 650;
+const MANUAL_SEND_QUIET_MS = 60;
+const MANUAL_SEND_MAX_WAIT_MS = 140;
 const MANUAL_COMMIT_DEDUPE_MS = 6500;
 let manualCommitGuard = { text:'', at:0 };
 
@@ -78,9 +106,13 @@ function formatTurnTime(ms) {
 
 function scrollTurnToTop(turn) {
   if (!turn?.element) return;
-  // The answer pane has a bottom spacer, so even the newest/last turn can be aligned
-  // exactly to the top instead of remaining at the bottom of the viewport.
-  requestAnimationFrame(() => { answerEl.scrollTop = Math.max(0, turn.element.offsetTop); });
+  // offsetTop is relative to the pane, while scrollTop belongs to #answer.
+  // Subtract the answer viewport's own offset so the first response line never
+  // slides under the fixed "LLM ANSWER" title. Keep a small breathing gap.
+  requestAnimationFrame(() => {
+    const target = Math.max(0, turn.element.offsetTop - answerEl.offsetTop - 6);
+    answerEl.scrollTop = target;
+  });
 }
 
 function buildTurnElement(turn) {
@@ -150,15 +182,7 @@ function renderPlainAnswer(text) {
 }
 
 function appendPlainAnswerDelta(delta) {
-  const clean = String(delta || '').replace(/\*\*/g, '');
-  if (!clean) return;
-  streamedAnswerText += clean;
-  if (!activeAnswerTurn) {
-    answerEl.appendChild(document.createTextNode(clean));
-    return;
-  }
-  activeAnswerTurn.answer = streamedAnswerText;
-  activeAnswerTurn.responseElement.appendChild(document.createTextNode(clean));
+  queuePlainAnswerDelta(delta);
 }
 
 function serializableSessionTurns() {
@@ -514,6 +538,8 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   activeStreamRequestId = requestId;
   streamHasText = false;
   streamedAnswerText = '';
+  pendingRenderDelta = '';
+  renderFramePending = false;
   startOrRefreshAnswerTurn({ requestId, question:text, auto, reuseAuto:reuseAutoTurn });
   // Keep the previous answer readable while the next request is being prepared.
   // The answer body is replaced only when the first token of the new answer arrives.
@@ -678,6 +704,7 @@ window.electronAPI.onLLMStream(msg => {
     // Append each provider delta immediately. Avoid rebuilding the whole answer on every token.
     appendPlainAnswerDelta(msg.delta || '');
   } else if (msg.type === 'replace') {
+    flushPendingAnswerDelta();
     streamHasText=true;
     renderPlainAnswer(msg.text||'No answer returned.');
   } else if (msg.type === 'meta') {
@@ -696,6 +723,7 @@ window.electronAPI.onLLMStream(msg => {
       modelLabel.textContent = `${msg.model || ''}${Number.isFinite(first) ? ` · first ${first}ms` : ''}`.trim();
     }
   } else if (msg.type === 'done') {
+    flushPendingAnswerDelta();
     if (!streamHasText) renderPlainAnswer(msg.answer || 'No answer returned.');
     if (msg.model) {
       const first = msg.latency?.firstTokenMs;

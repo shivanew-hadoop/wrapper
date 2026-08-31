@@ -1035,3 +1035,8 @@ html, body, body * { cursor: none !important; }
 .qaTurn + .qaTurn { padding-top: 6px; }
 /* Allow the newest final turn to align at the very top even when it is the last content block. */
 .v6Answer::after { content:''; display:block; height:calc(100% - 28px); min-height:180px; pointer-events:none; }
+
+
+/* v14.5.2: keep newest streamed answer fully visible below pane title. */
+.qaTurn { scroll-margin-top: 8px; }
+.qaResponse { padding-top: 1px; }
