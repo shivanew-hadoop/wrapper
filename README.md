@@ -1,3 +1,5 @@
+> **Cerebras build:** Primary text answers now use Cerebras GPT-OSS 120B. See `CEREBRAS-MIGRATION.md` and `backend/.env.example`. OpenAI remains for embeddings and vision.
+
 # Topper v3 — Windows System Audio + Resume/JD RAG + Streaming LLM
 
 Topper captures Windows loopback/system audio, sends PCM to the backend for Deepgram transcription, retrieves relevant context from a prepared resume/job-description vector index, and streams a candidate-grounded LLM answer into the floating Electron overlay.
