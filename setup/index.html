@@ -15,6 +15,8 @@
       </div>
     </header>
 
+    <div id="error" class="error hidden" role="alert" aria-live="assertive"></div>
+
     <section class="card">
       <label>Topper account</label>
       <div class="accountRow"><div><span>Licensed email</span><strong id="accountEmail">Not connected</strong></div><div><span>Credits remaining</span><strong id="accountCredits">--</strong></div></div>
@@ -25,12 +27,12 @@
     <section class="card grid">
       <div class="field">
         <label>Resume <span>PDF, DOC, DOCX, RTF and common text formats</span></label>
-        <input id="resume" type="file" accept="*/*">
+        <div class="fileRow"><input id="resume" type="file" accept="*/*"><button id="removeResume" type="button" class="removeFile hidden">Remove</button></div>
         <small id="resumeMeta">Required · max 6 MB</small>
       </div>
       <div class="field">
         <label>Job description <span>PDF, DOC, DOCX, RTF and common text formats</span></label>
-        <input id="jd" type="file" accept="*/*">
+        <div class="fileRow"><input id="jd" type="file" accept="*/*"><button id="removeJd" type="button" class="removeFile hidden">Remove</button></div>
         <small id="jdMeta">Upload a JD or paste it below.</small>
       </div>
       <div class="field compact">
@@ -59,7 +61,6 @@
       <div class="spinner"></div>
       <div><strong id="progressTitle">Preparing context…</strong><div id="progressText">Parsing documents and creating embeddings.</div></div>
     </div>
-    <div id="error" class="error hidden"></div>
     <footer>Resume/JD content is kept in backend memory for this runtime. Your portal account is validated before listening starts.</footer>
   </main>
   <script src="setup.js"></script>

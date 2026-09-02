@@ -403,6 +403,15 @@ ipcMain.on('system-audio-error', (_event, msg) => sendStatus('System audio error
 
 ipcMain.handle('get-app-config', async () => readAppConfig());
 ipcMain.handle('get-setup-defaults', async () => ({ success:true, defaults:loadSetupDefaults() }));
+ipcMain.handle('clear-setup-default-field', async (_, field) => {
+  try {
+    if (!['resume','jd'].includes(String(field))) return {success:false,error:'Invalid setup field'};
+    const current=loadSetupDefaults() || {};
+    current[String(field)] = null;
+    if (safeStorage.isEncryptionAvailable()) fs.writeFileSync(setupDefaultsPath(), safeStorage.encryptString(JSON.stringify(current)), {mode:0o600});
+    return {success:true};
+  } catch (err) { return {success:false,error:err.message||'Could not remove saved file'}; }
+});
 ipcMain.handle('get-session-info', async () => ({
   licenseEmail: global.currentLicenseEmail || '',
   contextPrepared: !!global.contextPrepared,

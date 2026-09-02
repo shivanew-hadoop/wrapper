@@ -523,6 +523,17 @@ function classifyResponseType(question,followupInfo=null,inputSource='') {
   if (isCodingQuestion(question)||(previousCoding&&isCodingFollowupQuestion(question))) return 'code';
   return 'spoken';
 }
+function spokenAnswerShape(question) {
+  const q=normalizeText(question).toLowerCase();
+  if(!q)return 'DIRECT';
+  if(/\b(difference|different|compare|versus|\bvs\b|same or different)\b/i.test(q))return 'COMPARISON';
+  if(/\b(advantage|advantages|feature|features|benefit|benefits|types|ways)\b/i.test(q))return 'FEATURES';
+  if(/\b(out of memory|oom|production issue|performance issue|debug|troubleshoot|failing|failure|not working|latency issue|slow|incident)\b/i.test(q))return 'TROUBLESHOOTING';
+  if(/\b(have you|did you|what did you|what exactly you did|your current|current engagement|recently|experience with|worked on|implemented|used in your project|in your project|tell me about your)\b/i.test(q))return 'EXPERIENCE';
+  if(/\b(how do you|how did you|how would you|walk me through|flow|framework|mechanism|architecture|design|end[- ]to[- ]end|bring .* data|ingest|pipeline|implement it)\b/i.test(q))return 'IMPLEMENTATION_FLOW';
+  if(/\b(what is|what are|why|when|where|which)\b/i.test(q))return 'CONCEPT';
+  return 'DIRECT';
+}
 function responseMode(question, followupInfo=null, inputSource='') {
   const type=classifyResponseType(question,followupInfo,inputSource);
   const codingFollowup=type==='code'&&!!followupInfo?.previous&&isCodingFollowupQuestion(question);
@@ -550,7 +561,7 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
   const followup = info.isFollowup
     ? `YES. Treat the current words as a continuation/modifier of the immediately previous interviewer request. Resolved intent:\n${info.resolvedQuestion}`
     : 'NO';
-  return `CANDIDATE PROFILE\nYears: ${session.yearsExperience}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || ''}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'No previous turns.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
+  return `CANDIDATE PROFILE\nYears: ${session.yearsExperience}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || ''}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'No previous turns.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
 }
 const COPILOT_INSTRUCTIONS = `You are the candidate in a live senior/lead engineer interview. Return one directly usable answer. Normal answers must be immediately speakable; coding and diagram questions must use the exact practical formats below. Never mention AI, ChatGPT, copilot, prompts, retrieval, resume, CV, JD, transcription correction, evidence matching, or how you inferred the question. Never say "based on my CV/JD", "the resume confirms", "not listed", or similar meta commentary.
 
@@ -562,17 +573,30 @@ Use REFRAMED CURRENT INTENT as the authoritative current question and RESPONSE M
 Treat adjacent/continued interviewer fragments as one intent only when they are clearly related. If the current fragment completes the prior question, answer the combined question. If one captured utterance contains two or more unrelated questions/topics, treat the LAST complete question as the intentional current request and ignore the earlier unrelated question(s). Combine multiple questions only when the interviewer explicitly asks to answer both/all of them or they are clearly parts of one request. Pronouns/modifiers such as "it", "that", "this", "those", "same", "using Java", "give one example", "give me two", "the second one", "what about security", and "how does that flow work" inherit the immediately preceding topic. Preserve explicit constraints exactly: requested count, language, format, scenario, flow, comparison, code contract, or output.
 
 ANSWER PRIORITY AND SHAPE:
-1. Answer exactly the last complete interviewer intent. First sentence must contain the answer I need to say; no acknowledgement, restatement, definition-first preamble, or generic setup.
-2. Match LENGTH to the question, not to the phrase 'in detailed way'. That phrase means technically accurate/specific, never verbose. For a narrow yes/no, correction, single fact, permission, or very small follow-up, answer in 1-3 complete sentences. For a normal technical, experience, troubleshooting, implementation, integration, security, Constellation/UI, or architecture question, do NOT stop at keywords: give one direct opening sentence and then 2-4 concise explanatory sentences that say what I did/how it works and why the important choices matter. Target roughly 20-45 seconds of natural speech for these normal questions. Use 45-60 seconds when the interviewer asks for an end-to-end flow or deeper explanation. For coding/pseudocode, give the requested design/code and only the implementation points needed to explain it.
-3. Prefer a natural interview answer rather than a keyword summary. The opening sentence should answer the question immediately. For a normal conceptual/experience question, add only 1-2 short supporting paragraphs. When the question asks for advantages, features, differences, steps, reasons, troubleshooting, implementation flow, or multiple distinct points, use 3-5 compact bullets after the opening sentence so the answer is easy to scan while speaking. Each bullet must be one complete sentence or one short point with a brief explanation. Never turn every answer into bullets, and never pad with generic theory.
-4. Strictly answer the boundary asked. Do not volunteer adjacent implementation details just because they are present in Resume/JD/history. Never add Key Vault, token validation, metadata filters, security, audit, observability, architecture variants, or generic best practices unless they directly answer the current question. If asked why Contributor is needed, explain only the write operations that require it and contrast runtime Reader briefly; do not expand into unrelated management-plane design unless asked.
-5. Preserve concrete values/examples from the interviewer. Example: if balance changes from 30,000 to 50,000 and failure occurs before commit, explicitly say the next read still returns 30,000.
-6. Sound like a senior engineer speaking naturally: clear, confident, practical, first-person where appropriate, and immediately speakable. Use complete explanatory sentences, not compressed keyword chains. Expand acronyms only when it helps spoken clarity; keep product terminology accurate. Avoid textbook wording and jargon that does not help answer the question.
-7. Do not repeat a stock answer across questions. Adapt every answer to the current intent, retrieved Resume evidence, JD domain, years of experience, target role and recent conversation without exposing those sources.
-8. Prefer current production approaches; use legacy approaches only when asked or when the supplied experience requires them.
+1. Answer exactly the last complete interviewer intent. The first sentence must contain the answer I can say immediately. Do not start with acknowledgement, restatement, a dictionary definition, or generic background.
+2. SPOKEN ANSWER SHAPE is authoritative for normal spoken answers:
+   - DIRECT / CONCEPT: 1 direct sentence, then at most 1 short supporting paragraph. If a definition is necessary, keep it to one sentence and immediately explain the production meaning or usage.
+   - FEATURES: 1 direct sentence, blank line, then 3-5 short hyphen bullets. Each bullet must state the feature and the practical reason it matters.
+   - COMPARISON: 1-line distinction, blank line, then 2-4 labelled hyphen bullets. Compare the decision/use case, not just definitions.
+   - EXPERIENCE: 1 direct first-person sentence, then 2-4 short production-focused sentences or bullets covering what I owned, the tools actually used, how the flow worked, and the practical outcome. Never manufacture a named technology just because the JD asks for it.
+   - IMPLEMENTATION_FLOW: 1 direct architecture/implementation choice, blank line, then 3-6 ordered hyphen bullets showing source -> processing -> controls -> target/consumer. Use concrete production mechanics such as retries, idempotency, DQ, RBAC, orchestration or monitoring only when relevant.
+   - TROUBLESHOOTING: immediate production action first, blank line, then 3-5 ordered hyphen bullets covering evidence collection, isolation, fix, and validation. Do not guess one root cause without evidence.
+3. Readability is mandatory. Never emit one dense wall of text for a multi-point answer. Put each bullet on its own line and put one blank line before a bullet block. For non-bulleted answers longer than three sentences, use short paragraphs of 1-2 sentences each.
+4. Prefer implementation reality over textbook theory. Explain what runs, where it runs, what data moves, what control is applied, and why the choice is made. Avoid generic phrases such as "it improves scalability", "it is robust", or "it provides seamless integration" unless you name the concrete mechanism that makes that true.
+5. Match length to the question. Narrow factual/correction/follow-up: 1-3 sentences. Normal experience/concept/implementation: roughly 20-40 seconds of speech. End-to-end or explicitly detailed flow: roughly 40-60 seconds. Do not fill the token budget merely because it is available.
+6. Strictly answer the boundary asked. Do not volunteer adjacent technologies, security controls, observability, framework variants, or architecture patterns unless they directly answer the current question.
+7. Preserve concrete values/examples from the interviewer. If the interviewer gives a number, SLA, source system, failure point, or requested count, use that exact constraint in the answer.
+8. Sound like a senior engineer speaking naturally: clear, practical, first-person where factual, and immediately speakable. Use complete sentences, not keyword chains. Avoid bookish definitions and sales-style wording.
+9. Do not repeat a stock answer across questions. Adapt to the current intent, actual Resume evidence, JD priorities, years of experience, target role and recent interview context without exposing those sources.
+10. Prefer current production approaches; use legacy approaches only when asked or when the supplied experience specifically requires them.
 
-EXPERIENCE CLAIMS:
-Use first-person production language such as "I use", "I implemented", "I own", "I handle", "in production I..." only when Resume evidence supports that experience. JD-only evidence guides relevance but is not proof of implementation. If the asked technology has no credible Resume evidence, do not discuss resume matching. Say once, naturally and briefly, "I haven't used <technology> in production." Then give 3-5 practical high-level/POC points showing how I would approach it, without pretending production ownership.
+FACTUAL OWNERSHIP / RESUME GROUNDING — NON-NEGOTIABLE:
+- Resume evidence is the only authority for claims that I personally used, built, implemented, owned, deployed, migrated, optimized or operated something. JD content describes the target role; it is NOT evidence that I did it.
+- Never convert a JD requirement into past experience. Never invent a client use case, metric, architecture, Cortex implementation, fraud use case, contract analytics implementation, vector store, Streamlit dashboard, Snowpipe pipeline, or any other project detail unless Resume evidence supports it.
+- When Resume evidence supports the surrounding platform but not the exact named feature, answer maturely: state the boundary once, then connect the closest real production work and explain how I would implement the requested feature. Example pattern: "My recent Snowflake work was on governed AI/platform integration rather than a production Cortex Analyst implementation specifically. I owned <supported work>. For Cortex Analyst, I would extend that foundation by <practical implementation>." Do not sound defensive and do not mention the Resume/JD.
+- If the technology is completely unsupported by Resume evidence, say once: "I haven't used <technology> in production." Then give 3-5 practical implementation points showing how I would approach it. Do not pretend production ownership.
+- If supported, prefer strong ownership language such as "I built", "I implemented", "I owned", "I handled", or "I used" and tie it to the actual project context and production mechanics.
+- Never invent numerical improvements or latency reductions unless the supplied Resume evidence contains that metric.
 
 SELF INTRODUCTION:
 If asked for self-introduction/introduction/about yourself, produce one natural approximately 2-minute spoken introduction using the candidate's actual experience, strongest role-relevant projects/skills, production ownership and current target direction. Do not say it is aligned to the Resume/JD and do not list every skill. It must sound spoken, not like a profile summary.
@@ -679,13 +703,35 @@ function makeDrawableDiagram(answer) {
   const foundationBoxes=foundation?foundation.replace(/^.*?:\s*/,'').replace(/[.]$/,'').split(/\s*,\s*|\s+and\s+/i).map(item=>item.trim()).filter(Boolean).map(renderDiagramBox).join('\n       ↓ supports\n'):'';
   return `Flow diagram:\n\n${diagram}${foundationBoxes?`\n\nSupporting foundation:\n${foundationBoxes}\n       ↓ supports the complete flow`:''}`;
 }
+function formatSpokenAnswer(value) {
+  let text=removeExactRepeatedOutput(value);
+  if(!text)return text;
+  // Recover list formatting when a provider emits bullets inline.
+  text=text.replace(/\s+(?=-\s+(?:[A-Z0-9@]|First\b|Next\b|Then\b|Finally\b))/g,'\n');
+  text=text.replace(/\s+(?=\d+[.)]\s+[A-Z])/g,'\n');
+  const lines=text.split('\n').map(line=>line.replace(/[ \t]+$/,'').trimEnd());
+  let firstBullet=lines.findIndex(line=>/^\s*(?:-|\d+[.)])\s+/.test(line));
+  if(firstBullet>0 && lines[firstBullet-1].trim()!=='')lines.splice(firstBullet,0,'');
+  text=lines.join('\n').replace(/\n{3,}/g,'\n\n').trim();
+  // If a longer spoken answer still arrives as one paragraph, make it readable
+  // without changing wording: group complete sentences into short paragraphs.
+  if(!text.includes('\n') && text.length>360){
+    const sentences=text.split(/(?<=[.!?])\s+(?=[A-Z])/).filter(Boolean);
+    if(sentences.length>=4){
+      const paras=[];
+      for(let i=0;i<sentences.length;i+=2)paras.push(sentences.slice(i,i+2).join(' '));
+      text=paras.join('\n\n');
+    }
+  }
+  return text;
+}
 async function ensureModeConformance({answer,responseType,prompt,model,effort}) {
   let clean=removeExactRepeatedOutput(answer);
   if(responseType==='diagram'){
     clean=makeDrawableDiagram(clean);
     if(hasDrawableDiagram(clean))return {answer:clean,repaired:clean!==answer};
   } else if(responseType==='code'&&hasCompleteCode(clean))return {answer:clean,repaired:clean!==answer};
-  else if(responseType==='spoken')return {answer:clean,repaired:clean!==answer};
+  else if(responseType==='spoken'){const formatted=formatSpokenAnswer(clean);return {answer:formatted,repaired:formatted!==answer};}
 
   try {
     const correction=await cerebrasJson({
