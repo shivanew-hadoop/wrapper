@@ -157,6 +157,26 @@ input::placeholder { color: rgba(255,255,255,.45); }
 }
 .licenseStatus.ok { color: #8df7b1; }
 .licenseStatus.err { color: #ff9aa0; }
+
+.joinActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.backBtn {
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 800;
+  color: #dce7f8;
+  background: rgba(255,255,255,.08);
+  border: 1px solid rgba(255,255,255,.18);
+  white-space: nowrap;
+}
+.backBtn:hover { background: rgba(255,255,255,.14); color: #fff; }
+
 .joinPanel {
   flex: 0 0 auto;
   margin-bottom: 6px;

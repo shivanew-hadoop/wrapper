@@ -25,6 +25,7 @@ document.querySelectorAll('[title]').forEach(element => element.removeAttribute(
 const joinPanel = $('joinPanel');
 const livePanel = $('livePanel');
 const joinBtn = $('joinBtn');
+const backBtn = $('backBtn');
 const leaveBtn = $('leaveBtn');
 const closeBtn = $('closeBtn');
 const collapseBtn = $('collapseBtn');
@@ -267,6 +268,12 @@ async function initializeSession() {
   showJoin();
 }
 initializeSession();
+
+backBtn.onclick = async () => {
+  backBtn.disabled = true;
+  joinBtn.disabled = true;
+  await window.electronAPI.stopAndReturnSetup();
+};
 
 joinBtn.onclick = async () => {
   joinBtn.disabled = true;

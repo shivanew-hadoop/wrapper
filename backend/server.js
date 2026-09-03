@@ -14,16 +14,14 @@ try { WordExtractor = require('word-extractor'); } catch (_) {}
 const PORT = Number(process.env.PORT || 8080);
 const DEEPGRAM_API_KEY = String(process.env.DEEPGRAM_API_KEY || '').trim();
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
-const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5.6-terra').trim();
-const CEREBRAS_API_KEY = String(process.env.CEREBRAS_API_KEY || '').trim();
-const CEREBRAS_MODEL = String(process.env.CEREBRAS_MODEL || 'gpt-oss-120b').trim();
-const CEREBRAS_API_BASE = String(process.env.CEREBRAS_API_BASE || 'https://api.cerebras.ai/v1').trim().replace(/\/$/, '');
-const CEREBRAS_SERVICE_TIER = String(process.env.CEREBRAS_SERVICE_TIER || 'default').trim().toLowerCase();
-// Text generation uses Cerebras GPT-OSS 120B. OpenAI remains only for embeddings and vision,
-// because gpt-oss-120b is text-only and the existing screen-capture functionality must not break.
-const LLM_DEFAULT_MODEL = CEREBRAS_MODEL;
-const LLM_PROFILE_MODEL = CEREBRAS_MODEL;
-const LLM_VISION_EXTRACT_MODEL = OPENAI_MODEL;
+const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5.6-sol').trim();
+const OPENAI_PROFILE_MODEL = String(process.env.OPENAI_PROFILE_MODEL || OPENAI_MODEL).trim();
+const OPENAI_VISION_MODEL = String(process.env.OPENAI_VISION_MODEL || OPENAI_MODEL).trim();
+// One OpenAI Responses API path for text, profile generation and vision. The surrounding
+// RAG/STT/Electron architecture is intentionally unchanged.
+const LLM_DEFAULT_MODEL = OPENAI_MODEL;
+const LLM_PROFILE_MODEL = OPENAI_PROFILE_MODEL;
+const LLM_VISION_EXTRACT_MODEL = OPENAI_VISION_MODEL;
 const LLM_ROUTING_ENABLED = false;
 const LLM_REASONING_EFFORT = String(process.env.LLM_REASONING_EFFORT || 'low').trim();
 const LLM_VERBOSITY = String(process.env.LLM_VERBOSITY || 'medium').trim();
@@ -59,10 +57,9 @@ else {
   console.log('[BOOT] DEEPGRAM_API_KEY present: true');
   console.log('[BOOT] DEEPGRAM_API_KEY length:', DEEPGRAM_API_KEY.length);
 }
-console.log('[BOOT] OPENAI_API_KEY present:', !!OPENAI_API_KEY, '(embeddings + vision)');
-console.log('[BOOT] CEREBRAS_API_KEY present:', !!CEREBRAS_API_KEY, '(text generation)');
-console.log('[BOOT] LLM provider: Cerebras ->', LLM_DEFAULT_MODEL, '| profile:', LLM_PROFILE_MODEL, '| OpenAI vision:', LLM_VISION_EXTRACT_MODEL, '| embedding:', EMBEDDING_MODEL, '| dims:', EMBEDDING_DIMENSIONS);
-console.log('[BOOT] Cerebras service tier:', CEREBRAS_SERVICE_TIER, '| OpenAI vision service tier:', OPENAI_SERVICE_TIER);
+console.log('[BOOT] OPENAI_API_KEY present:', !!OPENAI_API_KEY, '(text + embeddings + vision)');
+console.log('[BOOT] LLM provider: OpenAI ->', LLM_DEFAULT_MODEL, '| profile:', LLM_PROFILE_MODEL, '| vision:', LLM_VISION_EXTRACT_MODEL, '| embedding:', EMBEDDING_MODEL, '| dims:', EMBEDDING_DIMENSIONS);
+console.log('[BOOT] OpenAI service tier:', OPENAI_SERVICE_TIER, '| reasoning effort:', LLM_REASONING_EFFORT);
 
 const app = express();
 const allowedOrigins = new Set(String(process.env.CORS_ORIGIN || '').split(',').map(value => value.trim()).filter(Boolean));
@@ -207,27 +204,25 @@ async function openAIJson(url, body) {
   if (!response.ok) throw new Error(data?.error?.message || `OpenAI request failed (${response.status})`);
   return data;
 }
-function cerebrasMessages(instructions, input) {
-  const messages = [];
-  if (instructions) messages.push({ role:'system', content:String(instructions) });
-  messages.push({ role:'user', content:typeof input === 'string' ? input : JSON.stringify(input) });
-  return messages;
+function normalizedReasoningEffort(effort) {
+  const value=String(effort||'low').trim().toLowerCase();
+  return ['none','low','medium','high','xhigh','max'].includes(value) ? value : 'low';
 }
-function cerebrasOutputText(data) {
-  return String(data?.choices?.[0]?.message?.content || '').trim();
-}
-async function cerebrasJson({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,responseFormat=null}) {
-  if (!CEREBRAS_API_KEY) throw new Error('CEREBRAS_API_KEY missing on backend');
-  const body = {
-    model, messages:cerebrasMessages(instructions,input), reasoning_effort:['low','medium','high'].includes(String(effort))?String(effort):'low',
-    reasoning_format:'hidden', max_completion_tokens:maxTokens, stream:false
+function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY,stream=false}) {
+  return {
+    model,
+    service_tier:OPENAI_SERVICE_TIER,
+    instructions:String(instructions||''),
+    input,
+    reasoning:{effort:normalizedReasoningEffort(effort)},
+    text:{verbosity:String(verbosity||'medium')},
+    max_output_tokens:maxTokens,
+    stream:!!stream
   };
-  if (CEREBRAS_SERVICE_TIER && ['default','auto','flex','priority'].includes(CEREBRAS_SERVICE_TIER)) body.service_tier=CEREBRAS_SERVICE_TIER;
-  if (responseFormat) body.response_format=responseFormat;
-  const response=await fetch(`${CEREBRAS_API_BASE}/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${CEREBRAS_API_KEY}`},body:JSON.stringify(body)});
-  const data=await response.json().catch(()=>({}));
-  if(!response.ok) throw new Error(data?.error?.message || `Cerebras request failed (${response.status})`);
-  return data;
+}
+async function openAIResponseJson({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY}) {
+  if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY missing on backend');
+  return openAIJson('https://api.openai.com/v1/responses', openAIResponseBody({model,instructions,input,effort,maxTokens,verbosity,stream:false}));
 }
 async function embedTexts(texts) {
   if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY missing on backend');
@@ -369,7 +364,7 @@ function fallbackProfile(resumeText, jdText, yearsExperience, role) {
 async function generateStructuredProfile(resumeText, jdText, yearsExperience, role) {
   const fallback = fallbackProfile(resumeText, jdText, yearsExperience, role);
   try {
-    const data = await cerebrasJson({
+    const data = await openAIResponseJson({
       model:LLM_PROFILE_MODEL,
       instructions:'Create a compact interview-grounding profile. Return JSON only, no markdown. Never invent facts absent from the resume/JD.',
       input:`Years of experience: ${yearsExperience}
@@ -384,7 +379,7 @@ ${jdText.slice(0, 24000)}
 Return JSON with keys candidateSummary (max 1800 chars), jdSummary (max 1200 chars), primarySkills (array max 25), projectHighlights (array max 8), domainVocabulary (array max 60 of exact technology/product/framework/domain terms appearing in the resume or JD, preserving canonical spelling such as LangGraph, LangChain, Kubernetes), targetRole, yearsExperience.`,
       effort:'low', maxTokens:900, responseFormat:{type:'json_object'}
     });
-    const raw = cerebrasOutputText(data);
+    const raw = outputText(data);
     const start = raw.indexOf('{'), end = raw.lastIndexOf('}');
     const parsed = JSON.parse(start >= 0 && end > start ? raw.slice(start, end + 1) : raw);
     return {
@@ -734,7 +729,7 @@ async function ensureModeConformance({answer,responseType,prompt,model,effort}) 
   else if(responseType==='spoken'){const formatted=formatSpokenAnswer(clean);return {answer:formatted,repaired:formatted!==answer};}
 
   try {
-    const correction=await cerebrasJson({
+    const correction=await openAIResponseJson({
       model,
       instructions:`${COPILOT_INSTRUCTIONS}
 
@@ -748,7 +743,7 @@ INCOMPLETE OUTPUT TO REPLACE:
 ${clean}`,
       effort,maxTokens:1800
     });
-    clean=removeExactRepeatedOutput(cerebrasOutputText(correction));
+    clean=removeExactRepeatedOutput(outputText(correction));
     if(responseType==='diagram')clean=makeDrawableDiagram(clean);
     return {answer:clean,repaired:true};
   } catch(err) {
@@ -758,7 +753,7 @@ ${clean}`,
 }
 function selectAnswerRoute(_question, _prepared=null, _options={}) {
   // One quality path only. No Luna/Sol routing and no classifier/model-selection API call.
-  return { model:LLM_DEFAULT_MODEL, effort:LLM_REASONING_EFFORT, tier:'cerebras', reason:'cerebras-gpt-oss-120b' };
+  return { model:LLM_DEFAULT_MODEL, effort:LLM_REASONING_EFFORT, tier:'openai-fast', reason:'openai-sol-fast-low-reasoning' };
 }
 function addTurn(session, question, answer, retrieved=[],responseType='spoken') {
   session.turns.push({ question:normalizeStructuredText(question).slice(0,4000), answer:normalizeStructuredText(answer).slice(0,14000), responseType, retrieved:retrieved.slice(0, TOP_K).map(c => ({source:c.source, section:c.section, text:c.text, score:c.score})), at:Date.now() });
@@ -804,8 +799,8 @@ async function prepareQuestion(email, question, {inputSource=''}={}) {
   const prompt = session ? buildPrompt(session, question, retrieved, followupInfo, correctedQuestion,inputSource,intentQuestion) : `INPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,followupInfo,inputSource)}\n\nREFRAMED CURRENT INTENT\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
   return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, intentQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt } };
 }
-app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'cerebras', llmModel:LLM_DEFAULT_MODEL, cerebrasServiceTier:CEREBRAS_SERVICE_TIER, visionProvider:'openai', openaiServiceTier:OPENAI_SERVICE_TIER, llmRouting:{enabled:false,mode:'cerebras-only',default:LLM_DEFAULT_MODEL}, embeddingModel:EMBEDDING_MODEL }));
-app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'cerebras', llmModel:LLM_DEFAULT_MODEL, cerebrasConfigured:!!CEREBRAS_API_KEY, openaiConfigured:!!OPENAI_API_KEY }));
+app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'openai', llmModel:LLM_DEFAULT_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'openai-only',default:LLM_DEFAULT_MODEL}, embeddingModel:EMBEDDING_MODEL }));
+app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'openai', llmModel:LLM_DEFAULT_MODEL, openaiConfigured:!!OPENAI_API_KEY, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT }));
 
 app.post('/validate-license', (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
@@ -817,7 +812,7 @@ app.post('/validate-license', (req, res) => {
 app.post('/prepare-context', async (req, res) => {
   const email = requireLicensedRequest(req, res); if (!email) return;
   if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:'OPENAI_API_KEY missing on backend' });
-  if (!CEREBRAS_API_KEY) return res.status(500).json({ ok:false, error:'CEREBRAS_API_KEY missing on backend' });
+  if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:'OPENAI_API_KEY missing on backend' });
   const yearsExperience = Number(req.body.yearsExperience);
   const role = normalizeText(req.body.role || '').slice(0,160);
   if (!Number.isFinite(yearsExperience) || yearsExperience < 0 || yearsExperience > 60) return res.status(400).json({ ok:false, error:'Valid yearsExperience is required' });
@@ -863,24 +858,24 @@ app.post('/ask', async (req, res) => {
   const text = normalizeStructuredText(req.body.text || '');
   if (!email || !text) return res.status(400).json({ ok:false, error:'email and text are required' });
   const license = isLicenseValid(email); if (!license.ok) return res.status(401).json({ ok:false, error:license.reason || 'Invalid license' });
-  if (!CEREBRAS_API_KEY) return res.status(500).json({ ok:false, error:'CEREBRAS_API_KEY missing on backend' });
+  if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:'OPENAI_API_KEY missing on backend' });
   if (text.length > 12000) return res.status(400).json({ ok:false, error:'Transcript input too long' });
   try {
     const prepared = await prepareQuestion(email, text);
     if (prepared.rejection) return res.json({ ok:true, answer:prepared.rejection, model:'local-guard', modelTier:'local', contextPrepared:!!prepared.session, retrieved:[], latency:{...prepared.latency, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt} });
     const route = selectAnswerRoute(text, prepared);
     const llmStart = Date.now();
-    const data = await cerebrasJson({
+    const data = await openAIResponseJson({
       model:route.model,instructions:`${COPILOT_INSTRUCTIONS}
 
 ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,
       effort:route.effort,maxTokens:answerTokenBudget(text,false,prepared.responseType)
     });
-    let answer=cerebrasOutputText(data);
+    let answer=outputText(data);
     answer=(await ensureModeConformance({answer,responseType:prepared.responseType,prompt:prepared.prompt,model:route.model,effort:route.effort})).answer;
     if (prepared.session && answer) addTurn(prepared.session,prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
     const latency = { embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, retrievalMode:prepared.latency.retrievalMode, promptReadyMs:prepared.latency.promptReadyMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt };
-    const providerServiceTier=String(data?.service_tier_used||data?.service_tier||CEREBRAS_SERVICE_TIER);
+    const providerServiceTier=String(data?.service_tier||OPENAI_SERVICE_TIER);
     console.log(`[LLM] ${email} model=${route.model} modelTier=${route.tier} serviceTier=${providerServiceTier} total=${latency.totalMs}ms embed=${latency.embeddingMs}ms retrieve=${latency.retrievalMs}ms mode=${prepared.latency.retrievalMode} llm=${latency.llmMs}ms`);
     return res.json({ ok:true, answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, contextPrepared:!!prepared.session, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})), latency });
   } catch (err) {
@@ -938,7 +933,7 @@ app.post('/ask/stream', async (req, res) => {
   const hasImage = /^data:image\/(?:png|jpeg|jpg|webp);base64,/i.test(imageDataUrl);
   if (!email || (!text && !hasImage)) return res.status(400).json({ ok:false, error:'email and text or image are required' });
   const license = isLicenseValid(email); if (!license.ok) return res.status(401).json({ ok:false, error:license.reason || 'Invalid license' });
-  if (!CEREBRAS_API_KEY) return res.status(500).json({ ok:false, error:'CEREBRAS_API_KEY missing on backend' });
+  if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:'OPENAI_API_KEY missing on backend' });
   if (text.length > 12000) return res.status(400).json({ ok:false, error:'Transcript input too long' });
 
   let prepared;
@@ -962,7 +957,7 @@ app.post('/ask/stream', async (req, res) => {
 
   const route = selectAnswerRoute(text, prepared, { hasImage });
 
-  // GPT-OSS 120B is text-only. Preserve the existing direct screenshot path on OpenAI vision.
+  // Preserve the existing direct screenshot path; it now shares the same OpenAI provider.
   if (hasImage) {
     if (!OPENAI_API_KEY) return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for vision'});
     try {
@@ -991,7 +986,7 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasonin
   let activeUpstreamController = null;
   res.on('close', () => { clientClosed = true; try { activeUpstreamController?.abort('client-disconnected'); } catch (_) {} });
   const emit = (event, data) => { if (!clientClosed && !res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
-  emit('meta', { model:route.model, modelTier:route.tier, serviceTierRequested:CEREBRAS_SERVICE_TIER, routeReason:route.reason, phase:'retrieval', contextPrepared:!!prepared.session, embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, promptReadyMs:prepared.latency.promptReadyMs, retrievalMode:prepared.latency.retrievalMode });
+  emit('meta', { model:route.model, modelTier:route.tier, serviceTierRequested:OPENAI_SERVICE_TIER, routeReason:route.reason, phase:'retrieval', contextPrepared:!!prepared.session, embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, promptReadyMs:prepared.latency.promptReadyMs, retrievalMode:prepared.latency.retrievalMode });
 
   if (prepared.rejection) {
     const latency = { ...prepared.latency, firstTokenMs:Date.now()-prepared.latency.startedAt, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt, attempts:0 };
@@ -1017,18 +1012,26 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasonin
       const firstTokenTimer = setTimeout(() => upstreamController.abort('first-token-timeout'), firstTokenTimeoutMs);
       let upstream;
       try {
-        const streamBody={model:route.model,service_tier:CEREBRAS_SERVICE_TIER,messages:cerebrasMessages(`${COPILOT_INSTRUCTIONS}
+        const streamBody=openAIResponseBody({
+          model:route.model,
+          instructions:`${COPILOT_INSTRUCTIONS}
 
-${strictModeInstructions(prepared.responseType)}`,prepared.prompt),reasoning_effort:['low','medium','high'].includes(String(route.effort))?String(route.effort):'low',reasoning_format:'hidden',max_completion_tokens:answerTokenBudget(text,false,prepared.responseType),stream:true};
-        upstream = await fetch(`${CEREBRAS_API_BASE}/chat/completions`, {
+${strictModeInstructions(prepared.responseType)}`,
+          input:prepared.prompt,
+          effort:route.effort,
+          maxTokens:answerTokenBudget(text,false,prepared.responseType),
+          verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',
+          stream:true
+        });
+        upstream = await fetch('https://api.openai.com/v1/responses', {
           method:'POST', signal:upstreamController.signal,
-          headers:{'content-type':'application/json', authorization:`Bearer ${CEREBRAS_API_KEY}`},
+          headers:{'content-type':'application/json', authorization:`Bearer ${OPENAI_API_KEY}`},
           body:JSON.stringify(streamBody)
         });
         if (!upstream.ok) {
           clearTimeout(firstTokenTimer);
           const data = await upstream.json().catch(() => ({}));
-          throw new Error(data?.error?.message || `Cerebras request failed (${upstream.status})`);
+          throw new Error(data?.error?.message || `OpenAI request failed (${upstream.status})`);
         }
         const reader = upstream.body.getReader();
         const decoder = new TextDecoder();
@@ -1045,7 +1048,8 @@ ${strictModeInstructions(prepared.responseType)}`,prepared.prompt),reasoning_eff
             const raw = dataLines.join('\n');
             if (!raw || raw === '[DONE]') continue;
             let evt; try { evt = JSON.parse(raw); } catch (_) { continue; }
-            const delta=String(evt?.choices?.[0]?.delta?.content || '');
+            const eventType=String(evt?.type||'');
+            const delta=eventType==='response.output_text.delta' ? String(evt?.delta||'') : '';
             if (delta) {
               if (firstTokenMs === null) {
                 firstTokenMs = Date.now() - prepared.latency.startedAt;
@@ -1054,8 +1058,9 @@ ${strictModeInstructions(prepared.responseType)}`,prepared.prompt),reasoning_eff
               answer += delta;
               emit('delta', { delta });
             }
-            if (evt?.error) throw new Error(evt.error?.message || 'Cerebras stream error');
-            if (evt?.service_tier_used || evt?.service_tier) providerServiceTier=String(evt.service_tier_used||evt.service_tier);
+            if (eventType==='error' || evt?.error) throw new Error(evt?.error?.message || evt?.message || 'OpenAI stream error');
+            if (eventType==='response.completed' && evt?.response?.service_tier) providerServiceTier=String(evt.response.service_tier);
+            if (eventType==='response.failed') throw new Error(evt?.response?.error?.message || 'OpenAI response failed');
           }
         }
         clearTimeout(firstTokenTimer);
@@ -1078,7 +1083,7 @@ ${strictModeInstructions(prepared.responseType)}`,prepared.prompt),reasoning_eff
     if(conformance.repaired)emit('replace',{text:answer});
     if (!clientClosed && prepared.session && answer) addTurn(prepared.session,hasImage?`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`:prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
     const latency = { embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, retrievalMode:prepared.latency.retrievalMode, promptReadyMs:prepared.latency.promptReadyMs, firstTokenMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt, attempts:streamAttempt };
-    providerServiceTier=providerServiceTier||CEREBRAS_SERVICE_TIER;
+    providerServiceTier=providerServiceTier||OPENAI_SERVICE_TIER;
     console.log(`[LLM stream] ${email} model=${route.model} modelTier=${route.tier} serviceTier=${providerServiceTier} first=${firstTokenMs ?? '-'}ms total=${latency.totalMs}ms embed=${latency.embeddingMs}ms retrieve=${latency.retrievalMs}ms mode=${prepared.latency.retrievalMode} attempts=${streamAttempt}`);
     emit('meta', { model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, phase:'complete', latency, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})) });
     emit('done', { answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, latency });
