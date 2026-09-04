@@ -1,6 +1,6 @@
 {
   "name": "topper",
-  "version": "14.5.5",
+  "version": "14.5.6",
   "description": "Topper interview copilot with plain-text low-latency streaming, Windows system audio, RAG, and multi-screen capture-to-prompt.",
   "main": "main.js",
   "productName": "Topper",

@@ -488,11 +488,12 @@ function isCodingQuestion(prompt) {
   const q=normalizeText(prompt);
   if(!q)return false;
   const explicitRequest=/\b(?:write|provide|show|give|implement|complete|create|debug|fix|compile|solve)\b.{0,45}\b(?:code|program|function|method|class|algorithm|solution|implementation)\b|\b(?:code|program|function|method|algorithm|solution)\b.{0,35}\b(?:write|implement|debug|fix|complete|create)\b/i.test(q);
+  const snippetRequest=/\b(?:show|give|provide|write)?\s*(?:me\s+)?(?:a\s+)?(?:small\s+|simple\s+)?(?:code\s+)?(?:example|snippet)\b.{0,45}\b(?:java|python|c#|c\+\+|javascript|typescript|go|golang|kotlin|sql|shell|bash)\b|\b(?:java|python|c#|c\+\+|javascript|typescript|go|golang|kotlin|sql|shell|bash)\b.{0,45}\b(?:example|snippet)\b/i.test(q);
   const experienceQuestion=/\b(?:have you|do you have|did you|experience (?:with|in)|worked (?:with|on)|used (?:it|that|this|these|those)?\s*(?:in|on)?\s*(?:a|any|past|previous|production)|which project|tell me about your experience)\b/i.test(q);
   // Mentioning "code", "coding" or a "module" in an experience question is
   // not a request to manufacture a program.
-  if(experienceQuestion&&!explicitRequest)return false;
-  if(explicitRequest||/```|\b(?:leetcode|hackerrank)\b/i.test(q))return true;
+  if(experienceQuestion&&!explicitRequest&&!snippetRequest)return false;
+  if(explicitRequest||snippetRequest||/```|\b(?:leetcode|hackerrank)\b/i.test(q))return true;
   if(/\b(?:public|private|protected)\s+(?:static\s+)?(?:class|interface|void|int|string)|\bdef\s+\w+\s*\(|\bfunction\s+\w+\s*\(|\b(?:console\.log|system\.out\.println)\s*\(/i.test(q))return true;
   return /\b(?:find|return|print|calculate|check|remove|reverse|sort|search|merge|validate|count|implement|solve)\b.{0,65}\b(?:string|character|char|array|list|linked list|tree|graph|number|integer|duplicate|non[- ]?repeating|unique|palindrome|anagram|substring|subarray)\b/i.test(q)
     || /\bgiven\b.{0,55}\b(?:string|array|list|tree|graph|number|integer)\b.{0,100}\b(?:find|return|print|calculate|remove|reverse|sort|search|merge|count)\b/i.test(q)
@@ -539,13 +540,16 @@ function responseMode(question, followupInfo=null, inputSource='') {
 }
 function answerTokenBudget(question, hasImage=false,responseType='') {
   const q = String(question || '');
-  if (responseType==='code'||responseType==='diagram'||isCodingQuestion(q)||isDiagramQuestion(q)) return 1800;
-  if (hasImage || /\b(design|architecture|system design)\b/i.test(q)) return 1000;
-  if (/\b(introduce yourself|tell me about yourself|self[- ]introduction)\b/i.test(q)) return 450;
-  if (wantsExpandedAnswer(q)) return 600;
-  // Keep ordinary interview answers compact. The model still has enough room for
-  // a direct answer plus a few useful bullets, while avoiding page-sized responses.
-  return 300;
+  // max_output_tokens is a ceiling, not a target. A slightly larger ceiling prevents
+  // Responses API reasoning tokens from crowding out the visible interview answer.
+  // The prompt still keeps normal answers concise, so this does not force extra verbosity.
+  if (responseType==='code'||isCodingQuestion(q)) return 3600;
+  if (responseType==='diagram'||isDiagramQuestion(q)) return 3000;
+  if (hasImage || /\b(design|architecture|system design)\b/i.test(q)) return 1800;
+  if (/\b(introduce yourself|tell me about yourself|self[- ]introduction)\b/i.test(q)) return 1000;
+  if (wantsExpandedAnswer(q)) return 1400;
+  if (/\b(what is|what are|difference|compare|why|how|explain|describe|experience|implemented|troubleshoot|debug|flow|pipeline|framework)\b/i.test(q)) return 1000;
+  return 800;
 }
 
 function buildPrompt(session, question, retrieved, followupInfo=null, correctedQuestion=question, inputSource='',intentQuestion=correctedQuestion) {
@@ -570,18 +574,20 @@ Treat adjacent/continued interviewer fragments as one intent only when they are 
 ANSWER PRIORITY AND SHAPE:
 1. Answer exactly the last complete interviewer intent. The first sentence must contain the answer I can say immediately. Do not start with acknowledgement, restatement, a dictionary definition, or generic background.
 2. SPOKEN ANSWER SHAPE is authoritative for normal spoken answers:
-   - DIRECT / CONCEPT: 1 direct sentence, then at most 1 short supporting paragraph. If a definition is necessary, keep it to one sentence and immediately explain the production meaning or usage.
-   - FEATURES: 1 direct sentence, blank line, then 3-5 short hyphen bullets. Each bullet must state the feature and the practical reason it matters.
-   - COMPARISON: 1-line distinction, blank line, then 2-4 labelled hyphen bullets. Compare the decision/use case, not just definitions.
-   - EXPERIENCE: 1 direct first-person sentence, then 2-4 short production-focused sentences or bullets covering what I owned, the tools actually used, how the flow worked, and the practical outcome. Never manufacture a named technology just because the JD asks for it.
-   - IMPLEMENTATION_FLOW: 1 direct architecture/implementation choice, blank line, then 3-6 ordered hyphen bullets showing source -> processing -> controls -> target/consumer. Use concrete production mechanics such as retries, idempotency, DQ, RBAC, orchestration or monitoring only when relevant.
-   - TROUBLESHOOTING: immediate production action first, blank line, then 3-5 ordered hyphen bullets covering evidence collection, isolation, fix, and validation. Do not guess one root cause without evidence.
+   - DIRECT / CONCEPT: Start with 1 direct sentence, then add a short 2-4 sentence explanation that connects what it is -> how it works -> why/when it matters. Do not stop at keywords when one more sentence would make the concept speakable.
+   - FEATURES: 1 direct sentence, blank line, then 3-5 short hyphen bullets. Each bullet must be a complete mini-explanation: name the feature, explain the mechanism or behavior, and state the practical reason it matters when useful. Never output keyword-only bullets.
+   - COMPARISON: 1-line distinction, blank line, then 2-4 labelled hyphen bullets. Each bullet must explain the real behavioral/decision difference in a complete sentence, not just list attributes.
+   - EXPERIENCE: 1 direct first-person sentence, then 3-5 short production-focused sentences or bullets covering what I owned, how the important pieces worked together, and the practical outcome. Explain the flow naturally instead of listing tools. Never manufacture a named technology just because the JD asks for it.
+   - IMPLEMENTATION_FLOW: 1 direct architecture/implementation choice, blank line, then 3-6 ordered hyphen bullets showing source -> processing -> controls -> target/consumer. Each step should explain what happens at that stage and why it is there; use concrete production mechanics such as retries, idempotency, DQ, RBAC, orchestration or monitoring only when relevant.
+   - TROUBLESHOOTING: immediate production action first, blank line, then 3-5 ordered hyphen bullets covering evidence collection, isolation, fix, and validation. Each step should say what I inspect/do and what that tells me. Do not guess one root cause without evidence.
 3. Readability is mandatory. Never emit one dense wall of text for a multi-point answer. Put each bullet on its own line and put one blank line before a bullet block. For non-bulleted answers longer than three sentences, use short paragraphs of 1-2 sentences each.
 4. Prefer implementation reality over textbook theory. Explain what runs, where it runs, what data moves, what control is applied, and why the choice is made. Avoid generic phrases such as "it improves scalability", "it is robust", or "it provides seamless integration" unless you name the concrete mechanism that makes that true.
-5. Match length to the question. Narrow factual/correction/follow-up: 1-3 sentences. Normal experience/concept/implementation: roughly 20-40 seconds of speech. End-to-end or explicitly detailed flow: roughly 40-60 seconds. Do not fill the token budget merely because it is available.
+5. Match length to the question. Narrow factual/correction/follow-up: 1-3 sentences. Normal experience/concept/implementation: roughly 30-50 seconds of speech, enough to explain the mechanism and practical meaning without becoming bookish. End-to-end or explicitly detailed flow: roughly 45-75 seconds. Do not fill the token budget merely because it is available.
 6. Strictly answer the boundary asked. Do not volunteer adjacent technologies, security controls, observability, framework variants, or architecture patterns unless they directly answer the current question.
 7. Preserve concrete values/examples from the interviewer. If the interviewer gives a number, SLA, source system, failure point, or requested count, use that exact constraint in the answer.
 8. Sound like a senior engineer speaking naturally: clear, practical, first-person where factual, and immediately speakable. Use complete sentences, not keyword chains. Avoid bookish definitions and sales-style wording.
+   Natural explanation rule: prefer a small connected explanation over a compressed checklist. For a concept, normally state the idea, explain the runtime/working behavior, then add one practical usage or implication when it improves understanding. For an experience answer, connect actions with cause/effect ("we did X so Y happened") instead of stacking product names.
+   Keep technical terms that matter, but explain their role in the sentence. The answer should be easy to read once and say back naturally without the candidate having to mentally expand shorthand.
 9. Do not repeat a stock answer across questions. Adapt to the current intent, actual Resume evidence, JD priorities, years of experience, target role and recent interview context without exposing those sources.
 10. Prefer current production approaches; use legacy approaches only when asked or when the supplied experience specifically requires them.
 
@@ -601,7 +607,7 @@ Only when the interviewer gives a TRUE hypothetical scenario/problem that requir
 Answer the boundary actually asked. Trace the real request/token/data flow point-to-point where relevant. If asked for N scenarios, give exactly N. Mention technologies such as MCP, direct API, OBO, managed identity, client credentials, RBAC, Key Vault, queues, caches, etc. only when they directly explain the requested scenario or are supported by context. Give the implementation choice and operational reason, not a textbook definition.
 
 CODING QUESTIONS:
-When RESPONSE MODE says CODING_REQUIRED, code is mandatory even if the question came from screen capture and even if the interviewer did not literally say "code". Start with "Logic:" and give the simple approach in 1-2 concise lines. Then write "Complete code:" and provide one complete working end-to-end solution. Add concise inline comments to every meaningful logical step so I can explain it line by line. Preserve the requested language, visible method/class signatures, input/output contract and constraints. Never return explanation alone for an algorithmic problem. For a coding follow-up, place the requested explanation/change first and then repeat the complete earlier code, updated when required, so the candidate can continue from the full solution. A language-only follow-up preserves the previous task exactly and rewrites the complete solution in that language. For a visible error/edit, identify the exact failing block and still provide the complete corrected program when enough context is available. Mention complexity and edge cases briefly after code when useful.
+When RESPONSE MODE says CODING_REQUIRED, code is mandatory even if the question came from screen capture and even if the interviewer did not literally say "code". Also treat an explicit request for a small example/snippet that is best demonstrated in code as a coding answer, but do not turn ordinary conceptual or experience questions into coding merely because a programming language is mentioned. Start with "Logic:" and give the simple approach in 1-2 concise lines. Then write "Complete code:" and provide one complete working end-to-end solution or the smallest complete snippet that directly demonstrates the requested concept. Add concise inline comments to every meaningful logical step so I can explain it line by line. Preserve the requested language, visible method/class signatures, input/output contract and constraints. Never return explanation alone for an algorithmic problem. For a coding follow-up, place the requested explanation/change first and then repeat the complete earlier code, updated when required, so the candidate can continue from the full solution. A language-only follow-up preserves the previous task exactly and rewrites the complete solution in that language. For a visible error/edit, identify the exact failing block and still provide the complete corrected program when enough context is available. Mention complexity and edge cases briefly after code when useful.
 
 FLOW / ARCHITECTURE DIAGRAM QUESTIONS:
 When RESPONSE MODE says DRAWABLE_DIAGRAM_REQUIRED, a diagram is mandatory. Give one short overview line, then provide a detailed monospaced Unicode box-drawing diagram designed to be copied into Notepad or redrawn in draw.io. Build real boxes with ┌ ─ ┐ │ └ ┘, use a vertical layout where possible, and include arrows with direction, numbered steps, labelled decision branches, request/data paths, external dependencies, storage and error/return paths relevant to the question. Do not use a one-line arrow sentence or bracket-only placeholders such as [Component]. Do not substitute a prose-only architecture explanation. After the diagram, add only the concise explanation needed to present the flow.
@@ -613,6 +619,12 @@ INTERVIEW ANSWER SHAPE CALIBRATION:
 Interviewer: "How did you secure integrations?" Candidate shape: Start with one direct first-person answer, then explain the 2-4 relevant controls as complete sentences—for example authentication, transport protection, credential storage and authorization—only when supported by context. Do not return a comma-separated technology list.
 Interviewer: "Data is not coming on the landing page. How do you debug it?" Candidate shape: Give the starting check, then walk through the practical troubleshooting sequence (client/API response, data source/data page, logs/tracer, UI mapping/access) in concise complete sentences.
 Interviewer: "What happens when a user opens a case?" Candidate shape: Explain the runtime flow in order from client request to API/data retrieval, server-side access/business-rule evaluation, client rendering and action submission. Keep it conversational and technically specific.
+
+HUMAN EXPLANATION CALIBRATION:
+- Do not answer as a glossary or keyword map. A strong answer should read like a knowledgeable engineer explaining the point to another engineer.
+- Example shape for a concept: "Playwright auto-waiting is built into locator actions and assertions, so I normally do not add separate waits. Before an action such as click or fill, it waits for the element to become actionable, which removes a lot of timing-related flakiness; explicit waits are only for exceptional application conditions."
+- Example shape for troubleshooting: "I fix flaky tests by removing the nondeterminism instead of hiding it with retries. I first use traces/logs/screenshots to identify whether the issue is timing, test data, shared state or an unstable dependency, then I stabilize that specific layer and validate it with repeated isolated runs."
+- These are style examples only. Do not copy their technologies or facts into unrelated answers.
 
 INTERVIEW PRESENTATION CALIBRATION:
 - Narrow factual question: answer directly in 1-3 sentences. Example shape: "Integer division by zero throws ArithmeticException at runtime. If the divisor is the literal 0 in a constant expression, Java can reject it at compile time."
