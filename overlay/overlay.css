@@ -1060,3 +1060,38 @@ html, body, body * { cursor: none !important; }
 /* v14.5.2: keep newest streamed answer fully visible below pane title. */
 .qaTurn { scroll-margin-top: 8px; }
 .qaResponse { padding-top: 1px; }
+
+/* v14.5.5 visual-only overlay refinement.
+   Keeps all existing sizing, typography sizes, layout dimensions and runtime behavior.
+   Reference treatment: neutral charcoal glass with high-contrast white text. */
+.card {
+  background: rgba(20, 20, 22, .72);
+  border-color: rgba(255,255,255,.08);
+  box-shadow: 0 12px 42px rgba(0,0,0,.30);
+}
+body { font-family: Arial, "Segoe UI", sans-serif; }
+.v6Answer, .qaResponse { color: rgba(255,255,255,.96) !important; }
+.paneTitle { color: rgba(255,255,255,.78); }
+.modelLabel, .muted { color: rgba(255,255,255,.62); }
+
+/* Pre-listening controls: keep the existing panel/window size, but place both
+   actions together at the top-center so neither can drift outside the overlay. */
+.joinPanel { position: relative; }
+.startBox {
+  grid-template-columns: minmax(0,1fr) !important;
+  justify-items: stretch;
+  padding-top: 50px;
+  position: relative;
+}
+.joinActions {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100% - 24px);
+  justify-content: center;
+  z-index: 2;
+}
+.joinActions .backBtn,
+.joinActions #joinBtn { min-width: 120px; }
