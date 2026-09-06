@@ -73,6 +73,7 @@ function saveSetupDefaults(payload) {
       jdText:String(payload?.jdText||''),
       yearsExperience:payload?.yearsExperience,
       role:String(payload?.role||''),
+      answerProvider:String(payload?.answerProvider||'openai')==='cerebras'?'cerebras':'openai',
       savedAt:Date.now()
     };
     fs.writeFileSync(setupDefaultsPath(), safeStorage.encryptString(JSON.stringify(compact)), {mode:0o600});
@@ -438,7 +439,8 @@ ipcMain.handle('prepare-context', async (_, payload) => {
         jd: payload.jd || null,
         jdText: String(payload.jdText || ''),
         yearsExperience: payload.yearsExperience,
-        role: String(payload.role || '')
+        role: String(payload.role || ''),
+        answerProvider: String(payload.answerProvider || 'openai') === 'cerebras' ? 'cerebras' : 'openai'
       })
     });
     const data = await res.json().catch(() => ({}));

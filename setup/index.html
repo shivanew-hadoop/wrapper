@@ -43,6 +43,14 @@
         <label>Target role <span>optional</span></label>
         <input id="role" type="text" placeholder="Senior Java Developer">
       </div>
+      <div class="field compact modelField">
+        <label>Live answer model</label>
+        <select id="answerProvider" aria-label="Live answer model">
+          <option value="openai">OpenAI · GPT-5.6 Sol Fast</option>
+          <option value="cerebras">Cerebras · GPT-OSS 120B</option>
+        </select>
+        <small>Used for live interview answers. OpenAI remains available for embeddings and screen understanding.</small>
+      </div>
       <div class="field full">
         <label>Or paste job description</label>
         <textarea id="jdText" rows="5" placeholder="Paste the JD here if you do not upload a file..."></textarea>

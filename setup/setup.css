@@ -7,8 +7,8 @@ header { display:flex; gap:16px; align-items:center; margin-bottom:12px; }
 h1 { margin:0 0 5px; font-size:25px; } header p, .prepareCard p { margin:0; color:#9faec3; font-size:13px; line-height:1.45; }
 .card { background:#121925; border:1px solid #233044; border-radius:16px; padding:14px 16px; margin-bottom:10px; box-shadow:0 15px 45px rgba(0,0,0,.18); }
 label { display:block; font-size:12px; font-weight:800; margin-bottom:7px; color:#d9e6f8; } label span { color:#71849d; font-weight:600; }
-input, textarea { width:100%; border:1px solid #2a3a50; background:#0d1420; color:#f4f8ff; border-radius:10px; padding:10px 12px; outline:none; font:inherit; font-size:13px; }
-input:focus, textarea:focus { border-color:#5d9dff; box-shadow:0 0 0 3px rgba(93,157,255,.09); }
+input, textarea, select { width:100%; border:1px solid #2a3a50; background:#0d1420; color:#f4f8ff; border-radius:10px; padding:10px 12px; outline:none; font:inherit; font-size:13px; }
+input:focus, textarea:focus, select:focus { border-color:#5d9dff; box-shadow:0 0 0 3px rgba(93,157,255,.09); }
 input[type=file] { padding:8px; color:#aab9cd; }
 textarea { resize:vertical; min-height:78px; }
 .row { display:flex; gap:9px; } .emailRow input { flex:1; }
@@ -37,3 +37,6 @@ footer { color:#62748d; font-size:10px; line-height:1.4; padding:3px 4px; }
 .fileRow input[type=file] { flex:1; min-width:0; }
 .removeFile { min-height:36px; padding:0 12px; color:#ffb2b8; background:#2b1720; border:1px solid rgba(255,90,100,.35); white-space:nowrap; }
 .removeFile:hover { background:#3a1c27; }
+
+select { width:100%; border:1px solid #2a3a50; background:#0d1420; color:#f4f8ff; border-radius:10px; padding:10px 12px; outline:none; font:inherit; font-size:13px; }
+.modelField small { line-height:1.35; }
