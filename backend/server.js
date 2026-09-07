@@ -21,6 +21,7 @@ const CEREBRAS_SERVICE_TIER = String(process.env.CEREBRAS_SERVICE_TIER || 'defau
 const HYBRID_CEREBRAS_REASONING_EFFORT = String(process.env.HYBRID_CEREBRAS_REASONING_EFFORT || 'medium').trim().toLowerCase();
 const HYBRID_SOL_UPGRADE_TIMEOUT_MS = Math.max(4000, Number(process.env.HYBRID_SOL_UPGRADE_TIMEOUT_MS || 18000));
 const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5.6-sol').trim();
+const OPENAI_TERRA_MODEL = String(process.env.OPENAI_TERRA_MODEL || 'gpt-5.6-terra').trim();
 const OPENAI_PROFILE_MODEL = String(process.env.OPENAI_PROFILE_MODEL || OPENAI_MODEL).trim();
 const OPENAI_VISION_MODEL = String(process.env.OPENAI_VISION_MODEL || OPENAI_MODEL).trim();
 // One OpenAI Responses API path for text, profile generation and vision. The surrounding
@@ -605,13 +606,22 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
 }
 const COPILOT_INSTRUCTIONS = `You are the candidate in a live senior/lead engineer interview. Return one directly usable answer. Normal answers must be immediately speakable; coding and diagram questions must use the exact practical formats below. Never mention AI, ChatGPT, copilot, prompts, retrieval, transcription correction, evidence matching, or how you inferred the question. Never say "based on my CV/JD", "the resume confirms", "not listed", or similar meta commentary.
 
-GROUNDING AND SOURCE TAGS:
+GROUNDING — INTERNAL ONLY:
 - Treat RETRIEVED EVIDENCE as the only source of truth for candidate-specific experience, project ownership, employers, dates, metrics, tools actually used, responsibilities, certifications, and other resume/JD-specific facts. Do not invent or upgrade a personal claim from general model knowledge.
-- Evidence blocks have IDs such as [R1] for Resume and [J2] for JD. When a sentence or bullet materially uses one of those facts, append one compact visible source tag at the END of that sentence/bullet in exactly this format: ⟦Resume · <section>⟧ or ⟦JD · <section>⟧. Use the exact section name from the supporting evidence block; do not expose internal IDs like R1/J2.
-- Add tags only to claims actually supported by supplied evidence. Do not tag general technical knowledge, reasoning, recommendations, explanations, or common framework behavior. This should look like selective ChatGPT-style sourcing, not citation clutter.
+- Use resume/JD evidence silently to make candidate-specific answers accurate. NEVER print source tags, citations, evidence IDs, resume headings, JD headings, or labels such as "Resume · ..." / "JD · ..." in the visible answer.
+- General technical knowledge may supplement the explanation, but it must not be rewritten as a personal claim unless the supplied resume evidence supports it.
 - If a question asks about the candidate's own experience and the retrieved evidence does not support the requested fact, do not fabricate first-person experience. Give the nearest truthful answer supported by evidence, or state the limitation briefly and then answer the technical part generically.
-- If one sentence is supported by both Resume and JD, prefer the Resume tag for what the candidate actually did and the JD tag only for target-role requirements/alignment.
-- Source tags are metadata for the user interface, not words the candidate must speak aloud. Keep the spoken sentence natural before the tag.
+
+QUESTION INTENT IS AUTHORITATIVE — FOR EVERY MODEL:
+- Parse and answer the current interviewer question independently first. RECENT INTERVIEW CONTEXT is non-authoritative background unless CONTEXTUAL FOLLOW-UP explicitly says YES.
+- Never narrow a new standalone question to the technology/topic from the previous turn. Example: after "Selenium Java framework folder structure", "What automation challenges did you face?" means automation-level challenges, not TestNG-specific challenges.
+- Use previous turns only for explicit pronouns/modifiers/continuations such as "that", "same", "why?", "show code for it", or when CONTEXTUAL FOLLOW-UP says YES.
+- Prefer the exact noun/domain in the current question over nouns appearing only in history.
+
+CONCEPT COMPLETENESS:
+- For a finite, standard concept/list explicitly requested by the interviewer, give the complete commonly supported set in the first answer when it is practical, not a partial list that requires repeated follow-ups.
+- Keep completeness proportional: name the complete set, explain each item briefly, and do not add unrelated framework trivia.
+- If versions/frameworks differ, state that compactly instead of confidently inventing or mixing APIs.
 
 UNDERSTAND THE INTERVIEWER, NOT THE RAW TRANSCRIPT:
 The input is noisy live speech. Remove repetitions, fillers and false starts such as "okay", "basically", "you know", duplicated words and incomplete lead-ins. Infer the final intended technical question from the complete current utterance plus recent interview turns. Silently repair phonetic technology names from the canonical Resume/JD vocabulary and surrounding topic. Never say "you mean", "not X", "I assume", or ask for confirmation when one interpretation is clearly supported by context.
@@ -816,9 +826,9 @@ function selectAnswerRoute(_question, prepared=null, _options={}) {
   // The user explicitly chooses the live answer provider on Prepare Interview.
   // No automatic routing/classifier is introduced, so latency and answer flow remain deterministic.
   const selected=String(prepared?.session?.answerProvider||'openai');
-  if(selected==='hybrid') return {provider:'hybrid',model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,tier:'hybrid-cerebras-sol',reason:'user-selected-hybrid-instant-plus-sol'};
   if(selected==='cerebras') return {provider:'cerebras',model:CEREBRAS_MODEL,effort:LLM_REASONING_EFFORT,tier:'cerebras',reason:'user-selected-cerebras'};
-  return {provider:'openai',model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-fast',reason:'user-selected-openai-sol-fast'};
+  if(selected==='terra') return {provider:'openai',model:OPENAI_TERRA_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-terra-fast',reason:'user-selected-openai-terra-fast'};
+  return {provider:'openai',model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-sol-fast',reason:'user-selected-openai-sol-fast'};
 }
 function addTurn(session, question, answer, retrieved=[],responseType='spoken') {
   session.turns.push({ question:normalizeStructuredText(question).slice(0,4000), answer:normalizeStructuredText(answer).slice(0,14000), responseType, retrieved:retrieved.slice(0, TOP_K).map(c => ({source:c.source, section:c.section, text:c.text, score:c.score})), at:Date.now() });
@@ -864,7 +874,7 @@ async function prepareQuestion(email, question, {inputSource=''}={}) {
   const prompt = session ? buildPrompt(session, question, retrieved, followupInfo, correctedQuestion,inputSource,intentQuestion) : `INPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,followupInfo,inputSource)}\n\nREFRAMED CURRENT INTENT\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
   return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, intentQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt } };
 }
-app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',hybrid:'cerebras-instant-then-sol-final'}, embeddingModel:EMBEDDING_MODEL }));
+app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, terraModel:OPENAI_TERRA_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',options:['openai','terra','cerebras']}, embeddingModel:EMBEDDING_MODEL }));
 app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, openaiConfigured:!!OPENAI_API_KEY, cerebrasConfigured:!!CEREBRAS_API_KEY, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT }));
 
 app.post('/validate-license', (req, res) => {
@@ -881,9 +891,9 @@ app.post('/prepare-context', async (req, res) => {
   const yearsExperience = Number(req.body.yearsExperience);
   const role = normalizeText(req.body.role || '').slice(0,160);
   const requestedProvider=String(req.body.answerProvider || 'openai').trim().toLowerCase();
-  const answerProvider=['openai','cerebras','hybrid'].includes(requestedProvider)?requestedProvider:'openai';
-  if((answerProvider==='cerebras'||answerProvider==='hybrid')&&!CEREBRAS_API_KEY)return res.status(500).json({ok:false,error:'CEREBRAS_API_KEY missing on backend for selected model'});
-  if((answerProvider==='openai'||answerProvider==='hybrid')&&!OPENAI_API_KEY)return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for selected model'});
+  const answerProvider=['openai','terra','cerebras'].includes(requestedProvider)?requestedProvider:'openai';
+  if(answerProvider==='cerebras'&&!CEREBRAS_API_KEY)return res.status(500).json({ok:false,error:'CEREBRAS_API_KEY missing on backend for selected model'});
+  if((answerProvider==='openai'||answerProvider==='terra')&&!OPENAI_API_KEY)return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for selected model'});
   if (!Number.isFinite(yearsExperience) || yearsExperience < 0 || yearsExperience > 60) return res.status(400).json({ ok:false, error:'Valid yearsExperience is required' });
   if (!req.body.resume) return res.status(400).json({ ok:false, error:'Resume is required' });
   const t0 = Date.now();
@@ -909,7 +919,7 @@ app.post('/prepare-context', async (req, res) => {
       stats:{ resumeChars:resumeText.length, jdChars:jdText.length, chunkCount:chunks.length, parseMs, summaryMs, embeddingMs }
     });
     console.log(`[RAG] Prepared ${email}: ${chunks.length} chunks in ${Date.now()-t0}ms`);
-    return res.json({ ok:true, answerProvider, answerModel:answerProvider==='cerebras'?CEREBRAS_MODEL:(answerProvider==='hybrid'?`${CEREBRAS_MODEL} + ${LLM_DEFAULT_MODEL}`:LLM_DEFAULT_MODEL), chunkCount:chunks.length, profile:{ yearsExperience, targetRole:profile.targetRole || role, primarySkills:(profile.primarySkills || []).slice(0,12) }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
+    return res.json({ ok:true, answerProvider, answerModel:answerProvider==='cerebras'?CEREBRAS_MODEL:(answerProvider==='terra'?OPENAI_TERRA_MODEL:LLM_DEFAULT_MODEL), chunkCount:chunks.length, profile:{ yearsExperience, targetRole:profile.targetRole || role, primarySkills:(profile.primarySkills || []).slice(0,12) }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
   } catch (err) {
     console.error('[RAG] Prepare error:', err.message);
     return res.status(500).json({ ok:false, error:err.message || 'Context preparation failed' });
@@ -934,8 +944,15 @@ app.post('/ask', async (req, res) => {
     if (prepared.rejection) return res.json({ ok:true, answer:prepared.rejection, model:'local-guard', modelTier:'local', contextPrepared:!!prepared.session, retrieved:[], latency:{...prepared.latency, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt} });
     const route = selectAnswerRoute(text, prepared);
     const llmStart = Date.now();
+    const cerebrasQuality = route.provider==='cerebras' ? `
+
+CEREBRAS QUALITY CALIBRATION:
+- Match the maturity, relevance and technical precision of a strong senior-engineer interview answer.
+- Current-question intent outranks prior-turn context; do not inherit the previous topic unless this is an explicit follow-up.
+- Do not add plausible-but-unsupported technologies, metrics, files, tools or implementation details.
+- For finite concept lists, be complete on the first response when practical.` : '';
     const data = await providerResponseJson({
-      provider:route.provider,model:route.model,instructions:`${COPILOT_INSTRUCTIONS}
+      provider:route.provider,model:route.model,instructions:`${COPILOT_INSTRUCTIONS}${cerebrasQuality}
 
 ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,
       effort:route.effort,maxTokens:answerTokenBudget(text,false,prepared.responseType)
@@ -1055,7 +1072,7 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasonin
   let activeUpstreamController = null;
   res.on('close', () => { clientClosed = true; try { activeUpstreamController?.abort('client-disconnected'); } catch (_) {} });
   const emit = (event, data) => { if (!clientClosed && !res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
-  emit('meta', { model:route.model, modelTier:route.tier, serviceTierRequested:route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:(route.provider==='hybrid'?`cerebras:${CEREBRAS_SERVICE_TIER} + openai:${OPENAI_SERVICE_TIER}`:OPENAI_SERVICE_TIER), routeReason:route.reason, phase:'retrieval', contextPrepared:!!prepared.session, embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, promptReadyMs:prepared.latency.promptReadyMs, retrievalMode:prepared.latency.retrievalMode });
+  emit('meta', { model:route.model, modelTier:route.tier, serviceTierRequested:route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER, routeReason:route.reason, phase:'retrieval', contextPrepared:!!prepared.session, embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, promptReadyMs:prepared.latency.promptReadyMs, retrievalMode:prepared.latency.retrievalMode });
 
   if (prepared.rejection) {
     const latency = { ...prepared.latency, firstTokenMs:Date.now()-prepared.latency.startedAt, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt, attempts:0 };
@@ -1174,7 +1191,16 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasonin
       const firstTokenTimer = setTimeout(() => upstreamController.abort('first-token-timeout'), firstTokenTimeoutMs);
       let upstream;
       try {
-        const instructions=`${COPILOT_INSTRUCTIONS}
+        const cerebrasQuality = route.provider==='cerebras' ? `
+
+CEREBRAS QUALITY CALIBRATION:
+- Match the maturity, relevance and technical precision of a strong senior-engineer interview answer. Do not compensate for uncertainty with extra high-level architecture or invented implementation details.
+- Current-question intent outranks prior-turn context. Answer only the scope actually asked.
+- For experience questions, use first-person details only when RETRIEVED EVIDENCE supports them; otherwise keep the technical explanation generic and truthful.
+- Prefer 1 direct answer plus 2-5 concise explanatory points over broad generic prose.
+- Do not introduce technologies, patterns, metrics, files, pipelines or tools merely because they are plausible.
+- For finite concept lists, be complete on the first response when practical.` : '';
+        const instructions=`${COPILOT_INSTRUCTIONS}${cerebrasQuality}
 
 ${strictModeInstructions(prepared.responseType)}`;
         const maxTokens=answerTokenBudget(text,false,prepared.responseType);

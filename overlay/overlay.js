@@ -174,21 +174,14 @@ function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=f
 
 function renderAnswerWithSourceTags(target, text) {
   if (!target) return;
-  const clean = String(text || '').replace(/\*\*/g, '');
-  target.textContent = '';
-  const tagPattern = /⟦(Resume|JD)\s*·\s*([^⟧]+)⟧/g;
-  let last = 0;
-  let match;
-  while ((match = tagPattern.exec(clean)) !== null) {
-    if (match.index > last) target.appendChild(document.createTextNode(clean.slice(last, match.index)));
-    const tag = document.createElement('span');
-    tag.className = `sourceTag sourceTag${match[1]}`;
-    tag.textContent = `${match[1]} · ${String(match[2] || '').trim()}`;
-    tag.setAttribute('aria-label', `${match[1]} source: ${String(match[2] || '').trim()}`);
-    target.appendChild(tag);
-    last = tagPattern.lastIndex;
-  }
-  if (last < clean.length) target.appendChild(document.createTextNode(clean.slice(last)));
+  // Grounding stays internal. Never expose resume/JD source metadata in the interview overlay.
+  const clean = String(text || '')
+    .replace(/\*\*/g, '')
+    .replace(/⟦(?:Resume|JD)\s*·\s*[^⟧]+⟧/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/ {2,}/g, ' ')
+    .trim();
+  target.textContent = clean;
 }
 
 function renderPlainAnswer(text) {
