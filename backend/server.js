@@ -18,6 +18,8 @@ const CEREBRAS_API_KEY = String(process.env.CEREBRAS_API_KEY || '').trim();
 const CEREBRAS_MODEL = String(process.env.CEREBRAS_MODEL || 'gpt-oss-120b').trim();
 const CEREBRAS_API_BASE = String(process.env.CEREBRAS_API_BASE || 'https://api.cerebras.ai/v1').trim().replace(/\/+$/, '');
 const CEREBRAS_SERVICE_TIER = String(process.env.CEREBRAS_SERVICE_TIER || 'default').trim();
+const HYBRID_CEREBRAS_REASONING_EFFORT = String(process.env.HYBRID_CEREBRAS_REASONING_EFFORT || 'medium').trim().toLowerCase();
+const HYBRID_SOL_UPGRADE_TIMEOUT_MS = Math.max(4000, Number(process.env.HYBRID_SOL_UPGRADE_TIMEOUT_MS || 18000));
 const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5.6-sol').trim();
 const OPENAI_PROFILE_MODEL = String(process.env.OPENAI_PROFILE_MODEL || OPENAI_MODEL).trim();
 const OPENAI_VISION_MODEL = String(process.env.OPENAI_VISION_MODEL || OPENAI_MODEL).trim();
@@ -232,7 +234,7 @@ async function openAIResponseJson({model=LLM_DEFAULT_MODEL,instructions='',input
 function cerebrasOutputText(data) {
   return String(data?.choices?.[0]?.message?.content || '').trim();
 }
-function cerebrasChatBody({instructions='',input='',maxTokens=420,stream=false}) {
+function cerebrasChatBody({instructions='',input='',maxTokens=420,stream=false,effort=LLM_REASONING_EFFORT}) {
   return {
     model:CEREBRAS_MODEL,
     messages:[
@@ -240,7 +242,7 @@ function cerebrasChatBody({instructions='',input='',maxTokens=420,stream=false})
       {role:'user',content:typeof input==='string'?input:JSON.stringify(input)}
     ],
     max_completion_tokens:maxTokens,
-    reasoning_effort:normalizedReasoningEffort(LLM_REASONING_EFFORT),
+    reasoning_effort:normalizedReasoningEffort(effort),
     stream:!!stream
   };
 }
@@ -590,14 +592,26 @@ function answerTokenBudget(question, hasImage=false,responseType='') {
 function buildPrompt(session, question, retrieved, followupInfo=null, correctedQuestion=question, inputSource='',intentQuestion=correctedQuestion) {
   const profile = session.profile || {};
   const history = session.turns.slice(-MAX_HISTORY_TURNS).map((t,i) => `Turn ${i+1}\nInterviewer: ${t.question}\nCandidate: ${t.answer}`).join('\n\n');
-  const evidence = retrieved.map((c,i) => `[${i+1}] ${c.source.toUpperCase()} · ${c.section}\n${c.text.slice(0, 900)}`).join('\n\n');
+  const evidence = retrieved.map((c,i) => {
+    const sourceName = c.source === 'resume' ? 'Resume' : (c.source === 'jd' ? 'JD' : String(c.source || 'Source'));
+    const sourceId = `${c.source === 'resume' ? 'R' : (c.source === 'jd' ? 'J' : 'S')}${i+1}`;
+    return `[${sourceId}] ${sourceName} · ${c.section}\n${c.text.slice(0, 900)}`;
+  }).join('\n\n');
   const info = followupInfo || resolveFollowupIntent(session, question);
   const followup = info.isFollowup
     ? `YES. Treat the current words as a continuation/modifier of the immediately previous interviewer request. Resolved intent:\n${info.resolvedQuestion}`
     : 'NO';
   return `CANDIDATE PROFILE\nYears: ${session.yearsExperience}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || ''}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'No previous turns.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
 }
-const COPILOT_INSTRUCTIONS = `You are the candidate in a live senior/lead engineer interview. Return one directly usable answer. Normal answers must be immediately speakable; coding and diagram questions must use the exact practical formats below. Never mention AI, ChatGPT, copilot, prompts, retrieval, resume, CV, JD, transcription correction, evidence matching, or how you inferred the question. Never say "based on my CV/JD", "the resume confirms", "not listed", or similar meta commentary.
+const COPILOT_INSTRUCTIONS = `You are the candidate in a live senior/lead engineer interview. Return one directly usable answer. Normal answers must be immediately speakable; coding and diagram questions must use the exact practical formats below. Never mention AI, ChatGPT, copilot, prompts, retrieval, transcription correction, evidence matching, or how you inferred the question. Never say "based on my CV/JD", "the resume confirms", "not listed", or similar meta commentary.
+
+GROUNDING AND SOURCE TAGS:
+- Treat RETRIEVED EVIDENCE as the only source of truth for candidate-specific experience, project ownership, employers, dates, metrics, tools actually used, responsibilities, certifications, and other resume/JD-specific facts. Do not invent or upgrade a personal claim from general model knowledge.
+- Evidence blocks have IDs such as [R1] for Resume and [J2] for JD. When a sentence or bullet materially uses one of those facts, append one compact visible source tag at the END of that sentence/bullet in exactly this format: ⟦Resume · <section>⟧ or ⟦JD · <section>⟧. Use the exact section name from the supporting evidence block; do not expose internal IDs like R1/J2.
+- Add tags only to claims actually supported by supplied evidence. Do not tag general technical knowledge, reasoning, recommendations, explanations, or common framework behavior. This should look like selective ChatGPT-style sourcing, not citation clutter.
+- If a question asks about the candidate's own experience and the retrieved evidence does not support the requested fact, do not fabricate first-person experience. Give the nearest truthful answer supported by evidence, or state the limitation briefly and then answer the technical part generically.
+- If one sentence is supported by both Resume and JD, prefer the Resume tag for what the candidate actually did and the JD tag only for target-role requirements/alignment.
+- Source tags are metadata for the user interface, not words the candidate must speak aloud. Keep the spoken sentence natural before the tag.
 
 UNDERSTAND THE INTERVIEWER, NOT THE RAW TRANSCRIPT:
 The input is noisy live speech. Remove repetitions, fillers and false starts such as "okay", "basically", "you know", duplicated words and incomplete lead-ins. Infer the final intended technical question from the complete current utterance plus recent interview turns. Silently repair phonetic technology names from the canonical Resume/JD vocabulary and surrounding topic. Never say "you mean", "not X", "I assume", or ask for confirmation when one interpretation is clearly supported by context.
@@ -801,8 +815,9 @@ ${clean}`,
 function selectAnswerRoute(_question, prepared=null, _options={}) {
   // The user explicitly chooses the live answer provider on Prepare Interview.
   // No automatic routing/classifier is introduced, so latency and answer flow remain deterministic.
-  const provider=prepared?.session?.answerProvider==='cerebras'?'cerebras':'openai';
-  if(provider==='cerebras') return {provider,model:CEREBRAS_MODEL,effort:LLM_REASONING_EFFORT,tier:'cerebras',reason:'user-selected-cerebras'};
+  const selected=String(prepared?.session?.answerProvider||'openai');
+  if(selected==='hybrid') return {provider:'hybrid',model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,tier:'hybrid-cerebras-sol',reason:'user-selected-hybrid-instant-plus-sol'};
+  if(selected==='cerebras') return {provider:'cerebras',model:CEREBRAS_MODEL,effort:LLM_REASONING_EFFORT,tier:'cerebras',reason:'user-selected-cerebras'};
   return {provider:'openai',model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-fast',reason:'user-selected-openai-sol-fast'};
 }
 function addTurn(session, question, answer, retrieved=[],responseType='spoken') {
@@ -849,7 +864,7 @@ async function prepareQuestion(email, question, {inputSource=''}={}) {
   const prompt = session ? buildPrompt(session, question, retrieved, followupInfo, correctedQuestion,inputSource,intentQuestion) : `INPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,followupInfo,inputSource)}\n\nREFRAMED CURRENT INTENT\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
   return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, intentQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt } };
 }
-app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai'}, embeddingModel:EMBEDDING_MODEL }));
+app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',hybrid:'cerebras-instant-then-sol-final'}, embeddingModel:EMBEDDING_MODEL }));
 app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, openaiConfigured:!!OPENAI_API_KEY, cerebrasConfigured:!!CEREBRAS_API_KEY, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT }));
 
 app.post('/validate-license', (req, res) => {
@@ -865,8 +880,10 @@ app.post('/prepare-context', async (req, res) => {
   if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:'OPENAI_API_KEY missing on backend' });
   const yearsExperience = Number(req.body.yearsExperience);
   const role = normalizeText(req.body.role || '').slice(0,160);
-  const answerProvider = String(req.body.answerProvider || 'openai').trim().toLowerCase()==='cerebras' ? 'cerebras' : 'openai';
-  if(answerProvider==='cerebras'&&!CEREBRAS_API_KEY)return res.status(500).json({ok:false,error:'CEREBRAS_API_KEY missing on backend for selected model'});
+  const requestedProvider=String(req.body.answerProvider || 'openai').trim().toLowerCase();
+  const answerProvider=['openai','cerebras','hybrid'].includes(requestedProvider)?requestedProvider:'openai';
+  if((answerProvider==='cerebras'||answerProvider==='hybrid')&&!CEREBRAS_API_KEY)return res.status(500).json({ok:false,error:'CEREBRAS_API_KEY missing on backend for selected model'});
+  if((answerProvider==='openai'||answerProvider==='hybrid')&&!OPENAI_API_KEY)return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for selected model'});
   if (!Number.isFinite(yearsExperience) || yearsExperience < 0 || yearsExperience > 60) return res.status(400).json({ ok:false, error:'Valid yearsExperience is required' });
   if (!req.body.resume) return res.status(400).json({ ok:false, error:'Resume is required' });
   const t0 = Date.now();
@@ -892,7 +909,7 @@ app.post('/prepare-context', async (req, res) => {
       stats:{ resumeChars:resumeText.length, jdChars:jdText.length, chunkCount:chunks.length, parseMs, summaryMs, embeddingMs }
     });
     console.log(`[RAG] Prepared ${email}: ${chunks.length} chunks in ${Date.now()-t0}ms`);
-    return res.json({ ok:true, answerProvider, answerModel:answerProvider==='cerebras'?CEREBRAS_MODEL:LLM_DEFAULT_MODEL, chunkCount:chunks.length, profile:{ yearsExperience, targetRole:profile.targetRole || role, primarySkills:(profile.primarySkills || []).slice(0,12) }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
+    return res.json({ ok:true, answerProvider, answerModel:answerProvider==='cerebras'?CEREBRAS_MODEL:(answerProvider==='hybrid'?`${CEREBRAS_MODEL} + ${LLM_DEFAULT_MODEL}`:LLM_DEFAULT_MODEL), chunkCount:chunks.length, profile:{ yearsExperience, targetRole:profile.targetRole || role, primarySkills:(profile.primarySkills || []).slice(0,12) }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
   } catch (err) {
     console.error('[RAG] Prepare error:', err.message);
     return res.status(500).json({ ok:false, error:err.message || 'Context preparation failed' });
@@ -1038,7 +1055,7 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasonin
   let activeUpstreamController = null;
   res.on('close', () => { clientClosed = true; try { activeUpstreamController?.abort('client-disconnected'); } catch (_) {} });
   const emit = (event, data) => { if (!clientClosed && !res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
-  emit('meta', { model:route.model, modelTier:route.tier, serviceTierRequested:route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER, routeReason:route.reason, phase:'retrieval', contextPrepared:!!prepared.session, embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, promptReadyMs:prepared.latency.promptReadyMs, retrievalMode:prepared.latency.retrievalMode });
+  emit('meta', { model:route.model, modelTier:route.tier, serviceTierRequested:route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:(route.provider==='hybrid'?`cerebras:${CEREBRAS_SERVICE_TIER} + openai:${OPENAI_SERVICE_TIER}`:OPENAI_SERVICE_TIER), routeReason:route.reason, phase:'retrieval', contextPrepared:!!prepared.session, embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, promptReadyMs:prepared.latency.promptReadyMs, retrievalMode:prepared.latency.retrievalMode });
 
   if (prepared.rejection) {
     const latency = { ...prepared.latency, firstTokenMs:Date.now()-prepared.latency.startedAt, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt, attempts:0 };
@@ -1046,6 +1063,99 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasonin
     emit('meta', { model:'local-guard', modelTier:'local', phase:'complete', latency, retrieved:[] });
     emit('done', { answer:prepared.rejection, model:'local-guard', modelTier:'local', latency });
     return res.end();
+  }
+
+  if (route.provider==='hybrid') {
+    const llmStart=Date.now();
+    const instructions=`${COPILOT_INSTRUCTIONS}\n\n${strictModeInstructions(prepared.responseType)}`;
+    const maxTokens=answerTokenBudget(text,false,prepared.responseType);
+    const cerebrasController=new AbortController();
+    const solController=new AbortController();
+    activeUpstreamController={abort:(reason)=>{try{cerebrasController.abort(reason)}catch(_){};try{solController.abort(reason)}catch(_){}}};
+    let firstTokenMs=null;
+    let provisional='';
+    let finalAnswer='';
+    let cerebrasError=null;
+    let solError=null;
+    let solServiceTier=OPENAI_SERVICE_TIER;
+
+    const streamProvider=async(provider, controller, onDelta)=>{
+      const body=provider==='cerebras'
+        ? cerebrasChatBody({instructions,input:prepared.prompt,maxTokens,stream:true,effort:HYBRID_CEREBRAS_REASONING_EFFORT})
+        : openAIResponseBody({model:LLM_DEFAULT_MODEL,instructions,input:prepared.prompt,effort:LLM_REASONING_EFFORT,maxTokens,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',stream:true});
+      const url=provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:'https://api.openai.com/v1/responses';
+      const key=provider==='cerebras'?CEREBRAS_API_KEY:OPENAI_API_KEY;
+      const response=await fetch(url,{method:'POST',signal:controller.signal,headers:{'content-type':'application/json',authorization:`Bearer ${key}`},body:JSON.stringify(body)});
+      if(!response.ok){const data=await response.json().catch(()=>({}));throw new Error(data?.error?.message||`${provider} request failed (${response.status})`)}
+      const reader=response.body.getReader();
+      const decoder=new TextDecoder();
+      let buffer='';
+      let complete='';
+      while(true){
+        const {done,value}=await reader.read();
+        if(done)break;
+        buffer+=decoder.decode(value,{stream:true});
+        const blocks=buffer.split('\n\n');buffer=blocks.pop()||'';
+        for(const block of blocks){
+          const dataLines=block.split('\n').filter(line=>line.startsWith('data:')).map(line=>line.slice(5).trim());
+          if(!dataLines.length)continue;
+          const raw=dataLines.join('\n'); if(!raw||raw==='[DONE]')continue;
+          let evt;try{evt=JSON.parse(raw)}catch(_){continue}
+          const eventType=String(evt?.type||'');
+          const delta=provider==='cerebras'?String(evt?.choices?.[0]?.delta?.content||''):(eventType==='response.output_text.delta'?String(evt?.delta||''):'');
+          if(delta){complete+=delta;onDelta?.(delta)}
+          if(provider==='openai'&&eventType==='response.completed'&&evt?.response?.service_tier)solServiceTier=String(evt.response.service_tier);
+          if(eventType==='error'||evt?.error)throw new Error(evt?.error?.message||evt?.message||`${provider} stream error`);
+          if(provider==='openai'&&eventType==='response.failed')throw new Error(evt?.response?.error?.message||'OpenAI response failed');
+        }
+      }
+      return normalizeStructuredText(complete);
+    };
+
+    emit('meta',{model:`${CEREBRAS_MODEL} → ${LLM_DEFAULT_MODEL}`,modelTier:route.tier,phase:'hybrid-upgrade',status:'instant-draft'});
+    const cerebrasPromise=streamProvider('cerebras',cerebrasController,(delta)=>{
+      provisional+=delta;
+      if(firstTokenMs===null)firstTokenMs=Date.now()-prepared.latency.startedAt;
+      emit('delta',{delta});
+    }).catch(err=>{cerebrasError=err;console.warn('[Hybrid] Cerebras provisional failed:',err.message);return ''});
+    const solPromise=streamProvider('openai',solController,null).catch(err=>{solError=err;console.warn('[Hybrid] Sol upgrade failed:',err.message);return ''});
+
+    try {
+      emit('meta',{model:LLM_DEFAULT_MODEL,modelTier:route.tier,phase:'hybrid-upgrade',status:'sol-finalizing'});
+      const timeout=new Promise(resolve=>setTimeout(()=>resolve('__HYBRID_TIMEOUT__'),HYBRID_SOL_UPGRADE_TIMEOUT_MS));
+      const solResult=await Promise.race([solPromise,timeout]);
+      if(solResult==='__HYBRID_TIMEOUT__'){
+        try{solController.abort('hybrid-upgrade-timeout')}catch(_){}
+        const cerebrasDone=await cerebrasPromise;
+        finalAnswer=normalizeStructuredText(cerebrasDone||provisional||'');
+      } else {
+        finalAnswer=normalizeStructuredText(solResult||'');
+        if(finalAnswer){try{cerebrasController.abort('sol-final-ready')}catch(_){}}
+        else {
+          const cerebrasDone=await cerebrasPromise;
+          finalAnswer=normalizeStructuredText(cerebrasDone||provisional||'');
+        }
+      }
+      if(finalAnswer && !solError && solResult!=='__HYBRID_TIMEOUT__'){
+        const conformance=await ensureModeConformance({answer:finalAnswer,responseType:prepared.responseType,prompt:prepared.prompt,model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,provider:'openai'});
+        finalAnswer=conformance.answer;
+      }
+      if(finalAnswer && finalAnswer!==normalizeStructuredText(provisional)) emit('replace',{text:finalAnswer});
+      if(!finalAnswer)throw (solError||cerebrasError||new Error('Both hybrid providers returned no answer'));
+      if(firstTokenMs===null){firstTokenMs=Date.now()-prepared.latency.startedAt;emit('delta',{delta:finalAnswer})}
+      if(!clientClosed&&prepared.session)addTurn(prepared.session,prepared.intentQuestion||text,finalAnswer,prepared.retrieved,prepared.responseType);
+      const usedSol=!solError&&solResult!=='__HYBRID_TIMEOUT__'&&!!String(solResult||'').trim();
+      const latency={embeddingMs:prepared.latency.embeddingMs,retrievalMs:prepared.latency.retrievalMs,retrievalMode:prepared.latency.retrievalMode,promptReadyMs:prepared.latency.promptReadyMs,firstTokenMs,llmMs:Date.now()-llmStart,totalMs:Date.now()-prepared.latency.startedAt,attempts:1};
+      console.log(`[LLM hybrid] ${email} provisional=${CEREBRAS_MODEL} final=${usedSol?LLM_DEFAULT_MODEL:CEREBRAS_MODEL} first=${firstTokenMs??'-'}ms total=${latency.totalMs}ms`);
+      emit('meta',{model:usedSol?LLM_DEFAULT_MODEL:CEREBRAS_MODEL,modelTier:route.tier,serviceTier:usedSol?solServiceTier:CEREBRAS_SERVICE_TIER,phase:'complete',latency,retrieved:prepared.retrieved.map(c=>({source:c.source,section:c.section,score:Number(c.score.toFixed(3))}))});
+      emit('done',{answer:finalAnswer,model:usedSol?LLM_DEFAULT_MODEL:CEREBRAS_MODEL,modelTier:route.tier,serviceTier:usedSol?solServiceTier:CEREBRAS_SERVICE_TIER,latency});
+    } catch(err) {
+      console.error('[LLM hybrid] Error:',err.message);
+      emit('error',{error:err.message||'Hybrid LLM stream failed'});
+    } finally {
+      try{cerebrasController.abort('hybrid-finished')}catch(_){};try{solController.abort('hybrid-finished')}catch(_){};
+      return res.end();
+    }
   }
 
   const llmStart = Date.now();

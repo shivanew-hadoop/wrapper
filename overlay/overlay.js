@@ -172,14 +172,33 @@ function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=f
   return turn;
 }
 
+function renderAnswerWithSourceTags(target, text) {
+  if (!target) return;
+  const clean = String(text || '').replace(/\*\*/g, '');
+  target.textContent = '';
+  const tagPattern = /⟦(Resume|JD)\s*·\s*([^⟧]+)⟧/g;
+  let last = 0;
+  let match;
+  while ((match = tagPattern.exec(clean)) !== null) {
+    if (match.index > last) target.appendChild(document.createTextNode(clean.slice(last, match.index)));
+    const tag = document.createElement('span');
+    tag.className = `sourceTag sourceTag${match[1]}`;
+    tag.textContent = `${match[1]} · ${String(match[2] || '').trim()}`;
+    tag.setAttribute('aria-label', `${match[1]} source: ${String(match[2] || '').trim()}`);
+    target.appendChild(tag);
+    last = tagPattern.lastIndex;
+  }
+  if (last < clean.length) target.appendChild(document.createTextNode(clean.slice(last)));
+}
+
 function renderPlainAnswer(text) {
   streamedAnswerText = String(text || '').replace(/\*\*/g, '');
   if (!activeAnswerTurn) {
-    answerEl.textContent = streamedAnswerText;
+    renderAnswerWithSourceTags(answerEl, streamedAnswerText);
     return;
   }
   activeAnswerTurn.answer = streamedAnswerText;
-  activeAnswerTurn.responseElement.textContent = streamedAnswerText;
+  renderAnswerWithSourceTags(activeAnswerTurn.responseElement, streamedAnswerText);
 }
 
 function appendPlainAnswerDelta(delta) {
@@ -721,6 +740,8 @@ window.electronAPI.onLLMStream(msg => {
       if (Number.isFinite(msg.embeddingMs)) bits.push(`embed ${msg.embeddingMs}ms`);
       if (Number.isFinite(msg.retrievalMs)) bits.push(`search ${msg.retrievalMs}ms`);
       modelLabel.textContent = bits.join(' · ') || msg.model || '';
+    } else if (msg.phase === 'hybrid-upgrade') {
+      modelLabel.textContent = msg.status === 'sol-finalizing' ? 'instant answer · upgrading to Sol…' : 'Cerebras instant · Sol quality running…';
     } else if (msg.phase === 'retry') {
       modelLabel.textContent = 'provider retry…';
     } else if (msg.phase === 'format-retry') {
@@ -731,7 +752,8 @@ window.electronAPI.onLLMStream(msg => {
     }
   } else if (msg.type === 'done') {
     flushPendingAnswerDelta();
-    if (!streamHasText) renderPlainAnswer(msg.answer || 'No answer returned.');
+    // Keep provider streaming untouched; only turn source markers into compact pills once complete.
+    renderPlainAnswer(msg.answer || streamedAnswerText || 'No answer returned.');
     if (msg.model) {
       const first = msg.latency?.firstTokenMs;
       modelLabel.textContent = `${msg.model}${Number.isFinite(first) ? ` · first ${first}ms` : ''}`;
