@@ -107,11 +107,13 @@ function formatTurnTime(ms) {
 
 function scrollTurnToTop(turn) {
   if (!turn?.element) return;
-  // offsetTop is relative to the pane, while scrollTop belongs to #answer.
-  // Subtract the answer viewport's own offset so the first response line never
-  // slides under the fixed "LLM ANSWER" title. Keep a small breathing gap.
+  // Position the newly submitted turn at the top of the CURRENT answer viewport.
+  // Use viewport-relative geometry instead of offsetTop because the answer pane is
+  // independently scrollable and may already be deep in previous answers.
   requestAnimationFrame(() => {
-    const target = Math.max(0, turn.element.offsetTop - answerEl.offsetTop - 6);
+    const paneRect = answerEl.getBoundingClientRect();
+    const turnRect = turn.element.getBoundingClientRect();
+    const target = Math.max(0, answerEl.scrollTop + (turnRect.top - paneRect.top) - 6);
     answerEl.scrollTop = target;
   });
 }
@@ -727,6 +729,9 @@ window.electronAPI.onLLMStream(msg => {
       streamedAnswerText = '';
       streamHasText = true;
       if (activeAnswerTurn?.responseElement) activeAnswerTurn.responseElement.textContent = '';
+      // Re-anchor on first provider output as a second guard against layout changes
+      // between Send and first-token arrival. The user can start reading immediately.
+      scrollTurnToTop(activeAnswerTurn);
     }
     // Append each provider delta immediately. Avoid rebuilding the whole answer on every token.
     appendPlainAnswerDelta(msg.delta || '');
