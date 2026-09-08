@@ -172,16 +172,24 @@ function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=f
   return turn;
 }
 
+function cleanVisibleAnswer(text) {
+  return String(text || '')
+    .replace(/\*\*/g, '')
+    // Grounding stays internal. Never expose resume/JD source metadata.
+    .replace(/⟦(?:Resume|JD)\s*·\s*[^⟧]+⟧/g, '')
+    // The live overlay is intentionally plain-text. Strip Markdown code-fence
+    // wrappers for every language (```java, ```python, ```js, ...), while
+    // preserving the code itself exactly as readable text.
+    .replace(/^\s*```[^\r\n`]*\s*$/gm, '')
+    .replace(/^\s*```\s*$/gm, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function renderAnswerWithSourceTags(target, text) {
   if (!target) return;
-  // Grounding stays internal. Never expose resume/JD source metadata in the interview overlay.
-  const clean = String(text || '')
-    .replace(/\*\*/g, '')
-    .replace(/⟦(?:Resume|JD)\s*·\s*[^⟧]+⟧/g, '')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/ {2,}/g, ' ')
-    .trim();
-  target.textContent = clean;
+  target.textContent = cleanVisibleAnswer(text);
 }
 
 function renderPlainAnswer(text) {
@@ -190,7 +198,7 @@ function renderPlainAnswer(text) {
     renderAnswerWithSourceTags(answerEl, streamedAnswerText);
     return;
   }
-  activeAnswerTurn.answer = streamedAnswerText;
+  activeAnswerTurn.answer = cleanVisibleAnswer(streamedAnswerText);
   renderAnswerWithSourceTags(activeAnswerTurn.responseElement, streamedAnswerText);
 }
 

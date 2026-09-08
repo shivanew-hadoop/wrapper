@@ -496,12 +496,18 @@ ipcMain.handle('save-interview-transcript', async (_, payload) => {
     const turns = Array.isArray(payload?.turns) ? payload.turns : [];
     if (!turns.length) return { success:true, skipped:true };
     if (!desktopAccessToken) return { success:false, error:'Launch Topper from the customer portal to save interview history.' };
+    const setup = loadSetupDefaults() || {};
     const data = await desktopRequest('/api/desktop/interview-transcripts', {
       method:'POST',
       body:JSON.stringify({
         startedAt:Number(payload?.startedAt) || Date.now(),
         endedAt:Number(payload?.endedAt) || Date.now(),
-        turns
+        turns,
+        metadata:{
+          resumeFileName:String(setup?.resume?.name || ''),
+          targetRole:String(setup?.role || ''),
+          yearsExperience:setup?.yearsExperience
+        }
       })
     });
     return { success:true, transcriptId:data.transcriptId };

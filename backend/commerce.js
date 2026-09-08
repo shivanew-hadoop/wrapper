@@ -23,6 +23,7 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
   `);
   // Backward-compatible migration for transcript summaries.
   try { db.prepare("ALTER TABLE interview_transcripts ADD COLUMN summary_json TEXT NOT NULL DEFAULT '{}'").run(); } catch (_) {}
+  try { db.prepare("ALTER TABLE interview_transcripts ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'").run(); } catch (_) {}
   const jwtSecret = String(process.env.JWT_SECRET || '');
   if (jwtSecret.length < 32) console.warn('[COMMERCE] JWT_SECRET must be at least 32 characters in production.');
   const secret = jwtSecret || crypto.randomBytes(48).toString('hex');
@@ -151,19 +152,19 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
     };
   }
 
-  const saveTranscript = db.transaction((userId,startedAt,endedAt,turns) => {
+  const saveTranscript = db.transaction((userId,startedAt,endedAt,turns,metadata={}) => {
     const id=crypto.randomUUID();
     const summary=summarizeTranscript(turns);
-    db.prepare('INSERT INTO interview_transcripts(id,user_id,started_at_ms,ended_at_ms,turn_count,transcript_json,summary_json) VALUES(?,?,?,?,?,?,?)')
-      .run(id,userId,startedAt,endedAt,turns.length,JSON.stringify(turns),JSON.stringify(summary));
+    db.prepare('INSERT INTO interview_transcripts(id,user_id,started_at_ms,ended_at_ms,turn_count,transcript_json,summary_json,metadata_json) VALUES(?,?,?,?,?,?,?,?)')
+      .run(id,userId,startedAt,endedAt,turns.length,JSON.stringify(turns),JSON.stringify(summary),JSON.stringify(metadata||{}));
     db.prepare(`DELETE FROM interview_transcripts
       WHERE user_id=? AND id NOT IN (
         SELECT id FROM interview_transcripts WHERE user_id=? ORDER BY ended_at_ms DESC, created_at DESC LIMIT 3
       )`).run(userId,userId);
     return id;
   });
-  const transcriptRows = userId => db.prepare('SELECT id,started_at_ms,ended_at_ms,turn_count,transcript_json,summary_json,created_at FROM interview_transcripts WHERE user_id=? ORDER BY ended_at_ms DESC,created_at DESC LIMIT 3').all(userId)
-    .map(row=>{let turns=[],summary={};try{turns=JSON.parse(row.transcript_json)||[]}catch(_){}try{summary=JSON.parse(row.summary_json||'{}')||{}}catch(_){}return {id:row.id,startedAt:row.started_at_ms,endedAt:row.ended_at_ms,turnCount:row.turn_count,createdAt:row.created_at,summary,turns};});
+  const transcriptRows = userId => db.prepare('SELECT id,started_at_ms,ended_at_ms,turn_count,transcript_json,summary_json,metadata_json,created_at FROM interview_transcripts WHERE user_id=? ORDER BY ended_at_ms DESC,created_at DESC LIMIT 3').all(userId)
+    .map(row=>{let turns=[],summary={},metadata={};try{turns=JSON.parse(row.transcript_json)||[]}catch(_){}try{summary=JSON.parse(row.summary_json||'{}')||{}}catch(_){}try{metadata=JSON.parse(row.metadata_json||'{}')||{}}catch(_){}return {id:row.id,startedAt:row.started_at_ms,endedAt:row.ended_at_ms,turnCount:row.turn_count,createdAt:row.created_at,summary,metadata,turns};});
 
   function pdfSafe(value){
     return String(value??'')
@@ -197,21 +198,25 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
     return lines;
   }
   function buildTranscriptPdf(session,user){
-    const dateText=new Date(session.endedAt).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'});
-    const lines=['TOPPER INTERVIEW TRANSCRIPT',`Account: ${pdfSafe(user.email)}`,`Session: ${pdfSafe(dateText)}`,`Questions: ${session.turnCount}`,''];
-    if(session.summary?.overview){
-      lines.push('SESSION SUMMARY');
-      lines.push(...wrapPdfLine(session.summary.overview));
-      if(session.summary.level) lines.push(...wrapPdfLine(`Level: ${session.summary.level}`));
-      if(session.summary.assessment) lines.push(...wrapPdfLine(session.summary.assessment));
-      lines.push('');
-    }
-    const stamp=ms=>new Date(Number(ms)||Date.now()).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    const meta=session.metadata||{};
+    const fmtDateTime=ms=>new Date(Number(ms)||Date.now()).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
+    const fmtTime=ms=>new Date(Number(ms)||Date.now()).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true}).toLowerCase();
+    const durationMs=Math.max(0,(Number(session.endedAt)||0)-(Number(session.startedAt)||0));
+    const totalSec=Math.round(durationMs/1000), mins=Math.floor(totalSec/60), secs=totalSec%60;
+    const duration=`${mins}m ${String(secs).padStart(2,'0')}s`;
+    const years=(meta.yearsExperience===0||meta.yearsExperience)?String(meta.yearsExperience):'Not provided';
+    const lines=[
+      'TOPPER INTERVIEW TRANSCRIPT',
+      `CV/Resume: ${pdfSafe(meta.resumeFileName||'Not available')}`,
+      `Target Role: ${pdfSafe(meta.targetRole||'Not provided')}    Experience: ${pdfSafe(years)} years`,
+      `Start time: ${fmtDateTime(session.startedAt)}    End time: ${fmtDateTime(session.endedAt)}    Duration: ${duration}`,
+      `Number of questions: ${session.turnCount}`,
+      `Summary: ${pdfSafe(session.summary?.overview||'Completed interview session.')}`,
+      ''
+    ];
     session.turns.forEach((turn,index)=>{
-      lines.push(`Q${index+1}  [${stamp(turn.askedAt)}]`);
-      lines.push(...wrapPdfLine(turn.question));
+      lines.push(...wrapPdfLine(`Q${index+1}-${turn.question}    [${fmtTime(turn.askedAt)}]`));
       lines.push('');
-      lines.push(`Answer  [${stamp(turn.answeredAt)}]`);
       lines.push(...wrapPdfLine(turn.answer));
       lines.push('');
       lines.push('............................................................................................');
@@ -317,19 +322,23 @@ if (adminEmail && adminPassword) {
       const turns=serializeTranscript(req.body?.turns);
       const endedAt=Math.min(Date.now()+60000,Math.max(1,Number(req.body?.endedAt)||Date.now()));
       const startedAt=Math.max(1,Math.min(endedAt,Number(req.body?.startedAt)||endedAt));
-      const transcriptId=saveTranscript(req.desktopUser.id,startedAt,endedAt,turns);
+      const metadata={resumeFileName:cleanTranscriptText(req.body?.metadata?.resumeFileName,260),targetRole:cleanTranscriptText(req.body?.metadata?.targetRole,260),yearsExperience:req.body?.metadata?.yearsExperience};
+      const transcriptId=saveTranscript(req.desktopUser.id,startedAt,endedAt,turns,metadata);
       res.set('Cache-Control','no-store').json({ok:true,transcriptId,retained:Math.min(3,transcriptRows(req.desktopUser.id).length)});
     }catch(e){res.status(400).json({ok:false,error:e.message||'Could not save interview transcript'});}
   });
   app.get('/api/interview-transcripts',auth(),(req,res)=>res.set('Cache-Control','no-store').json({ok:true,sessions:transcriptRows(req.authUser.id)}));
   app.get('/api/interview-transcripts/:id/pdf',auth(),(req,res)=>{
-    const row=db.prepare('SELECT id,started_at_ms,ended_at_ms,turn_count,transcript_json,summary_json FROM interview_transcripts WHERE id=? AND user_id=?').get(String(req.params.id||''),req.authUser.id);
+    const row=db.prepare('SELECT id,started_at_ms,ended_at_ms,turn_count,transcript_json,summary_json,metadata_json FROM interview_transcripts WHERE id=? AND user_id=?').get(String(req.params.id||''),req.authUser.id);
     if(!row)return res.status(404).json({ok:false,error:'Interview transcript not found'});
-    let turns=[],summary={};try{turns=JSON.parse(row.transcript_json)||[]}catch(_){}try{summary=JSON.parse(row.summary_json||'{}')||{}}catch(_){}
-    const session={id:row.id,startedAt:row.started_at_ms,endedAt:row.ended_at_ms,turnCount:row.turn_count,summary,turns};
+    let turns=[],summary={},metadata={};try{turns=JSON.parse(row.transcript_json)||[]}catch(_){}try{summary=JSON.parse(row.summary_json||'{}')||{}}catch(_){}try{metadata=JSON.parse(row.metadata_json||'{}')||{}}catch(_){}
+    const session={id:row.id,startedAt:row.started_at_ms,endedAt:row.ended_at_ms,turnCount:row.turn_count,summary,metadata,turns};
     const pdf=buildTranscriptPdf(session,req.authUser);
-    const day=new Date(session.endedAt).toISOString().slice(0,10);
-    res.set({'Content-Type':'application/pdf','Content-Disposition':`attachment; filename="Topper-Interview-${day}.pdf"`,'Cache-Control':'no-store','Content-Length':String(pdf.length)});
+    const istParts=new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Kolkata',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true}).formatToParts(new Date(session.endedAt));
+    const part=t=>istParts.find(p=>p.type===t)?.value||'';
+    const dayNum=Number(part('day')); const mod100=dayNum%100; const suffix=(mod100>=11&&mod100<=13)?'th':({1:'st',2:'nd',3:'rd'}[dayNum%10]||'th');
+    const fileName=`Topper_${part('month')}${dayNum}${suffix}_${part('hour')}${part('minute')}${part('dayPeriod').toUpperCase()}_IST.pdf`;
+    res.set({'Content-Type':'application/pdf','Content-Disposition':`attachment; filename="${fileName}"`,'Cache-Control':'no-store','Content-Length':String(pdf.length)});
     res.end(pdf);
   });
   const publicBaseFor = req => {

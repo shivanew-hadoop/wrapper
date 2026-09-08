@@ -15,7 +15,12 @@ const PORT = Number(process.env.PORT || 8080);
 const DEEPGRAM_API_KEY = String(process.env.DEEPGRAM_API_KEY || '').trim();
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const CEREBRAS_API_KEY = String(process.env.CEREBRAS_API_KEY || '').trim();
-const CEREBRAS_MODEL = String(process.env.CEREBRAS_MODEL || 'gpt-oss-120b').trim();
+// Cerebras selection is intentionally pinned to OpenAI GPT-OSS 120B.
+// Do not allow an old Railway CEREBRAS_MODEL value to silently route this option to another model.
+const CEREBRAS_MODEL = 'gpt-oss-120b';
+const CEREBRAS_REASONING_EFFORT = ['low','medium','high'].includes(String(process.env.CEREBRAS_REASONING_EFFORT || 'medium').trim().toLowerCase())
+  ? String(process.env.CEREBRAS_REASONING_EFFORT || 'medium').trim().toLowerCase()
+  : 'medium';
 const CEREBRAS_API_BASE = String(process.env.CEREBRAS_API_BASE || 'https://api.cerebras.ai/v1').trim().replace(/\/+$/, '');
 const CEREBRAS_SERVICE_TIER = String(process.env.CEREBRAS_SERVICE_TIER || 'default').trim();
 const HYBRID_CEREBRAS_REASONING_EFFORT = String(process.env.HYBRID_CEREBRAS_REASONING_EFFORT || 'medium').trim().toLowerCase();
@@ -235,30 +240,39 @@ async function openAIResponseJson({model=LLM_DEFAULT_MODEL,instructions='',input
 function cerebrasOutputText(data) {
   return String(data?.choices?.[0]?.message?.content || '').trim();
 }
-function cerebrasChatBody({instructions='',input='',maxTokens=420,stream=false,effort=LLM_REASONING_EFFORT}) {
-  return {
+function cerebrasReasoningEffort(effort=CEREBRAS_REASONING_EFFORT) {
+  const value=String(effort||CEREBRAS_REASONING_EFFORT).trim().toLowerCase();
+  return ['low','medium','high'].includes(value) ? value : CEREBRAS_REASONING_EFFORT;
+}
+function cerebrasChatBody({instructions='',input='',maxTokens=420,stream=false,effort=CEREBRAS_REASONING_EFFORT}) {
+  // Cerebras exposes OpenAI GPT-OSS 120B through its OpenAI-compatible Chat Completions API.
+  // Keep this adapter isolated so Sol/Terra, SQL/RAG, STT and the renderer contracts stay untouched.
+  const body={
     model:CEREBRAS_MODEL,
     messages:[
-      {role:'system',content:String(instructions||'')},
+      {role:'developer',content:String(instructions||'')},
       {role:'user',content:typeof input==='string'?input:JSON.stringify(input)}
     ],
     max_completion_tokens:maxTokens,
-    reasoning_effort:normalizedReasoningEffort(effort),
+    reasoning_effort:cerebrasReasoningEffort(effort),
     stream:!!stream
   };
+  const serviceTier=String(CEREBRAS_SERVICE_TIER||'default').trim().toLowerCase();
+  if(['default','auto','flex','priority'].includes(serviceTier)) body.service_tier=serviceTier;
+  return body;
 }
-async function cerebrasJson({instructions='',input='',maxTokens=420}) {
+async function cerebrasJson({instructions='',input='',maxTokens=420,effort=CEREBRAS_REASONING_EFFORT}) {
   if (!CEREBRAS_API_KEY) throw new Error('CEREBRAS_API_KEY missing on backend');
   const response=await fetch(`${CEREBRAS_API_BASE}/chat/completions`,{
     method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${CEREBRAS_API_KEY}`},
-    body:JSON.stringify(cerebrasChatBody({instructions,input,maxTokens,stream:false}))
+    body:JSON.stringify(cerebrasChatBody({instructions,input,maxTokens,stream:false,effort}))
   });
   const data=await response.json().catch(()=>({}));
   if(!response.ok)throw new Error(data?.error?.message||`Cerebras request failed (${response.status})`);
   return data;
 }
 async function providerResponseJson({provider='openai',model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY}) {
-  if(provider==='cerebras') return cerebrasJson({instructions,input,maxTokens});
+  if(provider==='cerebras') return cerebrasJson({instructions,input,maxTokens,effort});
   return openAIResponseJson({model,instructions,input,effort,maxTokens,verbosity});
 }
 function providerOutputText(provider,data){ return provider==='cerebras' ? cerebrasOutputText(data) : outputText(data); }
@@ -672,7 +686,7 @@ FLOW / ARCHITECTURE DIAGRAM QUESTIONS:
 When RESPONSE MODE says DRAWABLE_DIAGRAM_REQUIRED, a diagram is mandatory. Give one short overview line, then provide a detailed monospaced Unicode box-drawing diagram designed to be copied into Notepad or redrawn in draw.io. Build real boxes with ┌ ─ ┐ │ └ ┘, use a vertical layout where possible, and include arrows with direction, numbered steps, labelled decision branches, request/data paths, external dependencies, storage and error/return paths relevant to the question. Do not use a one-line arrow sentence or bracket-only placeholders such as [Component]. Do not substitute a prose-only architecture explanation. After the diagram, add only the concise explanation needed to present the flow.
 
 FORMAT:
-Return plain text only. Do not use Markdown bold/italic markers, decorative emphasis or colour-oriented formatting. Make the answer visually readable in the existing plain-text overlay: one direct opening sentence/paragraph, then a blank line before bullets when bullets are useful. Use hyphen bullets only; keep them short and normally limit them to 3-5. For comparison/difference questions, prefer paired bullets such as "- OAuth 2.0: ..." and "- JWT: ...", followed by one short practical conclusion when useful. For a narrow fact or yes/no follow-up, stay with 1-3 sentences and no bullets. For small coding questions, do not create a page of explanation: give Logic in 1-2 lines, Complete code with the smallest complete runnable solution, and at most 1-2 lines after it for complexity/edge cases. The minimal labels "Logic:", "Complete code:" and "Flow diagram:" are required only for their matching response modes. Fenced code blocks are allowed when needed to preserve runnable code. Do not give competing solutions unless explicitly asked. Avoid generic transitions such as 'First', 'Second', 'Finally' unless sequence itself matters. Prefer concrete production nouns, exact roles/operations and the reason they were used. If the request is unclear, corrupted, unrelated to an interview, or cannot be answered reliably from the question and supplied context, say that briefly and ask for a clearer interview question; never invent missing facts. The final output must be accurate, question-specific and sufficiently explained for the candidate to speak without mentally expanding keywords. Before returning, remove only content that is repetitive, generic, or outside the exact question; do not remove the short implementation explanation that makes the answer interview-ready.
+Return plain text only. Do not use Markdown bold/italic markers, decorative emphasis or colour-oriented formatting. Make the answer visually readable in the existing plain-text overlay: one direct opening sentence/paragraph, then a blank line before bullets when bullets are useful. Use hyphen bullets only; keep them short and normally limit them to 3-5. For comparison/difference questions, prefer paired bullets such as "- OAuth 2.0: ..." and "- JWT: ...", followed by one short practical conclusion when useful. For a narrow fact or yes/no follow-up, stay with 1-3 sentences and no bullets. For small coding questions, do not create a page of explanation: give Logic in 1-2 lines, Complete code with the smallest complete runnable solution, and at most 1-2 lines after it for complexity/edge cases. The minimal labels "Logic:", "Complete code:" and "Flow diagram:" are required only for their matching response modes. In the live overlay, never emit Markdown triple-backtick code fences or language fence labels for Java, Python, JavaScript, TypeScript, C#, C++, Go, SQL, shell, or any other language. Output the code directly after "Complete code:"; preserve indentation and inline comments. Do not give competing solutions unless explicitly asked. Avoid generic transitions such as 'First', 'Second', 'Finally' unless sequence itself matters. Prefer concrete production nouns, exact roles/operations and the reason they were used. If the request is unclear, corrupted, unrelated to an interview, or cannot be answered reliably from the question and supplied context, say that briefly and ask for a clearer interview question; never invent missing facts. The final output must be accurate, question-specific and sufficiently explained for the candidate to speak without mentally expanding keywords. Before returning, remove only content that is repetitive, generic, or outside the exact question; do not remove the short implementation explanation that makes the answer interview-ready.
 
 INTERVIEW ANSWER SHAPE CALIBRATION:
 Interviewer: "How did you secure integrations?" Candidate shape: Start with one direct first-person answer, then explain the 2-4 relevant controls as complete sentences—for example authentication, transport protection, credential storage and authorization—only when supported by context. Do not return a comma-separated technology list.
@@ -826,7 +840,7 @@ function selectAnswerRoute(_question, prepared=null, _options={}) {
   // The user explicitly chooses the live answer provider on Prepare Interview.
   // No automatic routing/classifier is introduced, so latency and answer flow remain deterministic.
   const selected=String(prepared?.session?.answerProvider||'openai');
-  if(selected==='cerebras') return {provider:'cerebras',model:CEREBRAS_MODEL,effort:LLM_REASONING_EFFORT,tier:'cerebras',reason:'user-selected-cerebras'};
+  if(selected==='cerebras') return {provider:'cerebras',model:CEREBRAS_MODEL,effort:CEREBRAS_REASONING_EFFORT,tier:'cerebras',reason:'user-selected-cerebras-gpt-oss-120b'};
   if(selected==='terra') return {provider:'openai',model:OPENAI_TERRA_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-terra-fast',reason:'user-selected-openai-terra-fast'};
   return {provider:'openai',model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-sol-fast',reason:'user-selected-openai-sol-fast'};
 }
@@ -1205,7 +1219,7 @@ CEREBRAS QUALITY CALIBRATION:
 ${strictModeInstructions(prepared.responseType)}`;
         const maxTokens=answerTokenBudget(text,false,prepared.responseType);
         const streamBody=route.provider==='cerebras'
-          ? cerebrasChatBody({instructions,input:prepared.prompt,maxTokens,stream:true})
+          ? cerebrasChatBody({instructions,input:prepared.prompt,maxTokens,stream:true,effort:route.effort})
           : openAIResponseBody({model:route.model,instructions,input:prepared.prompt,effort:route.effort,maxTokens,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',stream:true});
         const upstreamUrl=route.provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:'https://api.openai.com/v1/responses';
         const upstreamKey=route.provider==='cerebras'?CEREBRAS_API_KEY:OPENAI_API_KEY;
