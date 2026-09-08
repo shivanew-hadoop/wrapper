@@ -107,14 +107,18 @@ function formatTurnTime(ms) {
 
 function scrollTurnToTop(turn) {
   if (!turn?.element) return;
-  // Position the newly submitted turn at the top of the CURRENT answer viewport.
-  // Use viewport-relative geometry instead of offsetTop because the answer pane is
-  // independently scrollable and may already be deep in previous answers.
+  // v14.6.4: newest answer is always the first item in the answer viewport.
+  // This avoids the browser's scroll-limit problem that occurs when a newly appended
+  // short answer does not have enough content below it to be scrolled all the way to
+  // the top. Previous answers remain available below the current answer.
+  if (answerEl.firstElementChild !== turn.element) answerEl.prepend(turn.element);
+
+  // Reset immediately on Send/Enter, then once more after layout so the first streamed
+  // line begins directly under the LLM ANSWER header. We intentionally do not follow
+  // the stream after this; the user controls scrolling once the answer grows.
+  answerEl.scrollTop = 0;
   requestAnimationFrame(() => {
-    const paneRect = answerEl.getBoundingClientRect();
-    const turnRect = turn.element.getBoundingClientRect();
-    const target = Math.max(0, answerEl.scrollTop + (turnRect.top - paneRect.top) - 6);
-    answerEl.scrollTop = target;
+    answerEl.scrollTop = 0;
   });
 }
 
@@ -169,7 +173,9 @@ function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=f
   sessionTurns.push(turn);
   activeAnswerTurn = turn;
   if (answerEl.querySelector('.answerPlaceholder')) answerEl.textContent = '';
-  answerEl.appendChild(buildTurnElement(turn));
+  // Keep the current answer at the top of the pane. Older answers stay directly below
+  // it, preserving visible history without adding synthetic blank scroll space.
+  answerEl.prepend(buildTurnElement(turn));
   scrollTurnToTop(turn);
   return turn;
 }
