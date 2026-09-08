@@ -74,6 +74,7 @@ function flushPendingAnswerDelta() {
   }
   activeAnswerTurn.answer = streamedAnswerText;
   activeAnswerTurn.responseElement.appendChild(document.createTextNode(clean));
+  ensureCurrentTurnAnchorSpace(activeAnswerTurn);
 }
 
 function queuePlainAnswerDelta(delta) {
@@ -105,20 +106,46 @@ function formatTurnTime(ms) {
   return d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
 }
 
+let currentTurnAnchorSpacer = null;
+
+function removeCurrentTurnAnchorSpacer() {
+  if (currentTurnAnchorSpacer?.isConnected) currentTurnAnchorSpacer.remove();
+  currentTurnAnchorSpacer = null;
+}
+
+function ensureCurrentTurnAnchorSpace(turn) {
+  if (!turn?.element || !turn.element.isConnected) return;
+  if (!currentTurnAnchorSpacer) {
+    currentTurnAnchorSpacer = document.createElement('div');
+    currentTurnAnchorSpacer.className = 'currentTurnAnchorSpacer';
+    currentTurnAnchorSpacer.setAttribute('aria-hidden', 'true');
+  }
+  // The temporary spacer exists only while the current answer is being generated.
+  // It supplies enough scroll range for a short newest turn to align directly below
+  // LLM ANSWER without reversing chronological history. It is removed on done/error.
+  if (turn.element.nextSibling !== currentTurnAnchorSpacer) {
+    turn.element.after(currentTurnAnchorSpacer);
+  }
+  const required = Math.max(0, answerEl.clientHeight - turn.element.offsetHeight - 2);
+  currentTurnAnchorSpacer.style.height = `${required}px`;
+}
+
 function scrollTurnToTop(turn) {
   if (!turn?.element) return;
-  // v14.6.4: newest answer is always the first item in the answer viewport.
-  // This avoids the browser's scroll-limit problem that occurs when a newly appended
-  // short answer does not have enough content below it to be scrolled all the way to
-  // the top. Previous answers remain available below the current answer.
-  if (answerEl.firstElementChild !== turn.element) answerEl.prepend(turn.element);
+  ensureCurrentTurnAnchorSpace(turn);
 
-  // Reset immediately on Send/Enter, then once more after layout so the first streamed
-  // line begins directly under the LLM ANSWER header. We intentionally do not follow
-  // the stream after this; the user controls scrolling once the answer grows.
-  answerEl.scrollTop = 0;
+  // History remains chronological (oldest at top, newest at bottom). On Send/Enter,
+  // move only the viewport so the newest answer starts directly below LLM ANSWER.
+  const answerRect = answerEl.getBoundingClientRect();
+  const turnRect = turn.element.getBoundingClientRect();
+  const top = Math.max(0, answerEl.scrollTop + turnRect.top - answerRect.top);
+  answerEl.scrollTop = top;
   requestAnimationFrame(() => {
-    answerEl.scrollTop = 0;
+    ensureCurrentTurnAnchorSpace(turn);
+    const settledAnswerRect = answerEl.getBoundingClientRect();
+    const settledTurnRect = turn.element.getBoundingClientRect();
+    const settledTop = Math.max(0, answerEl.scrollTop + settledTurnRect.top - settledAnswerRect.top);
+    answerEl.scrollTop = settledTop;
   });
 }
 
@@ -173,9 +200,11 @@ function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=f
   sessionTurns.push(turn);
   activeAnswerTurn = turn;
   if (answerEl.querySelector('.answerPlaceholder')) answerEl.textContent = '';
-  // Keep the current answer at the top of the pane. Older answers stay directly below
-  // it, preserving visible history without adding synthetic blank scroll space.
-  answerEl.prepend(buildTurnElement(turn));
+  // Preserve normal chronological history: oldest answer stays at the top and the
+  // newest answer is appended at the bottom. The viewport alone is moved to the new
+  // turn so the user can read its first line immediately.
+  removeCurrentTurnAnchorSpacer();
+  answerEl.appendChild(buildTurnElement(turn));
   scrollTurnToTop(turn);
   return turn;
 }
@@ -771,6 +800,7 @@ window.electronAPI.onLLMStream(msg => {
       modelLabel.textContent = `${msg.model}${Number.isFinite(first) ? ` · first ${first}ms` : ''}`;
     }
     if (activeAnswerTurn && activeAnswerTurn.requestId === msg.requestId) activeAnswerTurn.answeredAt = Date.now();
+    removeCurrentTurnAnchorSpacer();
     activeStreamRequestId = null;
   } else if (msg.type === 'error') {
     const errorText = `LLM error: ${msg.error || 'Request failed'}`;
@@ -781,6 +811,7 @@ window.electronAPI.onLLMStream(msg => {
       activeAnswerTurn.responseElement.textContent = errorText;
     } else answerEl.textContent = errorText;
     modelLabel.textContent = '';
+    removeCurrentTurnAnchorSpacer();
     activeStreamRequestId = null;
   }
 });
