@@ -74,7 +74,7 @@ function flushPendingAnswerDelta() {
   }
   activeAnswerTurn.answer = streamedAnswerText;
   activeAnswerTurn.responseElement.appendChild(document.createTextNode(clean));
-  ensureCurrentTurnAnchorSpace(activeAnswerTurn);
+  ensureCurrentTurnReadingSlot(activeAnswerTurn);
 }
 
 function queuePlainAnswerDelta(delta) {
@@ -106,46 +106,37 @@ function formatTurnTime(ms) {
   return d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
 }
 
-let currentTurnAnchorSpacer = null;
-
-function removeCurrentTurnAnchorSpacer() {
-  if (currentTurnAnchorSpacer?.isConnected) currentTurnAnchorSpacer.remove();
-  currentTurnAnchorSpacer = null;
+function clearCurrentTurnReadingSlot(turn = activeAnswerTurn) {
+  if (!turn?.element) return;
+  turn.element.classList.remove('currentReadingTurn');
+  turn.element.style.minHeight = '';
 }
 
-function ensureCurrentTurnAnchorSpace(turn) {
+function ensureCurrentTurnReadingSlot(turn) {
   if (!turn?.element || !turn.element.isConnected) return;
-  if (!currentTurnAnchorSpacer) {
-    currentTurnAnchorSpacer = document.createElement('div');
-    currentTurnAnchorSpacer.className = 'currentTurnAnchorSpacer';
-    currentTurnAnchorSpacer.setAttribute('aria-hidden', 'true');
-  }
-  // The temporary spacer exists only while the current answer is being generated.
-  // It supplies enough scroll range for a short newest turn to align directly below
-  // LLM ANSWER without reversing chronological history. It is removed on done/error.
-  if (turn.element.nextSibling !== currentTurnAnchorSpacer) {
-    turn.element.after(currentTurnAnchorSpacer);
-  }
-  const required = Math.max(0, answerEl.clientHeight - turn.element.offsetHeight - 2);
-  currentTurnAnchorSpacer.style.height = `${required}px`;
+  // Keep the newest turn at least one answer-viewport tall. This gives a short
+  // answer a stable reading position at the top without adding a scrollable tail
+  // after the response. When the next question starts, this reservation is removed
+  // from the previous turn so chronological history remains compact.
+  turn.element.classList.add('currentReadingTurn');
+  turn.element.style.minHeight = `${Math.max(1, answerEl.clientHeight)}px`;
 }
 
 function scrollTurnToTop(turn) {
   if (!turn?.element) return;
-  ensureCurrentTurnAnchorSpace(turn);
+  ensureCurrentTurnReadingSlot(turn);
 
-  // History remains chronological (oldest at top, newest at bottom). On Send/Enter,
-  // move only the viewport so the newest answer starts directly below LLM ANSWER.
+  // History stays chronological. Only the viewport is positioned at the newest
+  // turn. No token/delta handler changes scrollTop after this initial positioning.
   const answerRect = answerEl.getBoundingClientRect();
   const turnRect = turn.element.getBoundingClientRect();
   const top = Math.max(0, answerEl.scrollTop + turnRect.top - answerRect.top);
   answerEl.scrollTop = top;
   requestAnimationFrame(() => {
-    ensureCurrentTurnAnchorSpace(turn);
+    ensureCurrentTurnReadingSlot(turn);
     const settledAnswerRect = answerEl.getBoundingClientRect();
     const settledTurnRect = turn.element.getBoundingClientRect();
-    const settledTop = Math.max(0, answerEl.scrollTop + settledTurnRect.top - settledAnswerRect.top);
-    answerEl.scrollTop = settledTop;
+    answerEl.scrollTop = Math.max(0, answerEl.scrollTop + settledTurnRect.top - settledAnswerRect.top);
   });
 }
 
@@ -197,13 +188,14 @@ function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=f
     element:null,
     responseElement:null
   };
+  const previousTurn = activeAnswerTurn;
   sessionTurns.push(turn);
   activeAnswerTurn = turn;
   if (answerEl.querySelector('.answerPlaceholder')) answerEl.textContent = '';
   // Preserve normal chronological history: oldest answer stays at the top and the
   // newest answer is appended at the bottom. The viewport alone is moved to the new
   // turn so the user can read its first line immediately.
-  removeCurrentTurnAnchorSpacer();
+  clearCurrentTurnReadingSlot(previousTurn);
   answerEl.appendChild(buildTurnElement(turn));
   scrollTurnToTop(turn);
   return turn;
@@ -800,7 +792,7 @@ window.electronAPI.onLLMStream(msg => {
       modelLabel.textContent = `${msg.model}${Number.isFinite(first) ? ` · first ${first}ms` : ''}`;
     }
     if (activeAnswerTurn && activeAnswerTurn.requestId === msg.requestId) activeAnswerTurn.answeredAt = Date.now();
-    removeCurrentTurnAnchorSpacer();
+    ensureCurrentTurnReadingSlot(activeAnswerTurn);
     activeStreamRequestId = null;
   } else if (msg.type === 'error') {
     const errorText = `LLM error: ${msg.error || 'Request failed'}`;
@@ -811,7 +803,7 @@ window.electronAPI.onLLMStream(msg => {
       activeAnswerTurn.responseElement.textContent = errorText;
     } else answerEl.textContent = errorText;
     modelLabel.textContent = '';
-    removeCurrentTurnAnchorSpacer();
+    ensureCurrentTurnReadingSlot(activeAnswerTurn);
     activeStreamRequestId = null;
   }
 });

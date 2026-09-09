@@ -1116,7 +1116,7 @@ body { font-family: Arial, "Segoe UI", sans-serif; }
 .sourceTagResume { border-color:rgba(124,231,234,.26); }
 .sourceTagJD { border-color:rgba(255,217,138,.24); }
 
-/* v14.6.5: transient scroll range for the actively streaming newest answer only.
-   Keeps chronological history intact while allowing the current answer to align
-   under the pane title. Removed immediately when the request finishes. */
-.currentTurnAnchorSpacer { flex: 0 0 auto; width: 1px; pointer-events: none; user-select: none; }
+/* v14.6.6: stable current-answer reading slot. The newest turn reserves one viewport
+   while it is current, so short and long responses both begin at the same top
+   reading position. The reservation collapses when the next turn is created. */
+.currentReadingTurn { box-sizing: border-box; }
