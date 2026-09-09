@@ -73,7 +73,7 @@ function saveSetupDefaults(payload) {
       jdText:String(payload?.jdText||''),
       yearsExperience:payload?.yearsExperience,
       role:String(payload?.role||''),
-      answerProvider:['openai','terra','cerebras'].includes(String(payload?.answerProvider||'openai'))?String(payload?.answerProvider||'openai'):'openai',
+      answerProvider:['openai','terra','luna','cerebras'].includes(String(payload?.answerProvider||'openai'))?String(payload?.answerProvider||'openai'):'openai',
       savedAt:Date.now()
     };
     fs.writeFileSync(setupDefaultsPath(), safeStorage.encryptString(JSON.stringify(compact)), {mode:0o600});
@@ -117,7 +117,7 @@ async function usageCall(route, body) { const r=await fetch(`${backendBase()}${r
 function armCreditHardStop(remainingSeconds) { clearTimeout(creditHardStopTimer); if(Number.isFinite(remainingSeconds)) creditHardStopTimer=setTimeout(()=>hardStopCredits(),Math.max(0,remainingSeconds)*1000+500); }
 async function hardStopCredits() { if(!started)return; resetRuntimeFlags(); await stopSystemAudioCapture().catch(()=>{}); stopRemoteTranscriptStream(); await stopUsageSession(); sendCredits({remainingSeconds:0,status:'exhausted'}); sendStatus('Credits exhausted. Listening stopped.'); }
 async function stopUsageSession() { clearInterval(usageHeartbeatTimer);clearTimeout(creditHardStopTimer);usageHeartbeatTimer=null;creditHardStopTimer=null;if(usageSessionId){const id=usageSessionId;usageSessionId='';await usageCall('/api/usage/stop',{sessionId:id}).catch(()=>{});} }
-async function startUsageSession(email) { const d=await usageCall('/api/usage/start',{email,deviceId}); if(!d.ok)throw new Error(d.error||'No credits remaining'); usageSessionId=d.sessionId;sendCredits(d);armCreditHardStop(d.remainingSeconds);usageHeartbeatTimer=setInterval(async()=>{if(!usageSessionId)return;try{const s=await usageCall('/api/usage/heartbeat',{sessionId:usageSessionId});sendCredits(s);armCreditHardStop(s.remainingSeconds);if(!s.ok||s.status==='exhausted')await hardStopCredits();}catch(_){sendStatus('Credit service reconnecting…');}},5000);return d; }
+async function startUsageSession(email) { const d=await usageCall('/api/usage/start',{email,deviceId}); if(!d.ok)throw new Error(d.error||'No credits remaining'); usageSessionId=d.sessionId;sendCredits(d);armCreditHardStop(d.remainingSeconds);usageHeartbeatTimer=setInterval(async()=>{if(!usageSessionId)return;try{const s=await usageCall('/api/usage/heartbeat',{sessionId:usageSessionId});sendCredits(s);armCreditHardStop(s.remainingSeconds);if(!s.ok||s.status==='exhausted')await hardStopCredits();}catch(err){console.warn('[Credits] Heartbeat temporarily unavailable; retrying:', err?.message || err);}},5000);return d; }
 
 function resetRuntimeFlags() {
   started = false;
@@ -277,6 +277,7 @@ function createSetupWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false }
   });
   setupWindow.loadFile(path.join(__dirname, 'setup', 'index.html'));
+  setupWindow.maximize();
   setupWindow.on('closed', () => { setupWindow = null; });
 }
 
@@ -284,15 +285,15 @@ function createOverlayWindow() {
   if (overlayWindow && !overlayWindow.isDestroyed()) { overlayWindow.show(); return; }
   const { workArea } = screen.getPrimaryDisplay();
   const defaultBounds = {
-    width: Math.min(1050, workArea.width - 32),
-    height: Math.min(620, workArea.height - 48),
-    x: workArea.x + Math.max(16, workArea.width - Math.min(1050, workArea.width - 32) - 16),
+    width: Math.min(840, workArea.width - 32),
+    height: Math.min(496, workArea.height - 48),
+    x: workArea.x + Math.max(16, workArea.width - Math.min(840, workArea.width - 32) - 16),
     y: workArea.y + 32
   };
   try {
-    const saved = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'overlay-bounds.json'), 'utf8'));
+    const saved = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'overlay-bounds-v1467.json'), 'utf8'));
     const visible = screen.getAllDisplays().some(d => saved.x < d.bounds.x + d.bounds.width && saved.x + saved.width > d.bounds.x && saved.y < d.bounds.y + d.bounds.height && saved.y + saved.height > d.bounds.y);
-    if (visible && saved.width >= 900 && saved.height >= 520) expandedOverlayBounds = saved;
+    if (visible && saved.width >= 680 && saved.height >= 430) expandedOverlayBounds = saved;
   } catch (_) {}
   const initialBounds = expandedOverlayBounds || defaultBounds;
   overlayWindow = new BrowserWindow({
@@ -316,7 +317,7 @@ function createOverlayWindow() {
     expandedOverlayBounds = b;
     clearTimeout(boundsSaveTimer);
     boundsSaveTimer = setTimeout(() => {
-      try { fs.writeFileSync(path.join(app.getPath('userData'), 'overlay-bounds.json'), JSON.stringify(expandedOverlayBounds), {mode:0o600}); } catch (_) {}
+      try { fs.writeFileSync(path.join(app.getPath('userData'), 'overlay-bounds-v1467.json'), JSON.stringify(expandedOverlayBounds), {mode:0o600}); } catch (_) {}
     }, 250);
   };
   overlayWindow.on('resize', rememberBounds);
@@ -440,7 +441,7 @@ ipcMain.handle('prepare-context', async (_, payload) => {
         jdText: String(payload.jdText || ''),
         yearsExperience: payload.yearsExperience,
         role: String(payload.role || ''),
-        answerProvider: ['openai','terra','cerebras'].includes(String(payload.answerProvider || 'openai')) ? String(payload.answerProvider || 'openai') : 'openai'
+        answerProvider: ['openai','terra','luna','cerebras'].includes(String(payload.answerProvider || 'openai')) ? String(payload.answerProvider || 'openai') : 'openai'
       })
     });
     const data = await res.json().catch(() => ({}));

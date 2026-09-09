@@ -4,6 +4,14 @@ let processor = null;
 let source = null;
 let sink = null;
 let running = false;
+let intentionalStop = false;
+let recoveryTimer = null;
+let healthTimer = null;
+let lastAudioCallbackAt = 0;
+let recovering = false;
+
+const AUDIO_CALLBACK_STALL_MS = 7000;
+const RECOVERY_DELAY_MS = 1200;
 
 function resampleTo16k(input, inputRate) {
   if (inputRate === 16000) return input;
@@ -30,8 +38,42 @@ function floatToPcm16(float32) {
   return new Uint8Array(pcm.buffer);
 }
 
-async function start() {
-  if (running) return;
+function clearPipeline({ stopTracks = true } = {}) {
+  running = false;
+  try { if (processor) processor.disconnect(); } catch (_) {}
+  try { if (source) source.disconnect(); } catch (_) {}
+  try { if (sink) sink.disconnect(); } catch (_) {}
+  if (stopTracks && stream) stream.getTracks().forEach(t => { try { t.stop(); } catch (_) {} });
+  if (ctx) ctx.close().catch(() => {});
+  stream = ctx = processor = source = sink = null;
+}
+
+function scheduleRecovery(reason) {
+  if (intentionalStop || recovering || recoveryTimer) return;
+  recovering = true;
+  window.systemAudioAPI.status(`System audio interrupted (${reason}). Recovering automatically...`);
+  recoveryTimer = setTimeout(async () => {
+    recoveryTimer = null;
+    clearPipeline();
+    recovering = false;
+    await start(true);
+  }, RECOVERY_DELAY_MS);
+}
+
+function armHealthWatch() {
+  if (healthTimer) clearInterval(healthTimer);
+  healthTimer = setInterval(() => {
+    if (intentionalStop || !running) return;
+    const audioTrack = stream?.getAudioTracks?.()[0];
+    if (!audioTrack || audioTrack.readyState === 'ended') return scheduleRecovery('audio track ended');
+    if (ctx?.state === 'suspended') ctx.resume().catch(() => scheduleRecovery('audio context suspended'));
+    if (lastAudioCallbackAt && Date.now() - lastAudioCallbackAt > AUDIO_CALLBACK_STALL_MS) scheduleRecovery('audio processing stalled');
+  }, 2000);
+}
+
+async function start(isRecovery = false) {
+  if (running || recoveryTimer) return;
+  intentionalStop = false;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
       audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
@@ -40,13 +82,16 @@ async function start() {
     const audioTracks = stream.getAudioTracks();
     if (!audioTracks.length) throw new Error('Windows did not provide a system-audio track.');
 
+    audioTracks[0].addEventListener('ended', () => { if (!intentionalStop) scheduleRecovery('audio track ended'); }, { once:true });
     ctx = new AudioContext({ latencyHint: 'interactive' });
     source = ctx.createMediaStreamSource(new MediaStream(audioTracks));
     processor = ctx.createScriptProcessor(2048, Math.max(1, source.channelCount || 1), 1);
     sink = ctx.createGain();
     sink.gain.value = 0;
+    lastAudioCallbackAt = Date.now();
     processor.onaudioprocess = (event) => {
       if (!running) return;
+      lastAudioCallbackAt = Date.now(); // callback health, including legitimate silence
       const channels = event.inputBuffer.numberOfChannels;
       const len = event.inputBuffer.length;
       const mono = new Float32Array(len);
@@ -61,21 +106,24 @@ async function start() {
     processor.connect(sink);
     sink.connect(ctx.destination);
     running = true;
-    window.systemAudioAPI.status(`Windows system audio active (${ctx.sampleRate} Hz -> 16 kHz mono).`);
+    armHealthWatch();
+    window.systemAudioAPI.status(isRecovery
+      ? `Windows system audio recovered (${ctx.sampleRate} Hz -> 16 kHz mono).`
+      : `Windows system audio active (${ctx.sampleRate} Hz -> 16 kHz mono).`);
   } catch (err) {
-    window.systemAudioAPI.error(err?.message || String(err));
-    stop();
+    clearPipeline();
+    if (isRecovery && !intentionalStop) scheduleRecovery(err?.message || 'capture restart failed');
+    else window.systemAudioAPI.error(err?.message || String(err));
   }
 }
 
 function stop() {
-  running = false;
-  try { if (processor) processor.disconnect(); } catch (_) {}
-  try { if (source) source.disconnect(); } catch (_) {}
-  try { if (sink) sink.disconnect(); } catch (_) {}
-  if (stream) stream.getTracks().forEach(t => t.stop());
-  if (ctx) ctx.close().catch(() => {});
-  stream = ctx = processor = source = sink = null;
+  intentionalStop = true;
+  recovering = false;
+  if (recoveryTimer) clearTimeout(recoveryTimer);
+  if (healthTimer) clearInterval(healthTimer);
+  recoveryTimer = healthTimer = null;
+  clearPipeline();
 }
-window.systemAudioAPI.onStart(start);
+window.systemAudioAPI.onStart(() => start(false));
 window.systemAudioAPI.onStop(stop);

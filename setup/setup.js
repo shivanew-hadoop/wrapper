@@ -10,7 +10,7 @@ async function loadPreviousSetup(){
   const result=await window.electronAPI.getSetupDefaults?.().catch(()=>null);previousSetup=result?.defaults||null;if(!previousSetup)return;
   if(previousSetup.yearsExperience!==undefined&&previousSetup.yearsExperience!==null)years.value=String(previousSetup.yearsExperience);
   if(previousSetup.role!==undefined)role.value=String(previousSetup.role||'');
-  if(previousSetup.answerProvider){const saved=String(previousSetup.answerProvider);answerProvider.value=['openai','terra','cerebras'].includes(saved)?saved:'openai';}
+  if(previousSetup.answerProvider){const saved=String(previousSetup.answerProvider);answerProvider.value=['openai','terra','luna','cerebras'].includes(saved)?saved:'openai';}
   if(previousSetup.jdText)jdText.value=String(previousSetup.jdText);
   if(previousSetup.resume?.name){$('resumeMeta').textContent=`Previous resume ready · ${previousSetup.resume.name} · choose a file only to replace it`;removeResume.classList.remove('hidden');}
   if(previousSetup.jd?.name){$('jdMeta').textContent=`Previous JD ready · ${previousSetup.jd.name} · choose a file only to replace it`;removeJd.classList.remove('hidden');}
