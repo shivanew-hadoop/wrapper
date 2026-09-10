@@ -57,6 +57,8 @@ let llmTimer = null;
 let feedbackTimer = null;
 let llmRequestId = 0;
 let activeStreamRequestId = null;
+let activeStreamSentAt = 0;
+let firstRenderPerfReported = false;
 let streamHasText = false;
 let streamedAnswerText = '';
 let pendingRenderDelta = '';
@@ -592,6 +594,8 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   if (activeStreamRequestId) window.electronAPI.cancelLLMStream(activeStreamRequestId);
   const requestId = `q-${Date.now()}-${++llmRequestId}`;
   activeStreamRequestId = requestId;
+  activeStreamSentAt = Date.now();
+  firstRenderPerfReported = false;
   streamHasText = false;
   streamedAnswerText = '';
   pendingRenderDelta = '';
@@ -602,7 +606,7 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   // Do not insert a local 'Thinking' state. The first provider delta is rendered immediately.
   modelLabel.textContent = '';
   feedback(auto ? 'Auto sent' : 'Sent');
-  window.electronAPI.startLLMStream({ requestId, text, inputSource:source, licenseEmail:effectiveEmail() });
+  window.electronAPI.startLLMStream({ requestId, text, inputSource:source, licenseEmail:effectiveEmail(), clientSentAt:activeStreamSentAt });
   return true;
 }
 
@@ -762,6 +766,10 @@ window.electronAPI.onLLMStream(msg => {
     }
     // Append each provider delta immediately. Avoid rebuilding the whole answer on every token.
     appendPlainAnswerDelta(msg.delta || '');
+    if (!firstRenderPerfReported) {
+      firstRenderPerfReported = true;
+      requestAnimationFrame(() => window.electronAPI.reportLLMPerf?.({requestId:activeStreamRequestId,licenseEmail:effectiveEmail(),firstRenderMs:Date.now()-activeStreamSentAt}));
+    }
   } else if (msg.type === 'replace') {
     flushPendingAnswerDelta();
     streamHasText=true;

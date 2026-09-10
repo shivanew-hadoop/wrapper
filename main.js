@@ -559,12 +559,21 @@ ipcMain.on('cancel-llm-stream', (_event, requestId) => {
   if (controller) controller.abort();
 });
 
+
+ipcMain.on('llm-perf', async (_event, payload) => {
+  try {
+    const email = String(payload?.licenseEmail || global.currentLicenseEmail || '').trim().toLowerCase();
+    await fetch(`${backendBase()}/perf/client`, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email,requestId:String(payload?.requestId||''),firstRenderMs:Number(payload?.firstRenderMs)})});
+  } catch (_) { /* diagnostics must never affect interview flow */ }
+});
+
 ipcMain.on('ask-llm-stream', async (event, payload) => {
   const requestId = String(payload?.requestId || Date.now());
   const prompt = String(payload?.text || '').trim();
   const imageDataUrl = String(payload?.imageDataUrl || '').trim();
   const captureSource = String(payload?.captureSource || '').trim();
   const inputSource = String(payload?.inputSource || '').trim().slice(0,40);
+  const clientSentAt = Number(payload?.clientSentAt || 0);
   const email = String(payload?.licenseEmail || global.currentLicenseEmail || '').trim().toLowerCase();
   const send = data => {
     try { if (!event.sender.isDestroyed()) event.sender.send('llm-stream', { requestId, ...data }); } catch (_) {}
@@ -577,7 +586,7 @@ ipcMain.on('ask-llm-stream', async (event, payload) => {
     const res = await fetch(`${backendBase()}/ask/stream`, {
       method:'POST', signal:controller.signal,
       headers:{'content-type':'application/json'},
-      body:JSON.stringify({ email, text:prompt, imageDataUrl, captureSource, inputSource })
+      body:JSON.stringify({ email, text:prompt, imageDataUrl, captureSource, inputSource, requestId, clientSentAt })
     });
     if (!res.ok) {
       const body = await res.text();

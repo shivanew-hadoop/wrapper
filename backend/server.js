@@ -64,6 +64,8 @@ fs.mkdirSync(DATA_DIR, { recursive:true });
 // Per-process, per-user interview context. Nothing is persisted to disk always.
 const interviewSessions = new Map();
 const queryEmbeddingCache = new Map();
+const retrievalResultCache = new Map();
+const RETRIEVAL_RESULT_CACHE_MAX = 300;
 
 if (!DEEPGRAM_API_KEY) console.warn('[BOOT] WARNING: DEEPGRAM_API_KEY missing');
 else {
@@ -583,6 +585,23 @@ function spokenAnswerShape(question) {
   if(/\b(what is|what are|why|when|where|which)\b/i.test(q))return 'CONCEPT';
   return 'DIRECT';
 }
+function exampleGuidance(question, followupInfo=null) {
+  const q=normalizeText(question).toLowerCase();
+  const shape=spokenAnswerShape(question);
+  const explicit=/\b(example|examples|for example|scenario|use case|real[- ]?time|real[- ]?world|where did you use|how did you use|what did you implement|what exactly you did|implemented in your project|used in your project|in your project)\b/i.test(q);
+  const projectApplication=/\b(used|implemented|applied|handled|handling|business logic|additional logic|project|production|current engagement|worked on)\b/i.test(q);
+  const narrowCorrection=/^(?:no[,. ]+|correct|right|but|okay|so)?\s*(?:is that|does that|will that|can that|are you saying|do you mean|why\??$|how\??$)/i.test(q)
+    || /\b(checkpoint only|insert(?:s)? versus update(?:s)?|identify insert|identify update)\b/i.test(q);
+  const alreadyConcreteFlow=shape==='IMPLEMENTATION_FLOW' && /\b(how (?:are|do|did|would)|load(?:ed|ing)?|process(?:ed|ing)?|flow|pipeline|from .{0,30} to)\b/i.test(q);
+
+  if(explicit) return 'INCLUDE_ONE: The interviewer explicitly asks for, or strongly implies, a practical example. Include exactly one concise example after the direct explanation. For candidate/project-specific examples, use only facts supported by RETRIEVED EVIDENCE; never invent project details.';
+  if(narrowCorrection) return 'OMIT_UNLESS_NEEDED: This is primarily a correction/clarification. Do not add a separate example when the mechanism itself answers the question; add one only if it resolves otherwise-remaining ambiguity.';
+  if(projectApplication && ['EXPERIENCE','CONCEPT','DIRECT','FEATURES'].includes(shape)) return 'INCLUDE_IF_GROUNDED_AND_USEFUL: Prefer one short concrete project/production example when it makes the answer easier to explain. Use only RETRIEVED EVIDENCE for personal/project facts. Skip the example if the evidence is insufficient or the preceding sentence is already concrete enough.';
+  if(alreadyConcreteFlow) return 'OPTIONAL_NON_REDUNDANT: The answer is already an implementation/process flow. Add one short example only when it demonstrates a decision, transformation, or business outcome not already obvious from the flow; otherwise omit it.';
+  if(shape==='CONCEPT') return 'OPTIONAL_FOR_CLARITY: Add one concise example only when the concept is materially easier to understand through application. Do not force examples for narrow definitions or facts.';
+  return 'OPTIONAL_NON_REDUNDANT: Use one concise example only when it materially improves the answer. Never add an example merely to fill space, and never invent candidate-specific facts.';
+}
+
 function responseMode(question, followupInfo=null, inputSource='') {
   const type=classifyResponseType(question,followupInfo,inputSource);
   const codingFollowup=type==='code'&&!!followupInfo?.previous&&isCodingFollowupQuestion(question);
@@ -619,7 +638,7 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
   const followup = info.isFollowup
     ? `YES. Treat the current words as a continuation/modifier of the immediately previous interviewer request. Resolved intent:\n${info.resolvedQuestion}`
     : 'NO';
-  return `CANDIDATE PROFILE\nYears: ${session.yearsExperience}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || ''}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
+  return `CANDIDATE PROFILE\nYears: ${session.yearsExperience}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || ''}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
 }
 const COPILOT_INSTRUCTIONS = `You are the candidate in a live senior/lead engineer interview. Return one directly usable answer. Normal answers must be immediately speakable; coding and diagram questions must use the exact practical formats below. Never mention AI, ChatGPT, copilot, prompts, retrieval, transcription correction, evidence matching, or how you inferred the question. Never say "based on my CV/JD", "the resume confirms", "not listed", or similar meta commentary.
 
@@ -633,6 +652,9 @@ INTERNAL ANALYSIS DISCIPLINE — FINAL ANSWER ONLY:
 - Analyze the current question carefully before answering, but never output internal reasoning, chain-of-thought, <thinking> tags, scratch work, hidden analysis, or a step-by-step account of how the answer was derived. Return only the final interview-ready answer.
 - First determine the exact scope and intent of the CURRENT question. Then decide what resume/JD evidence, prior context, and general technical knowledge are actually relevant to that scope.
 - Prefer technically accurate, complete, mature explanations over high-level generic statements. Do not add architecture, tools, metrics, implementation details, or examples merely to sound detailed; every included detail must help answer the current question.
+- Follow EXAMPLE POLICY independently for each current question. Examples are adaptive, not mandatory on every answer: include one when the interviewer asks for one or when a concrete application materially clarifies an experience/concept; omit it when the mechanism/flow is already concrete or a narrow clarification is better answered directly.
+- When an example describes my project, production work, employer, implementation, data, metric, tool, or responsibility, every personal detail must be supported by RETRIEVED EVIDENCE. If evidence does not support a real project example, do not manufacture one; use a generic technical example only when the question is conceptual and EXAMPLE POLICY allows it.
+- Normally use at most one example and integrate it naturally with a short lead-in such as "For example, ...". Do not create a separate Example section unless the interviewer explicitly asks for examples or multiple examples.
 - For standard finite concepts, silently check completeness before responding so the first answer includes the important supported set without requiring repeated follow-up questions.
 - For experience questions, silently verify personal claims against retrieved Resume evidence before phrasing them in first person. Grounding remains invisible in the final answer.
 
@@ -860,8 +882,10 @@ function addTurn(session, question, answer, retrieved=[],responseType='spoken') 
   session.turns.push({ question:normalizeStructuredText(question).slice(0,4000), answer:normalizeStructuredText(answer).slice(0,14000), responseType, retrieved:retrieved.slice(0, TOP_K).map(c => ({source:c.source, section:c.section, text:c.text, score:c.score})), at:Date.now() });
   if (session.turns.length > MAX_HISTORY_TURNS) session.turns = session.turns.slice(-MAX_HISTORY_TURNS);
 }
-async function prepareQuestion(email, question, {inputSource=''}={}) {
+async function prepareQuestion(email, question, {inputSource='', requestId='', clientSentAt=0}={}) {
   const startedAt = Date.now();
+  const perf = { requestId:String(requestId||''), clientToBackendMs:Number(clientSentAt)>0?Math.max(0,startedAt-Number(clientSentAt)):null };
+  const intentStartedAt = Date.now();
   const session = interviewSessions.get(email);
   let retrieved = [];
   let embeddingMs = 0, retrievalMs = 0;
@@ -872,33 +896,54 @@ async function prepareQuestion(email, question, {inputSource=''}={}) {
   const rejection = rejectLowConfidenceInput(intentQuestion);
   const followupInfo = session ? resolveFollowupIntent(session, intentQuestion) : { isFollowup:false, resolvedQuestion:intentQuestion, previous:null };
   const responseType=classifyResponseType(intentQuestion,followupInfo,inputSource);
+  perf.intentMs = Date.now() - intentStartedAt;
+  const retrievalDecisionStartedAt = Date.now();
 
   if (!rejection && session?.chunks?.length) {
     const previous = followupInfo.previous;
     const retrievalBase = followupInfo.isFollowup ? followupInfo.resolvedQuestion : intentQuestion;
     const retrievalQuery = expandQuestionWithCanonicalTerms(session, retrievalBase);
 
+    const retrievalCacheKey = `${email}|${session.preparedAt||0}|${normalizeText(retrievalQuery).toLowerCase().slice(0,1600)}`;
     if (followupInfo.isFollowup && previous?.retrieved?.length) {
-      // Reuse prior evidence for modifier/pronoun follow-ups. This preserves topic continuity and removes an embedding network hop.
+      // Reuse prior evidence only for a genuine follow-up; standalone questions never inherit old-turn evidence.
       retrieved = previous.retrieved.map(c => ({...c}));
       retrievalMode = 'history-reuse';
+      perf.retrievalCacheHit = false;
+    } else if (retrievalResultCache.has(retrievalCacheKey)) {
+      // Exact standalone retrieval reuse. Chunks are immutable for a prepared session, so this changes latency only, not evidence selection.
+      retrieved = retrievalResultCache.get(retrievalCacheKey).map(c => ({...c}));
+      retrievalMode = 'retrieval-cache';
+      perf.retrievalCacheHit = true;
     } else if (canUseFastLexical(session, retrievalQuery)) {
       const r0 = Date.now();
       retrieved = retrieveChunksLexical(session, retrievalQuery);
       retrievalMs = Date.now() - r0;
       retrievalMode = 'lexical-fast';
+      perf.retrievalCacheHit = false;
+      retrievalResultCache.set(retrievalCacheKey, retrieved.map(c => ({...c})));
     } else {
+      const embeddingKey = normalizeText(retrievalQuery).toLowerCase().slice(0,1200);
+      perf.embeddingCacheHit = queryEmbeddingCache.has(embeddingKey);
       const e0 = Date.now();
       const vector = await embedQuery(retrievalQuery);
       embeddingMs = Date.now() - e0;
       const r0 = Date.now();
       retrieved = retrieveChunks(session, vector, retrievalQuery);
       retrievalMs = Date.now() - r0;
-      retrievalMode = 'vector-hybrid';
+      retrievalMode = perf.embeddingCacheHit ? 'vector-hybrid-embedding-cache' : 'vector-hybrid';
+      perf.retrievalCacheHit = false;
+      retrievalResultCache.set(retrievalCacheKey, retrieved.map(c => ({...c})));
     }
+    if (retrievalResultCache.size > RETRIEVAL_RESULT_CACHE_MAX) retrievalResultCache.delete(retrievalResultCache.keys().next().value);
   }
+  perf.retrievalDecisionMs = Date.now() - retrievalDecisionStartedAt;
+  const promptBuildStartedAt = Date.now();
   const prompt = session ? buildPrompt(session, question, retrieved, followupInfo, correctedQuestion,inputSource,intentQuestion) : `INPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,followupInfo,inputSource)}\n\nREFRAMED CURRENT INTENT\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
-  return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, intentQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt } };
+  perf.promptBuildMs = Date.now() - promptBuildStartedAt;
+  perf.promptChars = String(prompt||'').length;
+  perf.promptTokenEstimate = Math.ceil(perf.promptChars / 4);
+  return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, intentQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt, ...perf } };
 }
 app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, terraModel:OPENAI_TERRA_MODEL, lunaModel:OPENAI_LUNA_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',options:['openai','terra','luna','cerebras']}, embeddingModel:EMBEDDING_MODEL }));
 app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, openaiConfigured:!!OPENAI_API_KEY, cerebrasConfigured:!!CEREBRAS_API_KEY, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT }));
@@ -950,6 +995,14 @@ app.post('/prepare-context', async (req, res) => {
     console.error('[RAG] Prepare error:', err.message);
     return res.status(500).json({ ok:false, error:err.message || 'Context preparation failed' });
   }
+});
+
+app.post('/perf/client', (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const requestId = normalizeText(req.body?.requestId || '').slice(0,120);
+  const firstRenderMs = Number(req.body?.firstRenderMs);
+  if (email && requestId && Number.isFinite(firstRenderMs)) console.log(`[PERF UI] ${email} request=${requestId} firstRender=${Math.max(0,Math.round(firstRenderMs))}ms`);
+  res.json({ok:true});
 });
 
 app.post('/context-status', (req, res) => {
@@ -1042,6 +1095,8 @@ app.post('/ask/stream', async (req, res) => {
   const inputSource=normalizeText(req.body.inputSource||'').slice(0,40);
   const imageDataUrl = String(req.body.imageDataUrl || '').trim();
   const captureSource = normalizeText(req.body.captureSource || '').slice(0,300);
+  const requestId = normalizeText(req.body.requestId || '').slice(0,120);
+  const clientSentAt = Number(req.body.clientSentAt || 0);
   const hasImage = /^data:image\/(?:png|jpeg|jpg|webp);base64,/i.test(imageDataUrl);
   if (!email || (!text && !hasImage)) return res.status(400).json({ ok:false, error:'email and text or image are required' });
   const license = isLicenseValid(email); if (!license.ok) return res.status(401).json({ ok:false, error:license.reason || 'Invalid license' });
@@ -1063,7 +1118,7 @@ app.post('/ask/stream', async (req, res) => {
         latency:{ startedAt, embeddingMs:0, retrievalMs:0, retrievalMode:'vision-direct', promptReadyMs:Date.now()-startedAt }
       };
     } else {
-      prepared = await prepareQuestion(email,text,{inputSource});
+      prepared = await prepareQuestion(email,text,{inputSource,requestId,clientSentAt});
     }
   } catch (err) { return res.status(502).json({ ok:false, error:err.message || 'Retrieval failed' }); }
 
@@ -1206,6 +1261,9 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasonin
   let answer = '';
   let streamAttempt = 0;
   let providerServiceTier = '';
+  let providerRequestAtMs = null;
+  let providerHeadersMs = null;
+  let firstProviderDeltaAfterRequestMs = null;
   try {
     // Retry once when the provider accepts a request but stalls before producing any text.
     // Normal fast responses are untouched; this only caps the rare 30-60s first-token stalls.
@@ -1236,11 +1294,14 @@ ${strictModeInstructions(prepared.responseType)}`;
         const upstreamUrl=route.provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:'https://api.openai.com/v1/responses';
         const upstreamKey=route.provider==='cerebras'?CEREBRAS_API_KEY:OPENAI_API_KEY;
         if(!upstreamKey)throw new Error(route.provider==='cerebras'?'CEREBRAS_API_KEY missing on backend':'OPENAI_API_KEY missing on backend');
+        providerRequestAtMs = Date.now() - prepared.latency.startedAt;
+        const providerFetchStartedAt = Date.now();
         upstream = await fetch(upstreamUrl, {
           method:'POST', signal:upstreamController.signal,
           headers:{'content-type':'application/json', authorization:`Bearer ${upstreamKey}`},
           body:JSON.stringify(streamBody)
         });
+        providerHeadersMs = Date.now() - providerFetchStartedAt;
         if (!upstream.ok) {
           clearTimeout(firstTokenTimer);
           const data = await upstream.json().catch(() => ({}));
@@ -1268,6 +1329,7 @@ ${strictModeInstructions(prepared.responseType)}`;
             if (delta) {
               if (firstTokenMs === null) {
                 firstTokenMs = Date.now() - prepared.latency.startedAt;
+                firstProviderDeltaAfterRequestMs = Date.now() - providerFetchStartedAt;
                 clearTimeout(firstTokenTimer);
               }
               answer += delta;
@@ -1297,9 +1359,10 @@ ${strictModeInstructions(prepared.responseType)}`;
     answer=conformance.answer;
     if(conformance.repaired)emit('replace',{text:answer});
     if (!clientClosed && prepared.session && answer) addTurn(prepared.session,hasImage?`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`:prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
-    const latency = { embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, retrievalMode:prepared.latency.retrievalMode, promptReadyMs:prepared.latency.promptReadyMs, firstTokenMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt, attempts:streamAttempt };
+    const latency = { ...prepared.latency, providerRequestAtMs, providerHeadersMs, firstProviderDeltaAfterRequestMs, firstTokenMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt, attempts:streamAttempt };
     providerServiceTier=providerServiceTier||(route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER);
-    console.log(`[LLM stream] ${email} model=${route.model} modelTier=${route.tier} serviceTier=${providerServiceTier} first=${firstTokenMs ?? '-'}ms total=${latency.totalMs}ms embed=${latency.embeddingMs}ms retrieve=${latency.retrievalMs}ms mode=${prepared.latency.retrievalMode} attempts=${streamAttempt}`);
+    console.log(`[LLM stream] ${email} request=${requestId||'-'} model=${route.model} modelTier=${route.tier} serviceTier=${providerServiceTier} first=${firstTokenMs ?? '-'}ms total=${latency.totalMs}ms embed=${latency.embeddingMs}ms retrieve=${latency.retrievalMs}ms mode=${prepared.latency.retrievalMode} attempts=${streamAttempt}`);
+    console.log(`[PERF] request=${requestId||'-'} clientToBackend=${latency.clientToBackendMs ?? '-'}ms intent=${latency.intentMs ?? '-'}ms retrievalDecision=${latency.retrievalDecisionMs ?? '-'}ms embed=${latency.embeddingMs}ms embedCache=${latency.embeddingCacheHit===true?'hit':(latency.embeddingCacheHit===false?'miss':'n/a')} retrieve=${latency.retrievalMs}ms retrievalCache=${latency.retrievalCacheHit===true?'hit':(latency.retrievalCacheHit===false?'miss':'n/a')} mode=${latency.retrievalMode} promptBuild=${latency.promptBuildMs ?? '-'}ms promptChars=${latency.promptChars ?? '-'} promptTokensEst=${latency.promptTokenEstimate ?? '-'} providerRequestAt=${latency.providerRequestAtMs ?? '-'}ms providerHeaders=${latency.providerHeadersMs ?? '-'}ms firstProviderDelta=${latency.firstProviderDeltaAfterRequestMs ?? '-'}ms firstVisibleBackend=${latency.firstTokenMs ?? '-'}ms total=${latency.totalMs}ms`);
     emit('meta', { model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, phase:'complete', latency, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})) });
     emit('done', { answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, latency });
   } catch (err) {
