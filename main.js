@@ -567,6 +567,19 @@ ipcMain.on('llm-perf', async (_event, payload) => {
   } catch (_) { /* diagnostics must never affect interview flow */ }
 });
 
+ipcMain.on('prefetch-llm-query', async (_event, payload) => {
+  try {
+    const text = String(payload?.text || '').trim();
+    const email = String(payload?.licenseEmail || global.currentLicenseEmail || '').trim().toLowerCase();
+    if (!text || !email) return;
+    await fetch(`${backendBase()}/prefetch-query`, {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({email,text})
+    });
+  } catch (_) { /* best-effort latency warmup only */ }
+});
+
 ipcMain.on('ask-llm-stream', async (event, payload) => {
   const requestId = String(payload?.requestId || Date.now());
   const prompt = String(payload?.text || '').trim();

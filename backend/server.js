@@ -1089,6 +1089,37 @@ app.post('/extract-screen-text', async (req, res) => {
   } catch (err) { return res.status(502).json({ok:false,error:err.message || 'Vision extraction failed'}); }
 });
 
+// Latency-only prefetch: warm the existing query-embedding cache while the interviewer/user
+// is still finishing the question. It never changes retrieval selection or answer content.
+app.post('/prefetch-query', async (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const question = normalizeStructuredText(req.body?.text || '');
+  if (!email || !question || question.length > 12000) return res.status(204).end();
+  const license = isLicenseValid(email);
+  if (!license.ok) return res.status(204).end();
+  const session = interviewSessions.get(email);
+  if (!session?.chunks?.length) return res.status(204).end();
+  try {
+    const canonical = resolveCanonicalQuestion(session, question);
+    const correctedQuestion = canonical.corrected || question;
+    const intentQuestion = reframeQuestionIntent(correctedQuestion) || correctedQuestion;
+    if (rejectLowConfidenceInput(intentQuestion)) return res.status(204).end();
+    const followupInfo = resolveFollowupIntent(session, intentQuestion);
+    // Genuine follow-ups reuse prior evidence and strong lexical matches are already local/instant.
+    if (followupInfo.isFollowup && followupInfo.previous?.retrieved?.length) return res.status(204).end();
+    const retrievalBase = followupInfo.isFollowup ? followupInfo.resolvedQuestion : intentQuestion;
+    const retrievalQuery = expandQuestionWithCanonicalTerms(session, retrievalBase);
+    if (canUseFastLexical(session, retrievalQuery)) return res.status(204).end();
+    const key = normalizeText(retrievalQuery).toLowerCase().slice(0,1200);
+    if (!queryEmbeddingCache.has(key)) await embedQuery(retrievalQuery);
+    return res.status(204).end();
+  } catch (err) {
+    // Prefetch is best-effort only; it must never affect the interview flow.
+    console.warn('[PREFETCH] skipped:', err.message);
+    return res.status(204).end();
+  }
+});
+
 app.post('/ask/stream', async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   const text = normalizeStructuredText(req.body.text || '');
@@ -1136,7 +1167,7 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasonin
       visionAnswer=(await ensureModeConformance({answer:visionAnswer,responseType:prepared.responseType,prompt:prepared.prompt,model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT})).answer;
       if(prepared.session&&visionAnswer)addTurn(prepared.session,`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`,visionAnswer,prepared.retrieved,prepared.responseType);
       const latency={embeddingMs:0,retrievalMs:0,retrievalMode:'vision-direct',promptReadyMs:prepared.latency.promptReadyMs,firstTokenMs:Date.now()-prepared.latency.startedAt,llmMs:Date.now()-visionStart,totalMs:Date.now()-prepared.latency.startedAt,attempts:1};
-      res.status(200);res.setHeader('Content-Type','text/event-stream; charset=utf-8');res.setHeader('Cache-Control','no-cache, no-transform');res.setHeader('Connection','keep-alive');res.flushHeaders?.();
+      res.status(200);res.setHeader('Content-Type','text/event-stream; charset=utf-8');res.setHeader('Cache-Control','no-cache, no-transform');res.setHeader('Connection','keep-alive');res.setHeader('X-Accel-Buffering','no');res.flushHeaders?.();
       res.write(`event: meta\ndata: ${JSON.stringify({model:LLM_VISION_EXTRACT_MODEL,modelTier:'openai-vision',phase:'retrieval',contextPrepared:!!prepared.session,retrievalMode:'vision-direct'})}\n\n`);
       res.write(`event: delta\ndata: ${JSON.stringify({delta:visionAnswer})}\n\n`);
       res.write(`event: done\ndata: ${JSON.stringify({answer:visionAnswer,model:LLM_VISION_EXTRACT_MODEL,modelTier:'openai-vision',serviceTier:String(data?.service_tier||OPENAI_SERVICE_TIER),latency})}\n\n`);
@@ -1148,6 +1179,7 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasonin
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
   let clientClosed = false;
   let activeUpstreamController = null;

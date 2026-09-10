@@ -610,6 +610,18 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   return true;
 }
 
+let prefetchTimer = null;
+let lastPrefetchedQuestion = '';
+function prefetchQuestionEvidence(text, delayMs=0) {
+  const clean = String(text || '').replace(/\s+/g,' ').trim();
+  if (clean.length < 8 || clean === lastPrefetchedQuestion) return;
+  clearTimeout(prefetchTimer);
+  prefetchTimer = setTimeout(() => {
+    lastPrefetchedQuestion = clean;
+    window.electronAPI.prefetchLLMQuery?.({text:clean,licenseEmail:effectiveEmail()});
+  }, Math.max(0, delayMs));
+}
+
 function scheduleLLM() {
   clearTimeout(llmTimer);
   if (!autoSend || !getCompleteUnsentTranscript()) return;
@@ -732,6 +744,7 @@ async function captureWindowAndSolve() {
 
 captureWindowBtn.onclick = captureWindowAndSolve;
 manualPrompt.addEventListener('input',()=>{if(!manualPrompt.value.trim()){manualPromptContainsCapture=false;manualPromptTaskType='other'}});
+manualPrompt.addEventListener('input',()=>{ if(!autoSend) prefetchQuestionEvidence(manualPrompt.value, 320); });
 
 sendBtn.onclick = sendManualOrPending;
 
@@ -849,6 +862,7 @@ window.electronAPI.onTranscript(({text,isFinal}) => {
       }
       if (activeStreamRequestId) window.electronAPI.cancelLLMStream(activeStreamRequestId);
       clearTimeout(llmTimer);
+      prefetchQuestionEvidence(combined, 0);
       llmTimer = setTimeout(() => sendUtteranceToLLM({ auto:true, replacementText:combined }), AUTO_SEND_QUIET_MS);
     } else {
       // New logical question: close the prior auto question only after its continuation window expired.
@@ -871,6 +885,9 @@ window.electronAPI.onTranscript(({text,isFinal}) => {
       utteranceParts.push(clean);
       lastTranscriptAt = now;
       lastFinalAt = now;
+      // Overlap a possible embedding request with the existing 450ms auto-send quiet window.
+      // Backend skips this entirely for lexical-fast/history-reuse questions.
+      prefetchQuestionEvidence(getCompleteUnsentTranscript(), 0);
       scheduleLLM();
     }
     interimText = '';
