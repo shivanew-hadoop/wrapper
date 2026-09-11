@@ -1,19 +1,113 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Topper is a discreet, low-latency AI interview copilot with live system-audio questions, grounded answers and screen capture."><title>Topper — Real-time Interview Copilot</title><link rel="stylesheet" href="app.css"><link rel="stylesheet" href="portal-fixes.css"><script src="https://mercury.phonepe.com/web/bundle/checkout.js"></script></head>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Topper is a real-time AI interview workspace for live system-audio questions, resume-grounded answers, screen context and secure account-linked usage.">
+  <title>Topper — Real-time AI Interview Workspace</title>
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="portal-fixes.css">
+  <script src="https://mercury.phonepe.com/web/bundle/checkout.js"></script>
+</head>
 <body>
-<header class="siteHeader"><a class="logo" href="/"><span>T</span>TOPPER</a><nav><a href="#features">Features</a><a href="#how">How it works</a><a href="#pricing">Pricing</a><a href="#auth">Login</a><a class="navCta" href="#auth">Sign up</a></nav><button id="logout" class="ghost hidden">Log out</button></header>
-<main>
-  <section class="hero public-only"><div class="heroCopy"><div class="eyebrow">REAL-TIME INTERVIEW INTELLIGENCE</div><h1>Stay present.<br><span>Answer with clarity.</span></h1><p>Topper listens to system audio, identifies the live question and delivers concise, context-aware guidance while your interview continues.</p><div class="heroActions"><a class="primaryLink" href="#auth">Start with Topper</a><a class="secondaryLink" href="https://github.com/shivanew-hadoop/topper-downloads/releases/latest/download/Topper-Setup.exe">Download for Windows</a></div><div class="trustRow"><span>⚡ Low-latency streaming</span><span>◉ Screen-aware prompts</span><span>✓ Credit-controlled access</span></div></div><div class="heroVisual"><div class="glow"></div><div class="demoWindow"><div class="demoTop"><i></i><strong>TOPPER · INTERVIEW COPILOT</strong><small>Credits 52:18</small></div><div class="demoAnswer"><label>LLM ANSWER</label><p>I would approach this by first isolating the bottleneck, measuring the critical path, and then applying the smallest production-safe change...</p></div><div class="demoQuestion"><label>LIVE QUESTION</label><p>How would you diagnose latency in a distributed API?</p></div></div></div></section>
+<header class="siteHeader">
+  <a class="logo" href="#top" aria-label="Topper home"><span>T</span><b>TOPPER</b></a>
+  <nav aria-label="Primary navigation">
+    <a href="#features">Features</a>
+    <a href="#how">How it works</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#security">Trust</a>
+    <a class="authOnly" href="#account">Account</a>
+    <a class="authOnly" href="#interview-history">History</a>
+    <a href="contact.html">Support</a>
+    <a class="guestOnly" href="#auth">Login</a>
+  </nav>
+  <a class="navCta guestOnly" href="#auth">Get started</a>
+  <button id="logout" class="headerLogout authOnly">Log out</button>
+</header>
 
-  <section id="features" class="section public-only"><div class="sectionHead"><span>BUILT FOR LIVE CONVERSATIONS</span><h2>Quiet assistance. Serious capability.</h2></div><div class="featureGrid"><article><b>01</b><h3>Discreet overlay</h3><p>A compact always-on-top workspace designed to stay out of supported screen captures while keeping guidance within reach.</p></article><article><b>02</b><h3>Ultra-fast answers</h3><p>Plain-text streaming and pre-built interview context reduce waiting and keep the conversation natural.</p></article><article><b>03</b><h3>Screen capture</h3><p>Capture the active screen, extract visible context and combine multiple captures into one precise question.</p></article><article><b>04</b><h3>Grounded context</h3><p>Your resume, job description and target role are prepared before listening so answers remain relevant.</p></article><article><b>05</b><h3>System audio</h3><p>Live questions are collected from Windows system audio without requiring a meeting-platform extension.</p></article><article><b>06</b><h3>Human-sized responses</h3><p>Concise answers arrive first, with deeper explanation only when the question calls for it.</p></article></div></section>
+<main id="top">
+  <section id="account" class="dashboard authOnly hidden">
+    <div class="dashboardTopline">
+      <div><span class="eyebrow">YOUR TOPPER WORKSPACE</span><h1>Ready for the next interview.</h1></div>
+      <a class="supportLink" href="mailto:support.topper@gmail.com">Support</a>
+    </div>
+    <div class="accountStrip">
+      <article class="accountMetric"><small>Remaining credits</small><strong id="remaining">--</strong><span>Deducted only while listening</span></article>
+      <article class="accountActions"><button id="launch">Launch Topper</button><a id="download" class="button-link ghost" href="https://github.com/shivanew-hadoop/topper-downloads/releases/latest/download/Topper-Setup.exe">Download Windows app</a><small id="launchStatus" class="launch-status" aria-live="polite"></small></article>
+      <article class="accountIdentity"><small>Signed in as</small><div id="profile"></div><span>Desktop access and credits stay linked to this account.</span></article>
+    </div>
+    <div class="purchaseBar"><div><strong>Need more interview time?</strong><span>60 additional minutes · secure one-time checkout</span></div><button id="buy">Buy 60 credits · ₹599</button></div>
 
-  <section id="how" class="section process public-only"><div class="sectionHead"><span>HOW IT WORKS</span><h2>Ready in three steps</h2></div><div class="steps"><article><em>1</em><div><h3>Install and launch</h3><p>Download Topper once, then securely launch it from your portal account.</p></div></article><article><em>2</em><div><h3>Prepare context</h3><p>Add your resume, job description, experience and target role before the interview.</p></div></article><article><em>3</em><div><h3>Start listening</h3><p>Topper captures live questions and streams practical, interview-ready answers.</p></div></article></div></section>
+    <section id="interview-history" class="card transcriptHistoryCard">
+      <div class="transcriptHistoryHead"><div><span>INTERVIEW HISTORY</span><h2>Recent interview transcripts</h2></div><small>Latest 3 completed sessions</small></div>
+      <div id="interviewHistory"><div class="emptyActivity">No saved interview sessions yet.</div></div>
+    </section>
+    <section class="card historyCard"><div class="cardTitleRow"><div><span>ACCOUNT ACTIVITY</span><h2>Credits and payments</h2></div><a href="refund-policy.html">Refund policy</a></div><div id="history"></div></section>
+    <section id="admin" class="card hidden"><h2>Admin dashboard</h2><div id="stats"></div><div class="row"><input id="creditEmail" placeholder="User email"><input id="creditMinutes" type="number" placeholder="Minutes (+/-)"><button id="addCredits">Apply credits</button></div><div id="users"></div></section>
+  </section>
 
-  <section id="pricing" class="section pricing public-only"><div><div class="sectionHead left"><span>SIMPLE PRICING</span><h2>Pay only when you need it.</h2></div><p>One focused hour of real-time interview assistance. Credits begin deducting only after Start Listening.</p></div><div class="priceCard"><span>INTERVIEW PACK</span><div><strong>₹599</strong><small>one-time interview pack</small></div><ul><li>60 interview minutes</li><li>Live system-audio questions</li><li>Resume and JD grounding</li><li>Screen capture prompts</li><li>Secure account-linked credits</li></ul><a href="#auth" class="primaryLink">Create account</a></div></section>
+  <section class="hero">
+    <div class="heroCopy">
+      <div class="eyebrow">REAL-TIME AI INTERVIEW WORKSPACE</div>
+      <h1>Hear the question.<br><span>Answer with structure.</span></h1>
+      <p>Topper turns live system audio and optional screen context into concise, interview-ready guidance grounded in the candidate profile you prepare before the conversation.</p>
+      <div class="heroActions"><a class="primaryLink guestOnly" href="#auth">Create account</a><a class="primaryLink authOnly" href="#account">Open account</a><a class="secondaryLink" href="https://github.com/shivanew-hadoop/topper-downloads/releases/latest/download/Topper-Setup.exe">Download for Windows</a></div>
+      <div class="trustRow"><span>⚡ Streaming responses</span><span>◎ Resume-grounded context</span><span>▣ Multi-screen capture</span><span>✓ Account-linked credits</span></div>
+    </div>
+    <div class="heroVisual" aria-hidden="true">
+      <div class="orb orbOne"></div><div class="orb orbTwo"></div>
+      <div class="demoWindow">
+        <div class="demoTop"><i></i><strong>TOPPER · LIVE SESSION</strong><small>Listening</small></div>
+        <div class="signalRow"><span>System audio</span><b></b><b></b><b></b><b></b><b></b><em>Question detected</em></div>
+        <div class="demoQuestion"><label>LIVE QUESTION</label><p>How would you diagnose a latency spike in a distributed API?</p></div>
+        <div class="demoAnswer"><label>ANSWER</label><p>I would first isolate where the latency is introduced—client, gateway, service, database or an external dependency—using traces and percentile metrics...</p><div class="answerLines"><i></i><i></i><i></i></div></div>
+      </div>
+    </div>
+  </section>
 
-  <section id="auth" class="authSection public-only"><div class="authIntro"><span>YOUR TOPPER ACCOUNT</span><h2>One login for credits, history and secure desktop launch.</h2><p>Already registered? Log in. New to Topper? Enter your name, email and a secure password, then create your account.</p><a href="mailto:support.topper@gmail.com">support.topper@gmail.com</a></div><div class="authCard"><h2>Login or create account</h2><input id="name" autocomplete="name" placeholder="Full name — registration only"><input id="email" type="email" autocomplete="email" placeholder="Email address"><input id="password" type="password" autocomplete="current-password" placeholder="Password — minimum 8 characters"><div class="row"><button id="login">Login</button><button id="register" class="ghost">Create account</button></div><p id="authMsg" aria-live="polite"></p><small>By continuing, you agree to our <a href="terms.html">Terms</a> and <a href="privacy.html">Privacy Policy</a>.</small></div></section>
+  <section id="features" class="section">
+    <div class="sectionHead"><span>THE WORKSPACE</span><h2>Built around the live interview loop.</h2><p>Fast enough for conversation, structured enough for technical depth, and grounded enough to stay aligned with your prepared profile.</p></div>
+    <div class="featureGrid">
+      <article><b>01</b><h3>Live system-audio questions</h3><p>Captures spoken interview questions from Windows system audio and streams the answer as soon as the model starts responding.</p></article>
+      <article><b>02</b><h3>Resume-first grounding</h3><p>Your CV is the required source. A job description is optional, so preparation still works accurately when only the resume is available.</p></article>
+      <article><b>03</b><h3>Context-aware intent</h3><p>Technical terms, coding follow-ups and multi-part questions are interpreted against the current question instead of blindly repeating the previous topic.</p></article>
+      <article><b>04</b><h3>Screen context</h3><p>Stage multiple screen captures, combine relevant visible content with the live spoken follow-up, and send the complete prompt together.</p></article>
+      <article><b>05</b><h3>Code-ready responses</h3><p>When the interviewer asks for implementation, Topper can return working code, constraints, snippets and alternative approaches—not explanation alone.</p></article>
+      <article><b>06</b><h3>Interview history</h3><p>Completed sessions can be reviewed from the account and exported to PDF while credits and payment activity stay visible in one place.</p></article>
+    </div>
+  </section>
 
-  <section id="account" class="dashboard hidden"><div class="dashboardHead"><div><span>TOPPER ACCOUNT</span><h1>Welcome back</h1></div><a class="supportLink" href="mailto:support.topper@gmail.com">Need help?</a></div><div class="grid"><div class="card heroCard"><span>Remaining credits</span><strong id="remaining">--</strong><button id="buy">Buy 60 credits · ₹599</button><div class="desktop-actions"><button id="launch" class="ghost">Launch Topper</button><a id="download" class="button-link ghost" href="https://github.com/shivanew-hadoop/topper-downloads/releases/latest/download/Topper-Setup.exe">Download Topper</a></div><small>First time? Download and install once. Already installed? Launch securely.</small><small id="launchStatus" class="launch-status" aria-live="polite"></small></div><div class="card profileCard"><span>ACCOUNT</span><div id="profile"></div><p>Your credits and desktop license stay linked to this email.</p></div></div><div class="card transcriptHistoryCard"><div class="transcriptHistoryHead"><div><span>INTERVIEW HISTORY</span><h2>Recent interview transcripts</h2></div><small>Latest 3 completed sessions only</small></div><div id="interviewHistory"><div class="emptyActivity">No saved interview sessions yet.</div></div></div><div class="card historyCard"><h2>Credit and payment history</h2><div id="history"></div></div><section id="admin" class="card hidden"><h2>Admin dashboard</h2><div id="stats"></div><div class="row"><input id="creditEmail" placeholder="User email"><input id="creditMinutes" type="number" placeholder="Minutes (+/-)"><button id="addCredits">Apply credits</button></div><div id="users"></div></section></section>
+  <section id="how" class="section process">
+    <div class="sectionHead"><span>HOW IT WORKS</span><h2>Prepare once. Stay focused live.</h2></div>
+    <div class="steps">
+      <article><em>1</em><div><h3>Install and sign in</h3><p>Create your account, install the Windows application once, then launch it securely from the portal.</p></div></article>
+      <article><em>2</em><div><h3>Add your CV</h3><p>Upload the resume. Add a JD only when you have one; Topper automatically derives role and experience where possible.</p></div></article>
+      <article><em>3</em><div><h3>Start the session</h3><p>Listen to the interview, capture screen context when useful, and receive concise live guidance while the conversation continues.</p></div></article>
+    </div>
+  </section>
+
+  <section id="security" class="section trustSection">
+    <div class="trustCopy"><span class="eyebrow">TRUST & PAYMENTS</span><h2>Clear product, account and payment controls.</h2><p>Topper separates account authentication, desktop launch, usage metering and payment verification. Checkout is handled by the configured payment provider; Topper does not ask for card CVV, UPI PIN or banking passwords.</p><div class="policyLinks"><a href="privacy.html">Privacy Policy</a><a href="terms.html">Terms of Service</a><a href="refund-policy.html">Refund & Cancellation</a><a href="contact.html">Contact & Support</a></div></div>
+    <div class="trustCards"><article><strong>Signed access</strong><span>Account-linked desktop launch and authenticated usage.</span></article><article><strong>Server verification</strong><span>Credits are granted only after server-side payment confirmation.</span></article><article><strong>Transparent usage</strong><span>Credits, purchases and interview activity remain visible in the account.</span></article></div>
+  </section>
+
+  <section id="pricing" class="section pricing">
+    <div><div class="sectionHead left"><span>SIMPLE PRICING</span><h2>One pack. Use it when you need it.</h2></div><p>Credits begin deducting only after Start Listening begins. The portal shows your remaining balance and account activity.</p><div class="paymentNote">Secure checkout · digital interview credits · refund terms available before purchase</div></div>
+    <div class="priceCard"><span>INTERVIEW PACK</span><div><strong>₹599</strong><small>one-time purchase</small></div><ul><li>60 interview minutes</li><li>Live system-audio transcription</li><li>Resume and optional JD grounding</li><li>Screen-context prompts</li><li>Session transcript history</li></ul><a href="#auth" class="primaryLink guestOnly">Create account</a><a href="#account" class="primaryLink authOnly">Buy from account</a><small>By purchasing, you agree to the <a href="terms.html">Terms</a> and <a href="refund-policy.html">Refund Policy</a>.</small></div>
+  </section>
+
+  <section id="auth" class="authSection guestOnly">
+    <div class="authIntro"><span>YOUR TOPPER ACCOUNT</span><h2>One login for credits, history and secure desktop launch.</h2><p>Already registered? Log in. New to Topper? Create an account using your name, email and a password of at least 8 characters.</p><div class="authBenefits"><span>✓ Secure desktop launch</span><span>✓ Credit balance & payment history</span><span>✓ Recent transcript access</span></div><a href="mailto:support.topper@gmail.com">support.topper@gmail.com</a></div>
+    <div class="authCard"><h2>Login or create account</h2><input id="name" autocomplete="name" placeholder="Full name — registration only"><input id="email" type="email" autocomplete="email" placeholder="Email address"><input id="password" type="password" autocomplete="current-password" placeholder="Password — minimum 8 characters"><div class="row"><button id="login">Login</button><button id="register" class="ghost">Create account</button></div><p id="authMsg" aria-live="polite"></p><small>By continuing, you agree to our <a href="terms.html">Terms</a> and <a href="privacy.html">Privacy Policy</a>.</small></div>
+  </section>
 </main>
-<footer><div><a class="logo" href="/"><span>T</span>TOPPER</a><p>Real-time interview assistance, designed for focused conversations.</p></div><div><strong>Product</strong><a href="#features">Features</a><a href="#how">How it works</a><a href="#pricing">Pricing</a><a href="https://github.com/shivanew-hadoop/topper-downloads/releases/latest/download/Topper-Setup.exe">Download</a></div><div><strong>Company</strong><a href="terms.html">Terms</a><a href="privacy.html">Privacy</a><a href="refund-policy.html">Refund Policy</a><a href="contact.html">Contact</a></div><div><strong>Support</strong><a href="mailto:support.topper@gmail.com">support.topper@gmail.com</a></div></footer>
-<script src="app.js"></script></body></html>
+
+<footer>
+  <div><a class="logo" href="#top"><span>T</span><b>TOPPER</b></a><p>Real-time AI interview assistance for focused technical conversations.</p><small>Windows desktop application · account-linked digital service</small></div>
+  <div><strong>Product</strong><a href="#features">Features</a><a href="#how">How it works</a><a href="#pricing">Pricing</a><a href="https://github.com/shivanew-hadoop/topper-downloads/releases/latest/download/Topper-Setup.exe">Download</a></div>
+  <div><strong>Account</strong><a href="#auth" class="guestOnly">Login</a><a href="#account" class="authOnly">Dashboard</a><a href="#interview-history" class="authOnly">Interview history</a><a href="contact.html">Support</a></div>
+  <div><strong>Legal & payments</strong><a href="terms.html">Terms of Service</a><a href="privacy.html">Privacy Policy</a><a href="refund-policy.html">Refund & Cancellation</a><a href="contact.html">Contact</a></div>
+</footer>
+<script src="app.js"></script>
+</body></html>

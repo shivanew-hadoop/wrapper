@@ -421,22 +421,127 @@ function retrieveChunks(session, queryEmbedding, query) {
 }
 function inferYearsExperienceFromResume(resumeText) {
   const text=normalizeText(resumeText);
-  const explicit=[...text.matchAll(/\b(\d{1,2}(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:professional\s+)?experience\b/gi)]
+  // Prefer an explicit total when the candidate states it directly.
+  const explicit=[...text.matchAll(/\b(\d{1,2}(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:overall\s+|total\s+|professional\s+|industry\s+)?experience\b/gi)]
     .map(match=>Number(match[1])).filter(value=>Number.isFinite(value)&&value>=0&&value<=60);
   if(explicit.length)return Math.max(...explicit);
-  const currentYear=new Date().getUTCFullYear();
-  const years=[...text.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match=>Number(match[0])).filter(value=>value>=1980&&value<=currentYear+1);
-  if(years.length>=2){
-    const span=Math.max(...years)-Math.min(...years);
-    if(span>=1&&span<=60)return span;
+
+  // Otherwise calculate the span from the earliest employment/project start to
+  // the latest end/current date. Education date ranges are deliberately ignored.
+  const monthNames='Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?';
+  const dateToken=`(?:(?:${monthNames})[\\s,./-]*\\d{4}|(?:0?[1-9]|1[0-2])[/-]\\d{4}|(?:19|20)\\d{2})`;
+  const endToken=`(?:${dateToken}|Present|Current|Till\\s+Date|To\\s+Date|Now)`;
+  const rangeRe=new RegExp(`(${dateToken})\\s*(?:-|–|—|to|through|till|until)\\s*(${endToken})`,'gi');
+  const monthMap={jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+  const current=new Date();
+  const currentMonth=(current.getUTCFullYear()*12)+current.getUTCMonth();
+  const parsePoint=(value,isEnd=false)=>{
+    const raw=String(value||'').trim();
+    if(/^(?:present|current|till\s+date|to\s+date|now)$/i.test(raw))return currentMonth;
+    let m=raw.match(/^(0?[1-9]|1[0-2])[/-]((?:19|20)\d{2})$/);
+    if(m)return (Number(m[2])*12)+(Number(m[1])-1);
+    m=raw.match(new RegExp(`^(${monthNames})[\\s,./-]*((?:19|20)\\d{2})$`,'i'));
+    if(m)return (Number(m[2])*12)+(monthMap[m[1].slice(0,3).toLowerCase()]??(isEnd?11:0));
+    m=raw.match(/^((?:19|20)\d{2})$/);
+    if(m)return (Number(m[1])*12)+(isEnd?11:0);
+    return null;
+  };
+
+  let earliest=null,latest=null;
+  for(const match of text.matchAll(rangeRe)){
+    // Classify the date range using its own line plus the immediately preceding line.
+    // This avoids counting education/certification ranges while still accepting the
+    // first work range that appears directly after an Education section.
+    const idx=match.index||0;
+    const lineStart=text.lastIndexOf('\n',Math.max(0,idx-1))+1;
+    const lineEnd=text.indexOf('\n',idx);
+    const currentLine=text.slice(lineStart,lineEnd<0?text.length:lineEnd);
+    const prevEnd=Math.max(0,lineStart-1);
+    const prevStart=text.lastIndexOf('\n',Math.max(0,prevEnd-1))+1;
+    const previousLine=text.slice(prevStart,prevEnd);
+    const localContext=`${previousLine} ${currentLine}`;
+    const workHint=/\b(?:experience|employment|work|professional|project|client|company|engineer|developer|architect|consultant|analyst|tester|sdet|lead|manager|specialist|administrator|intern|associate|role|position)\b/i.test(localContext);
+    const nonWorkHint=/\b(?:education|university|college|school|bachelor|master(?:'s)?|degree|gpa|academic|certification|certificate|course|training)\b/i.test(localContext);
+    if(nonWorkHint&&!workHint)continue;
+    const startMonth=parsePoint(match[1],false),endMonth=parsePoint(match[2],true);
+    if(!Number.isFinite(startMonth)||!Number.isFinite(endMonth)||endMonth<startMonth)continue;
+    const duration=endMonth-startMonth+1;
+    if(duration>60*12)continue;
+    earliest=earliest===null?startMonth:Math.min(earliest,startMonth);
+    latest=latest===null?endMonth:Math.max(latest,endMonth);
+  }
+  if(earliest!==null&&latest!==null&&latest>=earliest){
+    const years=(latest-earliest+1)/12;
+    if(years>=0&&years<=60){
+      const rounded=Math.round(years*10)/10;
+      return Math.abs(rounded-Math.round(rounded))<0.05?Math.round(rounded):rounded;
+    }
   }
   return null;
 }
+function normalizeRoleTitle(value) {
+  return String(value||'')
+    .replace(/[|•·].*$/,'')
+    .replace(/\s{2,}/g,' ')
+    .replace(/^[-–—:,;\s]+|[-–—:,;\s]+$/g,'')
+    .trim()
+    .slice(0,160);
+}
+function explicitRolePattern() {
+  return /\b(?:(?:senior|sr\.?|lead|principal|staff|associate|junior|jr\.?|technical|solution|solutions|cloud)\s+)?(?:qa\s+automation|quality\s+assurance|test\s+automation|software|java|python|\.net|dotnet|data|analytics|business\s+intelligence|bi|power\s*bi|cloud|devops|sre|site\s+reliability|automation|full[- ]?stack|backend|front[- ]?end|machine\s+learning|ml|ai|solutions?|technical|application|systems?)\s+(?:engineer|developer|architect|tester|analyst|consultant|lead|manager)\b|\b(?:sdet|software\s+engineer|software\s+developer|solution\s+architect|solutions\s+architect|data\s+engineer|data\s+scientist|devops\s+engineer|qa\s+engineer|automation\s+engineer|test\s+engineer|technical\s+lead|team\s+lead|business\s+analyst|data\s+analyst)\b/i;
+}
+function extractExplicitRoleFromDocument(documentText) {
+  const text=normalizeText(documentText);
+  if(!text)return '';
+  const lines=text.split('\n').map(line=>line.trim()).filter(Boolean);
+  const labelled=/\b(?:current\s+)?(?:role|job\s+title|title|designation|position)\s*[:\-–—]\s*(.+)$/i;
+  for(const line of lines.slice(0,180)){
+    const label=line.match(labelled);
+    if(!label)continue;
+    const direct=label[1].match(explicitRolePattern());
+    if(direct)return normalizeRoleTitle(direct[0]);
+    const fallback=normalizeRoleTitle(label[1]);
+    if(fallback.length>=3&&fallback.length<=100)return fallback;
+  }
+  // Resumes commonly place the current title near the top or at the first job.
+  const top=text.slice(0,9000);
+  const direct=top.match(explicitRolePattern());
+  return direct?normalizeRoleTitle(direct[0]):'';
+}
+function inferRoleFromSkills(resumeText,jdText) {
+  const resume=normalizeText(resumeText).toLowerCase();
+  const jd=normalizeText(jdText).toLowerCase();
+  const combined=`${resume} ${resume} ${jd}`; // resume evidence receives slightly more weight.
+  const rules=[
+    ['QA Automation Engineer',[/\bselenium\b/g,/\bplaywright\b/g,/\bcypress\b/g,/\btestng\b/g,/\bjunit\b/g,/\bcucumber\b/g,/\bapi testing\b/g,/\bautomation testing\b/g]],
+    ['Data Engineer',[/\bdatabricks\b/g,/\bapache spark\b|\bspark\b/g,/\bdata factory\b|\badf\b/g,/\betl\b/g,/\bdelta lake\b/g,/\bdata pipeline/g,/\bsnowflake\b/g]],
+    ['DevOps Engineer',[/\bkubernetes\b/g,/\bterraform\b/g,/\bjenkins\b/g,/\bansible\b/g,/\bci\/cd\b|\bcicd\b/g,/\bhelm\b/g,/\bdevops\b/g]],
+    ['Machine Learning Engineer',[/\bmachine learning\b/g,/\bmlflow\b/g,/\bpytorch\b/g,/\btensorflow\b/g,/\bscikit[- ]learn\b/g,/\bllm\b/g]],
+    ['Power BI Developer',[/\bpower\s*bi\b/g,/\bdax\b/g,/\bpower query\b/g,/\btabular model\b/g]],
+    ['Frontend Developer',[/\breact\b/g,/\bangular\b/g,/\bvue\b/g,/\bhtml\b/g,/\bcss\b/g,/\bfrontend\b|\bfront-end\b/g]],
+    ['Java Developer',[/\bjava\b/g,/\bspring boot\b/g,/\bspring\b/g,/\bhibernate\b/g,/\bmaven\b/g,/\bgradle\b/g]],
+    ['.NET Developer',[/\bc#\b/g,/\b\.net\b|\bdotnet\b/g,/\basp\.net\b/g,/\bentity framework\b/g]],
+    ['Python Developer',[/\bpython\b/g,/\bdjango\b/g,/\bfastapi\b/g,/\bflask\b/g]],
+    ['Cloud Engineer',[/\baws\b/g,/\bazure\b/g,/\bgcp\b|\bgoogle cloud\b/g,/\bcloudformation\b/g]]
+  ];
+  let best='',bestScore=0;
+  for(const [title,patterns] of rules){
+    let score=0;
+    for(const pattern of patterns)score+=(combined.match(pattern)||[]).length;
+    if(score>bestScore){bestScore=score;best=title;}
+  }
+  // A clear mix of frontend and backend technologies is better represented as full stack.
+  const frontend=(combined.match(/\b(?:react|angular|vue)\b/g)||[]).length;
+  const backend=(combined.match(/\b(?:spring boot|spring|node(?:\.js)?|express|django|fastapi|asp\.net)\b/g)||[]).length;
+  if(frontend>=2&&backend>=2)return 'Full Stack Developer';
+  return bestScore>=2?best:'';
+}
 function inferTargetRoleFromDocuments(resumeText,jdText) {
-  const text=normalizeText(`${jdText||''}\n${resumeText||''}`).slice(0,14000);
-  const match=text.match(/\b(?:(?:senior|lead|principal|staff|associate|junior)\s+)?(?:software|java|python|data|cloud|devops|qa|quality assurance|automation|full[- ]?stack|backend|front[- ]?end|machine learning|ml|ai|solutions?|technical)\s+(?:engineer|developer|architect|tester|analyst|consultant|lead)\b/i)
-    || text.match(/\b(?:software engineer|software developer|solution architect|solutions architect|data engineer|data scientist|devops engineer|qa engineer|automation engineer|test engineer|technical lead|team lead)\b/i);
-  return match?match[0].replace(/\s+/g,' ').trim():'';
+  // Required priority: an explicit CV title wins; then an explicit JD title;
+  // only then infer from the combined technical profile.
+  return extractExplicitRoleFromDocument(resumeText)
+    || extractExplicitRoleFromDocument(jdText)
+    || inferRoleFromSkills(resumeText,jdText);
 }
 function fallbackProfile(resumeText, jdText, yearsExperience, role) {
   const inferredYears=Number.isFinite(yearsExperience)?yearsExperience:inferYearsExperienceFromResume(resumeText);
@@ -453,12 +558,21 @@ function fallbackProfile(resumeText, jdText, yearsExperience, role) {
 async function generateStructuredProfile(resumeText, jdText, yearsExperience, role) {
   const fallback = fallbackProfile(resumeText, jdText, yearsExperience, role);
   const suppliedYears=Number.isFinite(yearsExperience)?yearsExperience:null;
+  const deterministicYears=suppliedYears===null?inferYearsExperienceFromResume(resumeText):suppliedYears;
+  const explicitResumeRole=role?'':extractExplicitRoleFromDocument(resumeText);
+  const explicitJdRole=(role||explicitResumeRole)?'':extractExplicitRoleFromDocument(jdText);
+  const inferredSkillRole=inferRoleFromSkills(resumeText,jdText);
+  const deterministicRole=role||explicitResumeRole||explicitJdRole||inferredSkillRole;
   try {
     const data = await openAIResponseJson({
       model:LLM_PROFILE_MODEL,
-      instructions:'Create a compact interview-grounding profile. Return JSON only, no markdown. Never invent project facts. If years or role are not supplied, infer them conservatively from the resume/JD as instructed.',
-      input:`Years of experience supplied by user: ${suppliedYears===null?'not supplied; infer conservatively from explicit resume summary or work-date ranges':suppliedYears}
-Target role supplied by user: ${role || 'not supplied; infer from resume and, when present, the JD target title'}
+      instructions:'Create a compact interview-grounding profile. Return JSON only, no markdown. Never invent project facts. Respect the deterministic resume/JD role and experience extraction supplied in the prompt; use model inference only to fill genuinely unresolved profile fields.',
+      input:`Years of experience supplied by user: ${suppliedYears===null?'not supplied':suppliedYears}
+Deterministic resume timeline years: ${Number.isFinite(deterministicYears)?deterministicYears:'not resolved'}
+Target role supplied by user: ${role || 'not supplied'}
+Explicit role found in CV: ${explicitResumeRole || 'not found'}
+Explicit role found in JD: ${explicitJdRole || 'not found'}
+Skill-based role fallback: ${inferredSkillRole || 'not resolved'}
 
 RESUME:
 ${resumeText.slice(0, 30000)}
@@ -466,7 +580,7 @@ ${resumeText.slice(0, 30000)}
 JOB DESCRIPTION:
 ${jdText ? jdText.slice(0, 24000) : 'Not provided. Use resume-only grounding.'}
 
-Return JSON with keys candidateSummary (max 1800 chars), jdSummary (max 1200 chars; empty string when no JD), primarySkills (array max 25), projectHighlights (array max 8), domainVocabulary (array max 60 of exact technology/product/framework/domain terms appearing in the resume or JD, preserving canonical spelling such as LangGraph, LangChain, Kubernetes), targetRole, yearsExperience. For yearsExperience, use the supplied value when present; otherwise infer a conservative total from the resume only and return a number from 0 to 60 or null if genuinely impossible. For targetRole, use the supplied role when present; otherwise prefer an explicit JD role title when a JD exists, else infer the candidate's current/primary role from the resume.`,
+Return JSON with keys candidateSummary (max 1800 chars), jdSummary (max 1200 chars; empty string when no JD), primarySkills (array max 25), projectHighlights (array max 8), domainVocabulary (array max 60 of exact technology/product/framework/domain terms appearing in the resume or JD, preserving canonical spelling such as LangGraph, LangChain, Kubernetes), targetRole, yearsExperience. For yearsExperience, use a supplied value when present; otherwise prefer the deterministic resume timeline value above and only infer from resume dates if it was unresolved. For targetRole, priority is: supplied role, explicit CV title, explicit JD title, then a conservative role inferred from the technical profile. Do not replace an explicit CV title with a JD title.`,
       effort:'low', maxTokens:900, responseFormat:{type:'json_object'}
     });
     const raw = outputText(data);
@@ -474,22 +588,28 @@ Return JSON with keys candidateSummary (max 1800 chars), jdSummary (max 1200 cha
     const parsed = JSON.parse(start >= 0 && end > start ? raw.slice(start, end + 1) : raw);
     const rawParsedYears=parsed.yearsExperience;
     const parsedYears=(rawParsedYears===null||rawParsedYears===undefined||String(rawParsedYears).trim()==='')?NaN:Number(rawParsedYears);
-    const inferredYears=Number.isFinite(parsedYears)&&parsedYears>=0&&parsedYears<=60?parsedYears:fallback.yearsExperience;
+    const resolvedYears=Number.isFinite(suppliedYears)?suppliedYears:(Number.isFinite(deterministicYears)?deterministicYears:(Number.isFinite(parsedYears)&&parsedYears>=0&&parsedYears<=60?parsedYears:fallback.yearsExperience));
+    const parsedRole=normalizeRoleTitle(parsed.targetRole || '');
+    const resolvedRole=normalizeRoleTitle(role||explicitResumeRole||explicitJdRole||parsedRole||inferredSkillRole||fallback.targetRole||'Software Engineer');
     return {
       candidateSummary:normalizeText(parsed.candidateSummary || fallback.candidateSummary).slice(0, 2200),
       jdSummary:normalizeText(parsed.jdSummary || fallback.jdSummary).slice(0, 1600),
       primarySkills:Array.isArray(parsed.primarySkills) ? parsed.primarySkills.slice(0,25) : fallback.primarySkills,
       projectHighlights:Array.isArray(parsed.projectHighlights) ? parsed.projectHighlights.slice(0,8) : [],
       domainVocabulary:Array.isArray(parsed.domainVocabulary) ? parsed.domainVocabulary.map(String).slice(0,60) : fallback.primarySkills,
-      targetRole:String(parsed.targetRole || fallback.targetRole || '').slice(0,160),
-      yearsExperience:inferredYears,
+      targetRole:resolvedRole,
+      yearsExperience:resolvedYears,
     };
   } catch (err) {
     console.warn('[RAG] Structured profile fallback:', err.message);
-    return fallback;
+    return {
+      ...fallback,
+      targetRole:normalizeRoleTitle(deterministicRole||fallback.targetRole||'Software Engineer')
+    };
   }
 }
 function isContextualFollowup(question) {
+  if(parseMultiQuestionIntent(question))return false;
   const q = normalizeText(question).toLowerCase();
   const words = q.split(/\s+/).filter(Boolean);
   if (!q) return false;
@@ -511,13 +631,58 @@ function cleanIntentLead(value) {
   if(text&&!/[?.!]$/.test(text))text+='?';
   return text;
 }
+function extractMultipleQuestionIntents(rawQuestion) {
+  const raw=normalizeText(rawQuestion);
+  if(!raw)return [];
+  const normalized=raw.replace(/\s+/g,' ').trim();
+  const starter=/^(?:have you|do you|did you|can you|could you|would you|will you|are you|were you|what|why|how|when|where|which|who|describe|explain|define|compare|tell me|walk me through|write|implement|find|solve|design|draw|create|show|debug|fix|calculate|return|print)\b/i;
+  const candidates=normalized
+    .split(/(?<=[?!])\s+|(?<=\.)\s+(?=(?:and\s+|also\s+|then\s+|next\s+|second(?:ly)?\s+)?(?:have you|do you|did you|can you|could you|would you|will you|are you|were you|what|why|how|when|where|which|who|describe|explain|define|compare|tell me|walk me through|write|implement|find|solve|design|draw|create|show|debug|fix|calculate|return|print)\b)/i)
+    .map(part=>cleanIntentLead(part))
+    .filter(Boolean);
+  const requests=[];
+  for(const candidate of candidates){
+    const clean=candidate.replace(/^(?:and|also|then|next|second(?:ly)?|one more thing)[,.:;]?\s+/i,'').trim();
+    if(starter.test(clean)||/[?]$/.test(clean))requests.push(clean);
+  }
+  if(requests.length<=1){
+    const pieces=normalized.split(/\s+(?:and\s+then|and\s+also|and|also|then|next|second(?:ly)?|plus)\s+(?=(?:what|why|how|when|where|which|who|have you|do you|did you|can you|could you|would you|will you|are you|were you|describe|explain|define|compare|tell me|walk me through|write|implement|find|solve|design|draw|create|show|debug|fix)\b)/i)
+      .map(part=>cleanIntentLead(part)).filter(Boolean);
+    if(pieces.length>=2)return pieces.slice(0,3);
+  }
+  return requests.length>=2?requests.slice(0,3):[];
+}
+function questionTerms(value) {
+  const stop=new Set(['what','which','why','how','when','where','who','is','are','was','were','do','does','did','can','could','would','should','will','you','your','we','our','i','a','an','the','and','or','to','of','in','on','for','with','this','that','it','these','those','have','has','had','tell','me','explain','describe','please','then','also']);
+  return new Set((normalizeText(value).toLowerCase().match(/[a-z0-9+#.]+/g)||[]).filter(word=>word.length>2&&!stop.has(word)));
+}
+function multiQuestionsRelated(parts) {
+  if(!Array.isArray(parts)||parts.length<2)return false;
+  for(let i=1;i<parts.length;i++){
+    if(/^\s*(?:and\s+)?(?:how|why|where|when|what)\b.*\b(?:it|that|this|same|those|these)\b/i.test(parts[i]))return true;
+  }
+  const base=questionTerms(parts[0]);
+  return parts.slice(1).some(part=>[...questionTerms(part)].some(term=>base.has(term)));
+}
+function parseMultiQuestionIntent(value) {
+  const text=String(value||'');
+  const match=text.match(/^MULTI_QUESTION:\s*(RELATED|DISTINCT)\s*\n([\s\S]+)$/i);
+  if(!match)return null;
+  const parts=[...match[2].matchAll(/^Question\s+\d+:\s*(.+)$/gmi)].map(item=>item[1].trim()).filter(Boolean);
+  return parts.length>=2?{related:match[1].toUpperCase()==='RELATED',parts}:null;
+}
 function reframeQuestionIntent(rawQuestion) {
   const raw=normalizeText(rawQuestion);
   if(!raw)return '';
 
-  // Select the last complete interviewer request locally. This avoids a second
-  // LLM/classifier request and prevents incidental earlier words from deciding
-  // the answer format.
+  const multi=extractMultipleQuestionIntents(raw);
+  if(multi.length>=2){
+    const relation=multiQuestionsRelated(multi)?'RELATED':'DISTINCT';
+    return `MULTI_QUESTION: ${relation}\n${multi.map((item,index)=>`Question ${index+1}: ${item}`).join('\n')}`.slice(0,3000);
+  }
+
+  // For a single request, select the last complete interviewer request locally. Multi-question
+  // prompts were already preserved above. This avoids a second LLM/classifier request.
   const starter=/\b(?:have you|do you|did you|can you|could you|would you|will you|are you|were you|what|why|how|when|where|which|who|describe|explain|define|compare|tell me|walk me through|write|implement|find|solve|design|draw|create|show|debug|fix|calculate|return|print)\b/gi;
   let candidate='';
   const lastQuestionMark=raw.lastIndexOf('?');
@@ -627,6 +792,14 @@ function isCodingFollowupQuestion(question) {
 }
 function classifyResponseType(question,followupInfo=null,inputSource='') {
   const previous=followupInfo?.previous;
+  const multi=parseMultiQuestionIntent(question);
+  if(multi){
+    const types=multi.parts.map(part=>isDiagramQuestion(part)?'diagram':(isCodingQuestion(part)?'code':(isImplementationSnippetQuestion(part)?'snippet':'spoken')));
+    if(types.every(type=>type==='code'))return 'code';
+    if(types.every(type=>type==='diagram'))return 'diagram';
+    if(types.every(type=>type==='snippet'))return 'snippet';
+    return 'multi';
+  }
   const previousCoding=!!previous&&(previous.responseType==='code'||isCodingQuestion(previous.question)||/```|\b(class|function|def|public static|return)\b/i.test(previous.answer||''));
   if(/screen-capture-diagram/i.test(inputSource))return 'diagram';
   if(/screen-capture-code/i.test(inputSource))return 'code';
@@ -636,6 +809,7 @@ function classifyResponseType(question,followupInfo=null,inputSource='') {
   return 'spoken';
 }
 function spokenAnswerShape(question) {
+  if(parseMultiQuestionIntent(question))return 'MULTI';
   const q=normalizeText(question).toLowerCase();
   if(!q)return 'DIRECT';
   if(isVersionQuestion(q))return 'VERSION';
@@ -667,6 +841,7 @@ function exampleGuidance(question, followupInfo=null) {
 function responseMode(question, followupInfo=null, inputSource='') {
   const type=classifyResponseType(question,followupInfo,inputSource);
   const codingFollowup=type==='code'&&!!followupInfo?.previous&&isCodingFollowupQuestion(question);
+  if(type==='multi') return 'MULTI_QUESTION_REQUIRED: Cover every detected interviewer question in the same response and in the same order. If the questions are related, combine them naturally into one connected answer while explicitly satisfying both. If they are distinct, answer the first briefly at a useful high level, then transition immediately to the second and answer it directly. Never discard the first question just because the second is newer. If any sub-question asks for code, include the requested working code for that sub-question rather than explanation only.';
   if (type==='code'&&codingFollowup) return 'CODING_REQUIRED_FOLLOW_UP: Answer the current follow-up directly in 1-3 short sentences. Then write "Logic:" with the simple approach in 1-2 concise lines, followed by "Complete code:" and the entire previous working solution, updated only when the follow-up requests a change. Include concise inline comments for every meaningful logical step so coding can continue without losing context. When a complete runnable program is printed, finish with one small "Sample input:" and matching "Sample output:" example.';
   if (type==='code') return 'CODING_REQUIRED: Start with "Logic:" and explain the simple approach in 1-2 concise lines. Then write "Complete code:" and provide one complete working solution in the requested or context-supported language. Include concise inline comments for every meaningful logical step. When a complete runnable program is printed, finish with one small "Sample input:" and matching "Sample output:" example.';
   if (type==='snippet') return 'EXPLANATION_WITH_CODE_SNIPPET: Answer the question directly in 2-4 concise sentences, then write "Code snippet:" and give the smallest practical snippet that demonstrates how to implement it in the requested or context-supported language/framework. Do not force a full standalone program or sample input/output unless the interviewer asks for it.';
@@ -679,6 +854,7 @@ function answerTokenBudget(question, hasImage=false,responseType='') {
   // Responses API reasoning tokens from crowding out the visible interview answer.
   // The prompt still keeps normal answers concise, so this does not force extra verbosity.
   if (responseType==='code'||isCodingQuestion(q)) return 3600;
+  if (responseType==='multi') return /\b(?:code|program|function|method|implement|write)\b/i.test(q)?3000:1800;
   if (responseType==='snippet'||isImplementationSnippetQuestion(q)) return 1600;
   if (responseType==='diagram'||isDiagramQuestion(q)) return 3000;
   if (hasImage || /\b(design|architecture|system design)\b/i.test(q)) return 1800;
@@ -688,6 +864,13 @@ function answerTokenBudget(question, hasImage=false,responseType='') {
   return 800;
 }
 
+function multiQuestionGuidance(intentQuestion) {
+  const multi=parseMultiQuestionIntent(intentQuestion);
+  if(!multi)return 'SINGLE_QUESTION';
+  return multi.related
+    ? `RELATED_MULTI_QUESTION: The interviewer asked ${multi.parts.length} related questions in one prompt. Give one coherent human-style answer that covers each requested point. Do not silently answer only the last question.`
+    : `DISTINCT_MULTI_QUESTION: The interviewer asked ${multi.parts.length} different questions in one prompt. Answer the first at a concise useful high level, then answer the next question directly in the same response. Preserve the original order and do not skip any question.`;
+}
 function buildPrompt(session, question, retrieved, followupInfo=null, correctedQuestion=question, inputSource='',intentQuestion=correctedQuestion, regenerate=false) {
   const profile = session.profile || {};
   const info = followupInfo || resolveFollowupIntent(session, question);
@@ -702,12 +885,16 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
   const followup = info.isFollowup
     ? `YES. Treat the current words as a continuation/modifier of the immediately previous interviewer request. Resolved intent:\n${info.resolvedQuestion}`
     : 'NO';
-  const priorForRegenerate=regenerate?session.turns[session.turns.length-1]:null;
+  const sameQuestionAnswers=regenerate?session.turns
+    .filter(turn=>normalizeText(turn.question).toLowerCase()===normalizeText(intentQuestion).toLowerCase())
+    .slice(-3):[];
+  const priorAnswersForRegenerate=sameQuestionAnswers.length?sameQuestionAnswers:session.turns.slice(-1);
   const reanswer=regenerate
-    ? `YES. Re-answer the same interviewer request with a materially different, independently useful approach while preserving all factual grounding and explicit constraints. Correct any weakness in the prior answer. Do not mention that this is a retry or re-answer. For coding, use a different valid implementation/structure when practical without violating the requested constraints. Previous answer to avoid merely repeating:
-${String(priorForRegenerate?.answer||'').slice(0,6000)}`
+    ? `YES. Re-answer the same interviewer request with a materially different, independently useful approach while preserving all factual grounding and explicit constraints. Correct any weakness in the earlier answers. Do not mention that this is a retry or re-answer. For coding, use a different valid implementation/structure when practical without violating the requested constraints. Recent answers to avoid merely repeating:
+${priorAnswersForRegenerate.map((turn,index)=>`Earlier answer ${index+1}:
+${String(turn?.answer||'').slice(0,3500)}`).join('\n\n')}`
     : 'NO';
-  return `CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
+  return `CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
 }
 const COPILOT_INSTRUCTIONS = `You are the candidate in a live senior/lead engineer interview. Return one directly usable answer. Normal answers must be immediately speakable; coding and diagram questions must use the exact practical formats below. Never mention AI, ChatGPT, copilot, prompts, retrieval, transcription correction, evidence matching, or how you inferred the question. Never say "based on my CV/JD", "the resume confirms", "not listed", or similar meta commentary.
 
@@ -745,10 +932,10 @@ The input is noisy live speech. Remove repetitions, fillers and false starts suc
 
 Use REFRAMED CURRENT INTENT as the authoritative current question and RESPONSE MODE as the authoritative output format. RAW CURRENT TRANSCRIPT is context only. The mere presence of words such as code, coding, development, DevOps, program, class, module, Java or Python never makes an experience, behavioral, conceptual or project question a coding task. Do not carry a prior coding format into a new topic. Continue in coding format only when the current intent explicitly requests implementation/code or clearly asks about the immediately previous code.
 
-Treat adjacent/continued interviewer fragments as one intent only when they are clearly related. If the current fragment completes the prior question, answer the combined question. If one captured utterance contains two or more unrelated questions/topics, treat the LAST complete question as the intentional current request and ignore the earlier unrelated question(s). Combine multiple questions only when the interviewer explicitly asks to answer both/all of them or they are clearly parts of one request. Pronouns/modifiers such as "it", "that", "this", "those", "same", "using Java", "give one example", "give me two", "the second one", "what about security", and "how does that flow work" inherit the immediately preceding topic. Preserve explicit constraints exactly: requested count, language, format, scenario, flow, comparison, code contract, or output.
+Treat adjacent/continued interviewer fragments as one intent only when they are clearly related. When one captured utterance contains two or more complete questions, MULTI-QUESTION POLICY is authoritative: answer all detected questions in the same response. If they are related, combine them naturally while covering every requested point. If they are distinct, answer the first briefly at a useful high level, then move immediately to the second in the original order. Never discard an earlier complete question merely because a newer one follows in the same prompt. Pronouns/modifiers such as "it", "that", "this", "those", "same", "using Java", "give one example", "give me two", "the second one", "what about security", and "how does that flow work" inherit the immediately preceding topic. Preserve explicit constraints exactly: requested count, language, format, scenario, flow, comparison, code contract, or output.
 
 ANSWER PRIORITY AND SHAPE:
-1. Answer exactly the last complete interviewer intent. The first sentence must contain the answer I can say immediately. Do not start with acknowledgement, restatement, a dictionary definition, or generic background.
+1. Answer exactly the authoritative current intent. For MULTI_QUESTION input, cover every detected question in order; otherwise answer the single current question. The first sentence must contain something I can say immediately. Do not start with acknowledgement, restatement, a dictionary definition, or generic background.
 2. SPOKEN ANSWER SHAPE is authoritative for normal spoken answers:
    - VERSION: Put the requested version in the first short sentence immediately. If an exact project version is explicitly supported by evidence, use it. If the technology is present in the Resume/JD/current technical context but the exact project version is not documented, never lead with 'not in the resume/CV', 'I cannot determine it', or 'I haven't used it'; give a clearly conservative production-era stable version estimate, normally one stable major/minor behind the newest stable line you know, then add at most one short sentence noting the newer line when useful. Do not claim the estimate is resume-verified or fabricate an exact patch/build number.
    - DIRECT / CONCEPT: Start with 1 direct sentence, then add a short 2-4 sentence explanation that connects what it is -> how it works -> why/when it matters. Do not stop at keywords when one more sentence would make the concept speakable.
@@ -826,6 +1013,7 @@ Interviewer: "How do you find broken links in Selenium?" Candidate format: conci
 After a coding turn, interviewer: "Do you have experience with Xpedition and Capital integration?" Candidate format: normal concise spoken experience answer; never repeat the earlier code.
 Interviewer: "asdf asdf asdf" Candidate: "I’m not sure what you’re asking. Please rephrase the question."`
 function strictModeInstructions(responseType) {
+  if(responseType==='multi')return 'NON-NEGOTIABLE OUTPUT CONTRACT: The current prompt contains multiple interviewer questions. Cover every question in the original order. Related questions may be merged into one connected explanation; distinct questions must both be answered, with the first concise and the second immediately after it. Never answer only the last question. If a sub-question requests code, include usable code for that sub-question.';
   if(responseType==='code')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This is a coding response. Explanation without a complete compilable/runnable solution is invalid. Output Logic:, then Complete code:, then the full code with meaningful inline comments. When a complete runnable program is printed, include one Sample input: and matching Sample output:. For a follow-up, include the entire previous solution again after the explanation.';
   if(responseType==='snippet')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This question requires a practical implementation snippet. Give the concise explanation first, then Code snippet: followed by usable code. Explanation-only output is invalid. Keep the snippet small; do not force full program scaffolding or sample input/output unless requested.';
   if(responseType==='diagram')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This is a diagram response. A prose chain on one line is invalid. Output Flow diagram:, then a multi-line Notepad-friendly Unicode diagram containing at least three real boxes made with ┌ ─ ┐ │ └ ┘ and connected by directional arrows. Include relevant labelled branches and supporting components.';
@@ -1024,7 +1212,7 @@ async function prepareQuestion(email, question, {inputSource='', requestId='', c
   }
   perf.retrievalDecisionMs = Date.now() - retrievalDecisionStartedAt;
   const promptBuildStartedAt = Date.now();
-  const prompt = session ? buildPrompt(session, question, retrieved, followupInfo, correctedQuestion,inputSource,intentQuestion,regenerate) : `INPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nRESPONSE MODE\n${responseMode(intentQuestion,followupInfo,inputSource)}\n\nREFRAMED CURRENT INTENT\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
+  const prompt = session ? buildPrompt(session, question, retrieved, followupInfo, correctedQuestion,inputSource,intentQuestion,regenerate) : `INPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,followupInfo,inputSource)}\n\nREFRAMED CURRENT INTENT\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
   perf.promptBuildMs = Date.now() - promptBuildStartedAt;
   perf.promptChars = String(prompt||'').length;
   perf.promptTokenEstimate = Math.ceil(perf.promptChars / 4);
@@ -1139,7 +1327,7 @@ function buildCaptureContext(session) {
 
 function buildVisionInput(text, imageDataUrl, session, captureSource='') {
   const context = buildCaptureContext(session);
-  const instruction = normalizeText(`${text || 'Analyze and solve the captured screen.'}\n\nCAPTURE CONTEXT\n${captureSource ? `Window: ${captureSource}\n` : ''}${context ? `${context}\n` : ''}Rules for screen tasks:\n- Read the screenshot directly; do not ask me to transcribe visible code or question text.\n- Identify the last complete question intent before choosing an answer format.\n- A mention of code, coding, development, DevOps, a programming language or a module inside an experience/conceptual question does not make it a coding task.\n- For genuine coding problems, always start with Logic (1-2 lines), then provide complete runnable code in the language visible in the screenshot unless another language is requested. Never return explanation alone.\n- Preserve method/class signatures shown in the screenshot when they are part of the problem contract.\n- Cover edge cases and complexity briefly when relevant.\n- Add concise inline comments to meaningful code statements so the solution can be explained in an interview.\n- For flowchart, architecture-flow or diagram requests, provide a detailed drawable Unicode box flow using ┌ ─ ┐ │ └ ┘, arrows, branches and data direction; never return prose alone.\n- If the screenshot contains an error, diagnose the actual failing line/behavior and provide the corrected code.\n- Keep the answer practical, concise, and directly usable.`);
+  const instruction = normalizeText(`${text || 'Analyze and solve the captured screen.'}\n\nCAPTURE CONTEXT\n${captureSource ? `Window: ${captureSource}\n` : ''}${context ? `${context}\n` : ''}Rules for screen tasks:\n- Read the screenshot directly; do not ask me to transcribe visible code or question text.\n- Identify every complete current question visible in the captured content before choosing an answer format. If there are multiple complete questions, preserve them in order; do not silently keep only the last one.\n- A mention of code, coding, development, DevOps, a programming language or a module inside an experience/conceptual question does not make it a coding task.\n- For genuine coding problems, always start with Logic (1-2 lines), then provide complete runnable code in the language visible in the screenshot unless another language is requested. Never return explanation alone.\n- Preserve method/class signatures shown in the screenshot when they are part of the problem contract.\n- Cover edge cases and complexity briefly when relevant.\n- Add concise inline comments to meaningful code statements so the solution can be explained in an interview.\n- For flowchart, architecture-flow or diagram requests, provide a detailed drawable Unicode box flow using ┌ ─ ┐ │ └ ┘, arrows, branches and data direction; never return prose alone.\n- If the screenshot contains an error, diagnose the actual failing line/behavior and provide the corrected code.\n- Keep the answer practical, concise, and directly usable.`);
   return [{ role:'user', content:[
     { type:'input_text', text:instruction },
     { type:'input_image', image_url:imageDataUrl, detail:'high' }
@@ -1155,7 +1343,7 @@ app.post('/extract-screen-text', async (req, res) => {
   if (!OPENAI_API_KEY) return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend'});
   const session = interviewSessions.get(email);
   const recent = (session?.turns || []).slice(-3).map(t => `Q: ${t.question}\nA: ${t.answer}`).join('\n');
-  const extractionRules = `Extract the useful visible content from this screenshot so it can be used as the next interview prompt. The FIRST line must be exactly one of TASK_TYPE: CODING, TASK_TYPE: DIAGRAM, or TASK_TYPE: OTHER. After that first line return only the extracted/normalized prompt text, no analysis and no markdown fences.\n- First identify the last complete question intent; earlier conversational lead-ins do not control TASK_TYPE.\n- Use CODING only for an actual request to write, implement, complete, debug, analyze or run code, or solve an algorithm/data-structure programming task.\n- A question about experience, projects, Agile, DevOps, integrations or concepts is OTHER even when its transcript mentions code, coding, development, a programming language, class or module.\n- Use DIAGRAM for flowchart, architecture-flow, sequence, component, block or draw.io-style requests.\n- Preserve code exactly enough to solve it, including identifiers, method/class signatures, error text and visible line numbers when present.\n- Capture all visible content materially relevant to solving the current question, including supporting code, data, error messages, constraints, expected output, diagram labels, and question context that changes the solution.\n- Preserve explicit constraints and requested output.\n- Ignore Topper UI text, browser chrome, taskbar, notifications and unrelated navigation.\n- If this is a continuation of earlier captured content, keep only what is visible now; the desktop app will append multiple captures.\n- Do not answer the content. Extract it only.\nRecent interview context for disambiguation only:\n${recent}`;
+  const extractionRules = `Extract the useful visible content from this screenshot so it can be used as the next interview prompt. The FIRST line must be exactly one of TASK_TYPE: CODING, TASK_TYPE: DIAGRAM, or TASK_TYPE: OTHER. After that first line return only the extracted/normalized prompt text, no analysis and no markdown fences.\n- First identify all complete current question intents; earlier conversational lead-ins do not control TASK_TYPE. If two complete questions are visible, keep both in their original order.\n- Use CODING only for an actual request to write, implement, complete, debug, analyze or run code, or solve an algorithm/data-structure programming task.\n- A question about experience, projects, Agile, DevOps, integrations or concepts is OTHER even when its transcript mentions code, coding, development, a programming language, class or module.\n- Use DIAGRAM for flowchart, architecture-flow, sequence, component, block or draw.io-style requests.\n- Preserve code exactly enough to solve it, including identifiers, method/class signatures, error text and visible line numbers when present.\n- Capture all visible content materially relevant to solving the current question, including supporting code, data, error messages, constraints, expected output, diagram labels, and question context that changes the solution.\n- Preserve explicit constraints and requested output.\n- Ignore Topper UI text, browser chrome, taskbar, notifications and unrelated navigation.\n- If this is a continuation of earlier captured content, keep only what is visible now; the desktop app will append multiple captures.\n- Do not answer the content. Extract it only.\nRecent interview context for disambiguation only:\n${recent}`;
   try {
     const r = await fetch('https://api.openai.com/v1/responses', {method:'POST', headers:{'authorization':`Bearer ${OPENAI_API_KEY}`,'content-type':'application/json'}, body:JSON.stringify({model:LLM_VISION_EXTRACT_MODEL, service_tier:OPENAI_SERVICE_TIER, instructions:extractionRules, input:[{role:'user',content:[{type:'input_text',text:'Extract the screen content.'},{type:'input_image',image_url:imageDataUrl,detail:'high'}]}], reasoning:{effort:'none'}, text:{verbosity:'low'}, max_output_tokens:1600})});
     const data = await r.json().catch(()=>({}));

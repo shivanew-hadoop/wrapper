@@ -1,21 +1,16 @@
-# Topper v14.7.1
+# Topper v14.7.2
 
-This is the replacement package based on v14.7.0. No new Railway environment variables are required.
+Replacement package based on v14.7.1. No new Railway environment variables are required.
 
-## v14.7.1 changes
+## Changes
 
-- Removed the temporary `[PERF]` / `[PERF UI]` latency diagnostic logging path while retaining v14.7.0 latency optimizations, prefetching, caches, fast retrieval, and SSE no-buffer behavior.
-- Coding follow-up intent is preserved. A modifier such as `without StringBuilder`, `avoid streams`, or `another approach` stays attached to the previous coding task and requires the complete updated code.
-- Broken/dead-link implementation questions return a concise explanation plus a practical `Code snippet:` instead of explanation only.
-- Resume is required; job description is optional. With no JD, interview context and retrieval use the resume alone.
-- Years of experience and target role are auto-detected during Prepare Interview, shown as disabled fields, and saved for the next setup reload. Years are inferred from the resume; role prefers the JD title when available and otherwise the resume role.
-- Added `Re-answer` in the overlay. It reruns the previous prompt with the same grounding and constraints while asking for a materially different accurate approach rather than repeating the prior answer.
-- Repeated Capture Screen clicks accumulate numbered screen captures. Capture follows the display under the mouse pointer, so moving the pointer to another monitor before Capture Screen stages that display too. On Send, any current unsent spoken question/follow-up is appended after the captured screen content and submitted together.
-- Screen extraction keeps all visible material relevant to the solution, including supporting code, errors, constraints, expected output, data, and diagram labels. Screen-capture prompts allow a larger input size for multi-screen tasks.
-- Live transcript correction still uses resume/JD canonical vocabulary and recent technical context, with an explicit high-confidence correction for speech such as `ask and quarks` to `*args and **kwargs`.
-- Version questions answer with the version first. When a technology is in the interview context but the exact project version is undocumented, the answer uses a conservative production-era version estimate rather than stopping with a resume disclaimer.
-- Unsupported technologies keep the factual boundary, then immediately provide a strong production-style implementation/validation approach. The app does not fabricate unsupported personal POC, freelance, or production claims.
+- Re-answer now creates a new chronological answer turn. Earlier answers remain visible and unchanged; every re-answer streams below them like a new question while still asking for a materially different accurate approach.
+- Role detection priority is explicit CV role -> explicit JD role -> conservative skill/profile inference. The resolved role is stored in the prepared session and used in answer grounding.
+- Experience detection prefers an explicit total. When absent, it calculates a conservative span from the earliest non-education employment/project date to the latest/current project date, and stores the resolved value in the prepared session.
+- Multi-question prompts no longer discard the earlier complete question. Related questions are answered as one connected response; distinct questions are answered in order, with the first concise and the next answered directly. Mixed prompts that include coding still require usable code for the coding part.
+- The public/account portal was redesigned with persistent navigation after login, a compact account area, visible logout/account/history/support links, clearer product sections, and payment/privacy/refund/contact links suitable for a professional digital-service storefront. Existing account, PhonePe, credits, launch, transcript, admin and download IDs/actions are preserved.
+- Terms, privacy, refund/cancellation and contact pages were refreshed for the digital-credit service and remain linked from the portal.
 
 ## Intentionally unchanged
 
-Model selection and routing (Sol, Terra, Luna, Cerebras), reasoning settings, answer token ceilings, resume grounding rules, adaptive examples, Deepgram/system-audio capture and recovery, SQL/commerce/licensing, PDF transcript behavior, overlay size/position, and Railway configuration are otherwise unchanged.
+Model routing and model IDs, reasoning settings, answer token ceilings outside the new multi-question response mode, RAG evidence selection, resume/JD grounding boundaries, adaptive examples, Deepgram/system-audio capture and recovery, screen-capture accumulation, SQL schema, commerce/payment API behavior, licensing, PDF transcript behavior, overlay size/position, and Railway configuration are otherwise unchanged.

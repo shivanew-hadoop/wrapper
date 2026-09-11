@@ -168,9 +168,9 @@ function buildTurnElement(turn) {
   return wrap;
 }
 
-function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=false, reuseCurrent=false }) {
+function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=false }) {
   const cleanQuestion = String(question || '').trim();
-  if ((reuseAuto || reuseCurrent) && activeAnswerTurn) {
+  if (reuseAuto && activeAnswerTurn) {
     activeAnswerTurn.requestId = requestId;
     activeAnswerTurn.question = cleanQuestion;
     activeAnswerTurn.answeredAt = null;
@@ -179,7 +179,7 @@ function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=f
       activeAnswerTurn.answer = '';
       activeAnswerTurn.responseElement.textContent = '';
     }
-    // For Re-answer, keep the prior answer visible until the first new provider delta.
+    // Auto-send continuation replaces only the same still-forming logical question.
     scrollTurnToTop(activeAnswerTurn);
     return activeAnswerTurn;
   }
@@ -602,12 +602,14 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   streamedAnswerText = '';
   pendingRenderDelta = '';
   renderFramePending = false;
-  startOrRefreshAnswerTurn({ requestId, question:text, auto, reuseAuto:reuseAutoTurn, reuseCurrent:regenerate });
+  // Re-answer is intentionally a NEW chronological turn. The prior answer stays intact
+  // and the regenerated answer streams below it exactly like a newly asked question.
+  startOrRefreshAnswerTurn({ requestId, question:text, auto, reuseAuto:reuseAutoTurn });
   if (!regenerate) lastSubmittedPrompt={text,inputSource:source};
   if (reanswerBtn) reanswerBtn.disabled=true;
-  // Keep the previous answer readable while the next request is being prepared.
-  // The answer body is replaced only when the first token of the new answer arrives.
-  // Do not insert a local 'Thinking' state. The first provider delta is rendered immediately.
+  // Keep prior answers readable while the next request is being prepared. Re-answer
+  // creates a separate turn, so no completed answer is overwritten. Do not insert a
+  // local 'Thinking' state; the first provider delta is rendered immediately.
   modelLabel.textContent = '';
   feedback(regenerate ? 'Re-answering…' : (auto ? 'Auto sent' : 'Sent'));
   window.electronAPI.startLLMStream({ requestId, text, inputSource:source, licenseEmail:effectiveEmail(), clientSentAt:Date.now(), regenerate });
