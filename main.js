@@ -449,8 +449,12 @@ ipcMain.handle('prepare-context', async (_, payload) => {
     global.currentLicenseEmail = email;
     global.contextPrepared = true;
     global.contextMeta = data;
-    // Persist only after successful preparation; encrypted with Electron safeStorage.
-    saveSetupDefaults(payload);
+    // Persist only after successful preparation; use backend-inferred years/role so the setup screen can auto-populate on reload.
+    saveSetupDefaults({
+      ...payload,
+      yearsExperience:data.profile?.yearsExperience ?? null,
+      role:String(data.profile?.targetRole || ''),
+    });
     return { success:true, ...data };
   } catch (err) {
     return { success:false, error:err.message || 'Context preparation failed' };
@@ -560,13 +564,6 @@ ipcMain.on('cancel-llm-stream', (_event, requestId) => {
 });
 
 
-ipcMain.on('llm-perf', async (_event, payload) => {
-  try {
-    const email = String(payload?.licenseEmail || global.currentLicenseEmail || '').trim().toLowerCase();
-    await fetch(`${backendBase()}/perf/client`, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email,requestId:String(payload?.requestId||''),firstRenderMs:Number(payload?.firstRenderMs)})});
-  } catch (_) { /* diagnostics must never affect interview flow */ }
-});
-
 ipcMain.on('prefetch-llm-query', async (_event, payload) => {
   try {
     const text = String(payload?.text || '').trim();
@@ -587,6 +584,7 @@ ipcMain.on('ask-llm-stream', async (event, payload) => {
   const captureSource = String(payload?.captureSource || '').trim();
   const inputSource = String(payload?.inputSource || '').trim().slice(0,40);
   const clientSentAt = Number(payload?.clientSentAt || 0);
+  const regenerate = payload?.regenerate === true;
   const email = String(payload?.licenseEmail || global.currentLicenseEmail || '').trim().toLowerCase();
   const send = data => {
     try { if (!event.sender.isDestroyed()) event.sender.send('llm-stream', { requestId, ...data }); } catch (_) {}
@@ -599,7 +597,7 @@ ipcMain.on('ask-llm-stream', async (event, payload) => {
     const res = await fetch(`${backendBase()}/ask/stream`, {
       method:'POST', signal:controller.signal,
       headers:{'content-type':'application/json'},
-      body:JSON.stringify({ email, text:prompt, imageDataUrl, captureSource, inputSource, requestId, clientSentAt })
+      body:JSON.stringify({ email, text:prompt, imageDataUrl, captureSource, inputSource, requestId, clientSentAt, regenerate })
     });
     if (!res.ok) {
       const body = await res.text();

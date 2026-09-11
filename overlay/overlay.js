@@ -37,6 +37,7 @@ const fontDown = $('fontDown');
 const fontUp = $('fontUp');
 const fontSizeLabel = $('fontSizeLabel');
 const captureWindowBtn = $('captureWindowBtn');
+const reanswerBtn = $('reanswerBtn');
 const autoSendBtn = $('autoSendBtn');
 const sendBtn = $('sendBtn');
 const manualPrompt = $('manualPrompt');
@@ -57,12 +58,11 @@ let llmTimer = null;
 let feedbackTimer = null;
 let llmRequestId = 0;
 let activeStreamRequestId = null;
-let activeStreamSentAt = 0;
-let firstRenderPerfReported = false;
 let streamHasText = false;
 let streamedAnswerText = '';
 let pendingRenderDelta = '';
 let renderFramePending = false;
+let lastSubmittedPrompt = null; // {text,inputSource} for explicit Re-answer
 
 function flushPendingAnswerDelta() {
   renderFramePending = false;
@@ -92,6 +92,7 @@ function queuePlainAnswerDelta(delta) {
 }
 let manualPromptContainsCapture = false;
 let manualPromptTaskType = 'other';
+let capturedScreenCount = 0;
 let manualSendTimer = null;
 let manualSendStartedAt = 0;
 const MANUAL_SEND_QUIET_MS = 60;
@@ -167,15 +168,18 @@ function buildTurnElement(turn) {
   return wrap;
 }
 
-function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=false }) {
+function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=false, reuseCurrent=false }) {
   const cleanQuestion = String(question || '').trim();
-  if (reuseAuto && activeAnswerTurn) {
+  if ((reuseAuto || reuseCurrent) && activeAnswerTurn) {
     activeAnswerTurn.requestId = requestId;
     activeAnswerTurn.question = cleanQuestion;
-    activeAnswerTurn.answer = '';
     activeAnswerTurn.answeredAt = null;
-    activeAnswerTurn.responseElement.textContent = '';
-    activeAnswerTurn.auto = true;
+    activeAnswerTurn.auto = !!auto;
+    if (reuseAuto) {
+      activeAnswerTurn.answer = '';
+      activeAnswerTurn.responseElement.textContent = '';
+    }
+    // For Re-answer, keep the prior answer visible until the first new provider delta.
     scrollTurnToTop(activeAnswerTurn);
     return activeAnswerTurn;
   }
@@ -517,7 +521,7 @@ function isLikelyContinuation(fragment) {
   return /^(and|also|but|or|then|so|because|which|where|when|with|without|using|for|from|in|on|to|if|while|plus|along with)\b/.test(q);
 }
 
-function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = '', inputSource = '' } = {}) {
+function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = '', inputSource = '', regenerate = false } = {}) {
   clearTimeout(llmTimer);
   clearTimeout(manualSendTimer);
   manualSendTimer=null;
@@ -538,11 +542,10 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   // visible turn instead of leaving a stale partial answer in history.
   const reuseAutoTurn = !!(auto && lastSendWasAuto && activeAnswerTurn?.auto && activeAutoLineIndex >= 0);
 
-  // A manually typed prompt is authoritative for this turn. When the user explicitly
-  // presses Send/Enter, close any pending system-audio question as already read so it
-  // cannot be auto-sent later or compete with the manual question. Only the typed text
-  // is sent to the LLM; the pending speech remains visible below as dim history.
-  if (typed) {
+  // A manually submitted prompt is authoritative for this turn. When it contains staged
+  // screen captures, sendManualOrPending first appends the current unsent spoken question.
+  // Once submitted, close that transcript question so it cannot auto-send again.
+  if (typed && !regenerate) {
     utteranceParts = [];
     markPendingTranscriptSent();
     clearTimeout(llmTimer);
@@ -554,7 +557,8 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
     manualPrompt.value = '';
     manualPromptContainsCapture = false;
     manualPromptTaskType = 'other';
-  } else {
+    capturedScreenCount = 0;
+  } else if (!regenerate) {
     utteranceParts = [];
     // Manual sends close the current transcript question immediately. Auto sends keep
     // the same visible question addressable during the continuation window.
@@ -594,19 +598,19 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   if (activeStreamRequestId) window.electronAPI.cancelLLMStream(activeStreamRequestId);
   const requestId = `q-${Date.now()}-${++llmRequestId}`;
   activeStreamRequestId = requestId;
-  activeStreamSentAt = Date.now();
-  firstRenderPerfReported = false;
   streamHasText = false;
   streamedAnswerText = '';
   pendingRenderDelta = '';
   renderFramePending = false;
-  startOrRefreshAnswerTurn({ requestId, question:text, auto, reuseAuto:reuseAutoTurn });
+  startOrRefreshAnswerTurn({ requestId, question:text, auto, reuseAuto:reuseAutoTurn, reuseCurrent:regenerate });
+  if (!regenerate) lastSubmittedPrompt={text,inputSource:source};
+  if (reanswerBtn) reanswerBtn.disabled=true;
   // Keep the previous answer readable while the next request is being prepared.
   // The answer body is replaced only when the first token of the new answer arrives.
   // Do not insert a local 'Thinking' state. The first provider delta is rendered immediately.
   modelLabel.textContent = '';
-  feedback(auto ? 'Auto sent' : 'Sent');
-  window.electronAPI.startLLMStream({ requestId, text, inputSource:source, licenseEmail:effectiveEmail(), clientSentAt:activeStreamSentAt });
+  feedback(regenerate ? 'Re-answering…' : (auto ? 'Auto sent' : 'Sent'));
+  window.electronAPI.startLLMStream({ requestId, text, inputSource:source, licenseEmail:effectiveEmail(), clientSentAt:Date.now(), regenerate });
   return true;
 }
 
@@ -647,9 +651,23 @@ autoSendBtn.onclick = () => {
   feedback(autoSend ? 'Auto Send enabled.' : 'Auto Send disabled. Type or use captured speech, then Send.');
   if (autoSend && getCompleteUnsentTranscript()) scheduleLLM();
 };
+function capturedPromptWithPendingSpeech(capturedText) {
+  const captured=String(capturedText||'').trim();
+  if (!manualPromptContainsCapture || !captured) return captured;
+  const spoken=getCompleteUnsentTranscript();
+  if (!spoken) return captured;
+  return `${captured}
+
+--- SPOKEN QUESTION / FOLLOW-UP ---
+${spoken}`;
+}
+
 function sendManualOrPending() {
   const typed = manualPrompt.value.trim();
-  if (typed) return sendUtteranceToLLM({auto:false,typedText:typed,inputSource:manualPromptContainsCapture?`screen-capture-${manualPromptTaskType}`:'typed'});
+  if (typed) {
+    const combined=capturedPromptWithPendingSpeech(typed);
+    return sendUtteranceToLLM({auto:false,typedText:combined,inputSource:manualPromptContainsCapture?`screen-capture-${manualPromptTaskType}`:'typed'});
+  }
   clearTimeout(manualSendTimer);
   if (!manualSendStartedAt) manualSendStartedAt=Date.now();
   const run=()=>{
@@ -670,9 +688,10 @@ function sendManualOrPending() {
 async function copyRecentAndSend() {
   const typed=manualPrompt.value.trim();
   if (typed) {
-    const copied=await window.electronAPI.copyToClipboard(typed).catch(()=>({success:false}));
+    const combined=capturedPromptWithPendingSpeech(typed);
+    const copied=await window.electronAPI.copyToClipboard(combined).catch(()=>({success:false}));
     if (!copied?.success) feedback('Could not copy prompt to clipboard.',true);
-    return sendUtteranceToLLM({auto:false,typedText:typed,inputSource:manualPromptContainsCapture?`screen-capture-${manualPromptTaskType}`:'typed'});
+    return sendUtteranceToLLM({auto:false,typedText:combined,inputSource:manualPromptContainsCapture?`screen-capture-${manualPromptTaskType}`:'typed'});
   }
   clearTimeout(manualSendTimer);
   if (!manualSendStartedAt) manualSendStartedAt=Date.now();
@@ -724,13 +743,16 @@ async function captureWindowAndSolve() {
     }
     const block = String(extracted.text).trim();
     const existing = manualPrompt.value.trim();
-    manualPrompt.value = existing ? `${existing}\n\n--- CAPTURE ${Date.now()} ---\n${block}` : block;
+    capturedScreenCount += 1;
+    const captureBlock = `--- SCREEN CAPTURE ${capturedScreenCount} ---\n${block}`;
+    manualPrompt.value = existing ? `${existing}\n\n${captureBlock}` : captureBlock;
     manualPromptContainsCapture = true;
     if(['code','diagram'].includes(extracted.taskType))manualPromptTaskType=extracted.taskType;
     // Captured text is deliberately staged, not auto-sent: repeated captures accumulate here.
     manualPrompt.classList.remove('hidden');
     manualPrompt.scrollTop = manualPrompt.scrollHeight;
     modelLabel.textContent = `Screen added · ${extracted.captureMs || 0}ms`;
+    prefetchQuestionEvidence(manualPrompt.value, 0);
     feedback('Screen text added to prompt. Capture more screens or press Send.');
   } catch (err) {
     feedback(err?.message || 'Screen capture failed.', true);
@@ -743,7 +765,16 @@ async function captureWindowAndSolve() {
 }
 
 captureWindowBtn.onclick = captureWindowAndSolve;
-manualPrompt.addEventListener('input',()=>{if(!manualPrompt.value.trim()){manualPromptContainsCapture=false;manualPromptTaskType='other'}});
+if (reanswerBtn) reanswerBtn.onclick = () => {
+  if (!lastSubmittedPrompt?.text) return feedback('No previous question to re-answer.', true);
+  sendUtteranceToLLM({
+    auto:false,
+    typedText:lastSubmittedPrompt.text,
+    inputSource:lastSubmittedPrompt.inputSource || 'typed',
+    regenerate:true
+  });
+};
+manualPrompt.addEventListener('input',()=>{if(!manualPrompt.value.trim()){manualPromptContainsCapture=false;manualPromptTaskType='other';capturedScreenCount=0}});
 manualPrompt.addEventListener('input',()=>{ if(!autoSend) prefetchQuestionEvidence(manualPrompt.value, 320); });
 
 sendBtn.onclick = sendManualOrPending;
@@ -779,10 +810,6 @@ window.electronAPI.onLLMStream(msg => {
     }
     // Append each provider delta immediately. Avoid rebuilding the whole answer on every token.
     appendPlainAnswerDelta(msg.delta || '');
-    if (!firstRenderPerfReported) {
-      firstRenderPerfReported = true;
-      requestAnimationFrame(() => window.electronAPI.reportLLMPerf?.({requestId:activeStreamRequestId,licenseEmail:effectiveEmail(),firstRenderMs:Date.now()-activeStreamSentAt}));
-    }
   } else if (msg.type === 'replace') {
     flushPendingAnswerDelta();
     streamHasText=true;
@@ -815,6 +842,7 @@ window.electronAPI.onLLMStream(msg => {
     if (activeAnswerTurn && activeAnswerTurn.requestId === msg.requestId) activeAnswerTurn.answeredAt = Date.now();
     ensureCurrentTurnReadingSlot(activeAnswerTurn);
     activeStreamRequestId = null;
+    if (reanswerBtn) reanswerBtn.disabled=!lastSubmittedPrompt?.text;
   } else if (msg.type === 'error') {
     const errorText = `LLM error: ${msg.error || 'Request failed'}`;
     streamedAnswerText = errorText;
@@ -826,6 +854,7 @@ window.electronAPI.onLLMStream(msg => {
     modelLabel.textContent = '';
     ensureCurrentTurnReadingSlot(activeAnswerTurn);
     activeStreamRequestId = null;
+    if (reanswerBtn) reanswerBtn.disabled=!lastSubmittedPrompt?.text;
   }
 });
 

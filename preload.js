@@ -22,7 +22,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   askLLM: (data) => ipcRenderer.invoke('ask-llm', data),
   startLLMStream: (data) => ipcRenderer.send('ask-llm-stream', data),
   cancelLLMStream: (requestId) => ipcRenderer.send('cancel-llm-stream', requestId),
-  reportLLMPerf: (data) => ipcRenderer.send('llm-perf', data),
   prefetchLLMQuery: (data) => ipcRenderer.send('prefetch-llm-query', data),
   onLLMStream: (cb) => ipcRenderer.on('llm-stream', (_, data) => cb(data)),
   setOverlayCollapsed: (collapsed) => ipcRenderer.invoke('overlay-set-collapsed', collapsed),

@@ -11,7 +11,7 @@
       <div class="brand">TOPPER</div>
       <div>
         <h1>Prepare interview context</h1>
-        <p>Resume + JD are processed once before listening so live answers can use fast, relevant retrieval.</p>
+        <p>Your resume is required. A job description is optional; when omitted, live answers use resume-only grounding.</p>
       </div>
     </header>
 
@@ -31,17 +31,17 @@
         <small id="resumeMeta">Required · max 6 MB</small>
       </div>
       <div class="field">
-        <label>Job description <span>PDF, DOC, DOCX, RTF and common text formats</span></label>
+        <label>Job description <span>optional · PDF, DOC, DOCX, RTF and common text formats</span></label>
         <div class="fileRow"><input id="jd" type="file" accept="*/*"><button id="removeJd" type="button" class="removeFile hidden">Remove</button></div>
-        <small id="jdMeta">Upload a JD or paste it below.</small>
+        <small id="jdMeta">Optional · upload a JD or paste it below.</small>
       </div>
       <div class="field compact">
-        <label>Years of experience</label>
-        <input id="years" type="number" min="0" max="60" step="0.5" placeholder="8">
+        <label>Years of experience <span>auto-detected</span></label>
+        <input id="years" type="number" min="0" max="60" step="0.5" placeholder="Auto from resume" disabled>
       </div>
       <div class="field compact">
-        <label>Target role <span>optional</span></label>
-        <input id="role" type="text" placeholder="Senior Java Developer">
+        <label>Target role <span>auto-detected</span></label>
+        <input id="role" type="text" placeholder="Auto from resume/JD" disabled>
       </div>
       <div class="field compact modelField">
         <label>Live answer model</label>
@@ -54,7 +54,7 @@
         <small>Choose Sol, Terra, Luna, or Cerebras for live answers. OpenAI remains available for embeddings and screen understanding.</small>
       </div>
       <div class="field full">
-        <label>Or paste job description</label>
+        <label>Or paste job description <span>optional</span></label>
         <textarea id="jdText" rows="5" placeholder="Paste the JD here if you do not upload a file..."></textarea>
       </div>
     </section>
@@ -71,7 +71,7 @@
       <div class="spinner"></div>
       <div><strong id="progressTitle">Preparing context…</strong><div id="progressText">Parsing documents and creating embeddings.</div></div>
     </div>
-    <footer>Resume/JD content is kept in backend memory for this runtime. Your portal account is validated before listening starts.</footer>
+    <footer>Resume content and optional JD content are kept in backend memory for this runtime. Your portal account is validated before listening starts.</footer>
   </main>
   <script src="setup.js"></script>
 </body>
