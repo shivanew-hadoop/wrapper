@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const http = require('http');
 const express = require('express');
 const cors = require('cors');
@@ -224,8 +225,21 @@ function normalizedReasoningEffort(effort) {
   const value=String(effort||'low').trim().toLowerCase();
   return ['none','low','medium','high','xhigh','max'].includes(value) ? value : 'low';
 }
-function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY,stream=false}) {
-  return {
+function supportsOpenAIPromptCacheOptions(model) {
+  // GPT-5.6 Responses API supports prompt_cache_key + prompt_cache_options.
+  // Keep this gated so a custom older OPENAI_MODEL cannot fail because of a new field.
+  return /^gpt-5\.6(?:-|$)/i.test(String(model||'').trim());
+}
+function openAIPromptCacheKey(prepared, model) {
+  const session=prepared?.session;
+  if(!session?.email || !session?.preparedAt || !supportsOpenAIPromptCacheOptions(model)) return '';
+  // Session/model-scoped key: repeated interview questions reuse stable instructions/profile
+  // while a newly prepared CV/JD session naturally gets a fresh cache namespace.
+  const seed=`topper-v14.7.3|${session.email}|${session.preparedAt}|${String(model||'')}`;
+  return `topper-${crypto.createHash('sha256').update(seed).digest('hex').slice(0,48)}`;
+}
+function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY,stream=false,promptCacheKey=''}) {
+  const body={
     model,
     service_tier:OPENAI_SERVICE_TIER,
     instructions:String(instructions||''),
@@ -235,10 +249,18 @@ function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',ef
     max_output_tokens:maxTokens,
     stream:!!stream
   };
+  // Cost-only optimization: this does not alter instructions, prompt content, reasoning,
+  // retrieval, token ceilings, or generated-answer behavior. OpenAI can bill matching
+  // prompt prefixes at the cached-input rate after the cache is warm.
+  if(promptCacheKey && supportsOpenAIPromptCacheOptions(model)) {
+    body.prompt_cache_key=String(promptCacheKey).slice(0,64);
+    body.prompt_cache_options={ttl:'30m'};
+  }
+  return body;
 }
-async function openAIResponseJson({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY}) {
+async function openAIResponseJson({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY,promptCacheKey=''}) {
   if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY missing on backend');
-  return openAIJson('https://api.openai.com/v1/responses', openAIResponseBody({model,instructions,input,effort,maxTokens,verbosity,stream:false}));
+  return openAIJson('https://api.openai.com/v1/responses', openAIResponseBody({model,instructions,input,effort,maxTokens,verbosity,stream:false,promptCacheKey}));
 }
 function cerebrasOutputText(data) {
   return String(data?.choices?.[0]?.message?.content || '').trim();
@@ -274,9 +296,9 @@ async function cerebrasJson({instructions='',input='',maxTokens=420,effort=CEREB
   if(!response.ok)throw new Error(data?.error?.message||`Cerebras request failed (${response.status})`);
   return data;
 }
-async function providerResponseJson({provider='openai',model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY}) {
+async function providerResponseJson({provider='openai',model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY,promptCacheKey=''}) {
   if(provider==='cerebras') return cerebrasJson({instructions,input,maxTokens,effort});
-  return openAIResponseJson({model,instructions,input,effort,maxTokens,verbosity});
+  return openAIResponseJson({model,instructions,input,effort,maxTokens,verbosity,promptCacheKey});
 }
 function providerOutputText(provider,data){ return provider==='cerebras' ? cerebrasOutputText(data) : outputText(data); }
 async function embedTexts(texts) {
@@ -1110,7 +1132,7 @@ function formatSpokenAnswer(value) {
   }
   return text;
 }
-async function ensureModeConformance({answer,responseType,prompt,model,effort,provider='openai'}) {
+async function ensureModeConformance({answer,responseType,prompt,model,effort,provider='openai',promptCacheKey=''}) {
   let clean=removeExactRepeatedOutput(answer);
   if(responseType==='diagram'){
     clean=makeDrawableDiagram(clean);
@@ -1132,7 +1154,7 @@ ${typeof prompt==='string'?prompt:JSON.stringify(prompt)}
 
 INCOMPLETE OUTPUT TO REPLACE:
 ${clean}`,
-      effort,maxTokens:1800
+      effort,maxTokens:1800,promptCacheKey
     });
     clean=removeExactRepeatedOutput(providerOutputText(provider,correction));
     if(responseType==='diagram')clean=makeDrawableDiagram(clean);
@@ -1297,14 +1319,15 @@ CEREBRAS QUALITY CALIBRATION:
 - Current-question intent outranks prior-turn context; do not inherit the previous topic unless this is an explicit follow-up.
 - Do not add plausible-but-unsupported technologies, metrics, files, tools or implementation details.
 - For finite concept lists, be complete on the first response when practical.` : '';
+    const promptCacheKey=route.provider==='openai'?openAIPromptCacheKey(prepared,route.model):'';
     const data = await providerResponseJson({
       provider:route.provider,model:route.model,instructions:`${COPILOT_INSTRUCTIONS}${cerebrasQuality}
 
 ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,
-      effort:route.effort,maxTokens:answerTokenBudget(text,false,prepared.responseType)
+      effort:route.effort,maxTokens:answerTokenBudget(text,false,prepared.responseType),promptCacheKey
     });
     let answer=providerOutputText(route.provider,data);
-    answer=(await ensureModeConformance({answer,responseType:prepared.responseType,prompt:prepared.prompt,model:route.model,effort:route.effort,provider:route.provider})).answer;
+    answer=(await ensureModeConformance({answer,responseType:prepared.responseType,prompt:prepared.prompt,model:route.model,effort:route.effort,provider:route.provider,promptCacheKey})).answer;
     if (prepared.session && answer) addTurn(prepared.session,prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
     const latency = { embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, retrievalMode:prepared.latency.retrievalMode, promptReadyMs:prepared.latency.promptReadyMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt };
     const providerServiceTier=route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:String(data?.service_tier||OPENAI_SERVICE_TIER);
@@ -1423,6 +1446,7 @@ app.post('/ask/stream', async (req, res) => {
   } catch (err) { return res.status(502).json({ ok:false, error:err.message || 'Retrieval failed' }); }
 
   const route = selectAnswerRoute(text, prepared, { hasImage });
+  const promptCacheKey=route.provider==='openai'?openAIPromptCacheKey(prepared,route.model):'';
 
   // Preserve the existing direct screenshot path; it now shares the same OpenAI provider.
   if (hasImage) {
@@ -1481,7 +1505,7 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasonin
     const streamProvider=async(provider, controller, onDelta)=>{
       const body=provider==='cerebras'
         ? cerebrasChatBody({instructions,input:prepared.prompt,maxTokens,stream:true,effort:HYBRID_CEREBRAS_REASONING_EFFORT})
-        : openAIResponseBody({model:LLM_DEFAULT_MODEL,instructions,input:prepared.prompt,effort:LLM_REASONING_EFFORT,maxTokens,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',stream:true});
+        : openAIResponseBody({model:LLM_DEFAULT_MODEL,instructions,input:prepared.prompt,effort:LLM_REASONING_EFFORT,maxTokens,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',stream:true,promptCacheKey:openAIPromptCacheKey(prepared,LLM_DEFAULT_MODEL)});
       const url=provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:'https://api.openai.com/v1/responses';
       const key=provider==='cerebras'?CEREBRAS_API_KEY:OPENAI_API_KEY;
       const response=await fetch(url,{method:'POST',signal:controller.signal,headers:{'content-type':'application/json',authorization:`Bearer ${key}`},body:JSON.stringify(body)});
@@ -1536,7 +1560,7 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasonin
         }
       }
       if(finalAnswer && !solError && solResult!=='__HYBRID_TIMEOUT__'){
-        const conformance=await ensureModeConformance({answer:finalAnswer,responseType:prepared.responseType,prompt:prepared.prompt,model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,provider:'openai'});
+        const conformance=await ensureModeConformance({answer:finalAnswer,responseType:prepared.responseType,prompt:prepared.prompt,model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,provider:'openai',promptCacheKey:openAIPromptCacheKey(prepared,LLM_DEFAULT_MODEL)});
         finalAnswer=conformance.answer;
       }
       if(finalAnswer && finalAnswer!==normalizeStructuredText(provisional)) emit('replace',{text:finalAnswer});
@@ -1591,7 +1615,7 @@ ${strictModeInstructions(prepared.responseType)}`;
         const maxTokens=answerTokenBudget(text,false,prepared.responseType);
         const streamBody=route.provider==='cerebras'
           ? cerebrasChatBody({instructions,input:prepared.prompt,maxTokens,stream:true,effort:route.effort})
-          : openAIResponseBody({model:route.model,instructions,input:prepared.prompt,effort:route.effort,maxTokens,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',stream:true});
+          : openAIResponseBody({model:route.model,instructions,input:prepared.prompt,effort:route.effort,maxTokens,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',stream:true,promptCacheKey});
         const upstreamUrl=route.provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:'https://api.openai.com/v1/responses';
         const upstreamKey=route.provider==='cerebras'?CEREBRAS_API_KEY:OPENAI_API_KEY;
         if(!upstreamKey)throw new Error(route.provider==='cerebras'?'CEREBRAS_API_KEY missing on backend':'OPENAI_API_KEY missing on backend');
@@ -1656,7 +1680,7 @@ ${strictModeInstructions(prepared.responseType)}`;
     }
     answer=normalizeStructuredText(answer);
     if((prepared.responseType==='code'&&!hasCompleteCode(answer))||(prepared.responseType==='diagram'&&!hasDrawableDiagram(answer)))emit('meta',{model:route.model,modelTier:route.tier,phase:'format-retry'});
-    const conformance=await ensureModeConformance({answer,responseType:prepared.responseType,prompt:prepared.prompt,model:route.model,effort:route.effort,provider:route.provider});
+    const conformance=await ensureModeConformance({answer,responseType:prepared.responseType,prompt:prepared.prompt,model:route.model,effort:route.effort,provider:route.provider,promptCacheKey});
     answer=conformance.answer;
     if(conformance.repaired)emit('replace',{text:answer});
     if (!clientClosed && prepared.session && answer) addTurn(prepared.session,hasImage?`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`:prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);

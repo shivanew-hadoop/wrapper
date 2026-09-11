@@ -1,16 +1,15 @@
-# Topper v14.7.2
+# Topper v14.7.3
 
-Replacement package based on v14.7.1. No new Railway environment variables are required.
+Replacement package based directly on v14.7.2. No new Railway environment variables are required.
 
-## Changes
+## Change in this build
 
-- Re-answer now creates a new chronological answer turn. Earlier answers remain visible and unchanged; every re-answer streams below them like a new question while still asking for a materially different accurate approach.
-- Role detection priority is explicit CV role -> explicit JD role -> conservative skill/profile inference. The resolved role is stored in the prepared session and used in answer grounding.
-- Experience detection prefers an explicit total. When absent, it calculates a conservative span from the earliest non-education employment/project date to the latest/current project date, and stores the resolved value in the prepared session.
-- Multi-question prompts no longer discard the earlier complete question. Related questions are answered as one connected response; distinct questions are answered in order, with the first concise and the next answered directly. Mixed prompts that include coding still require usable code for the coding part.
-- The public/account portal was redesigned with persistent navigation after login, a compact account area, visible logout/account/history/support links, clearer product sections, and payment/privacy/refund/contact links suitable for a professional digital-service storefront. Existing account, PhonePe, credits, launch, transcript, admin and download IDs/actions are preserved.
-- Terms, privacy, refund/cancellation and contact pages were refreshed for the digital-credit service and remain linked from the portal.
+- Added GPT-5.6 Responses API prompt-cache bucketing for OpenAI Sol, Terra and Luna answer requests.
+- The cache key is isolated to the prepared interview session and model, so a newly prepared CV/JD session gets a fresh namespace.
+- Uses the supported 30-minute GPT-5.6 prompt-cache TTL. Repeated questions in the same interview can reuse matching stable prompt prefixes at OpenAI cached-input pricing.
+- The same cache configuration is also passed to rare format-repair requests and the dormant hybrid Sol path.
+- This is a billing/cache optimization only: prompt wording, retrieved evidence, question intent, reasoning effort, answer token ceilings, response formatting and model selection are unchanged.
 
 ## Intentionally unchanged
 
-Model routing and model IDs, reasoning settings, answer token ceilings outside the new multi-question response mode, RAG evidence selection, resume/JD grounding boundaries, adaptive examples, Deepgram/system-audio capture and recovery, screen-capture accumulation, SQL schema, commerce/payment API behavior, licensing, PDF transcript behavior, overlay size/position, and Railway configuration are otherwise unchanged.
+Everything else from v14.7.2 remains unchanged: re-answer history behavior, multi-question handling, role/experience inference, portal UI, RAG evidence selection, resume/JD grounding, adaptive examples, Deepgram/system audio, screen capture, SQL/commerce/licensing, PDF behavior, overlay size/position, and Railway configuration.
