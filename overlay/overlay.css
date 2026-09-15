@@ -1120,3 +1120,18 @@ body { font-family: Arial, "Segoe UI", sans-serif; }
    while it is current, so short and long responses both begin at the same top
    reading position. The reservation collapses when the next turn is created. */
 .currentReadingTurn { box-sizing: border-box; }
+
+/* v14.7.4 stable live-answer typography.
+   A streamed answer and its completed state use the exact same typography. The
+   browser must not auto-adjust text size as a long response grows or finishes. */
+.v6Answer .qaResponse {
+  font-family: inherit !important;
+  font-size: var(--transcript-font) !important;
+  font-weight: 400 !important;
+  font-style: normal !important;
+  line-height: 1.38 !important;
+  letter-spacing: 0 !important;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+

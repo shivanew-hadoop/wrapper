@@ -835,8 +835,18 @@ window.electronAPI.onLLMStream(msg => {
     }
   } else if (msg.type === 'done') {
     flushPendingAnswerDelta();
-    // Keep provider streaming untouched; only turn source markers into compact pills once complete.
-    renderPlainAnswer(msg.answer || streamedAnswerText || 'No answer returned.');
+    // Do not rebuild a response that the user has already been reading. Replacing the
+    // streamed DOM at completion can reflow long answers and make the text appear to
+    // resize/jump even when the wording is effectively the same. Keep the exact live
+    // rendering in place; only use the completed payload when no text was streamed.
+    if (!streamHasText && !streamedAnswerText) {
+      renderPlainAnswer(msg.answer || 'No answer returned.');
+    } else if (activeAnswerTurn) {
+      // Store a clean copy for transcript/PDF persistence without touching the pixels
+      // already on screen. Any explicit backend format-repair has already arrived as
+      // a `replace` event and is therefore already reflected in streamedAnswerText.
+      activeAnswerTurn.answer = cleanVisibleAnswer(streamedAnswerText);
+    }
     if (msg.model) {
       const first = msg.latency?.firstTokenMs;
       modelLabel.textContent = `${msg.model}${Number.isFinite(first) ? ` · first ${first}ms` : ''}`;
