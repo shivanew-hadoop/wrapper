@@ -15,6 +15,7 @@
   <nav aria-label="Primary navigation">
     <a href="#features">Features</a>
     <a href="#how">How it works</a>
+    <a href="about.html">About</a>
     <a href="#pricing">Pricing</a>
     <a href="#security">Trust</a>
     <a class="authOnly" href="#account">Account</a>
@@ -30,7 +31,7 @@
   <section id="account" class="dashboard authOnly hidden">
     <div class="dashboardTopline">
       <div><span class="eyebrow">YOUR TOPPER WORKSPACE</span><h1>Ready for the next interview.</h1></div>
-      <a class="supportLink" href="mailto:support.topper@gmail.com">Support</a>
+      <a class="supportLink" data-business-link="email" href="mailto:support.topper@gmail.com">Support</a>
     </div>
     <div class="accountStrip">
       <article class="accountMetric"><small>Remaining credits</small><strong id="remaining">--</strong><span>Deducted only while listening</span></article>
@@ -88,26 +89,28 @@
   </section>
 
   <section id="security" class="section trustSection">
-    <div class="trustCopy"><span class="eyebrow">TRUST & PAYMENTS</span><h2>Clear product, account and payment controls.</h2><p>Topper separates account authentication, desktop launch, usage metering and payment verification. Checkout is handled by the configured payment provider; Topper does not ask for card CVV, UPI PIN or banking passwords.</p><div class="policyLinks"><a href="privacy.html">Privacy Policy</a><a href="terms.html">Terms of Service</a><a href="refund-policy.html">Refund & Cancellation</a><a href="contact.html">Contact & Support</a></div></div>
+    <div class="trustCopy"><span class="eyebrow">TRUST & PAYMENTS</span><h2>Clear product, account and payment controls.</h2><p>Topper separates account authentication, desktop launch, usage metering and payment verification. Checkout is handled by the configured payment provider; Topper does not ask for card CVV, UPI PIN or banking passwords.</p><div class="policyLinks"><a href="about.html">About Us</a><a href="privacy.html">Privacy Policy</a><a href="terms.html">Terms of Service</a><a href="refund-policy.html">Refund & Cancellation</a><a href="shipping-policy.html">Delivery & Fulfilment</a><a href="contact.html">Contact & Support</a></div></div>
     <div class="trustCards"><article><strong>Signed access</strong><span>Account-linked desktop launch and authenticated usage.</span></article><article><strong>Server verification</strong><span>Credits are granted only after server-side payment confirmation.</span></article><article><strong>Transparent usage</strong><span>Credits, purchases and interview activity remain visible in the account.</span></article></div>
   </section>
 
   <section id="pricing" class="section pricing">
     <div><div class="sectionHead left"><span>SIMPLE PRICING</span><h2>One pack. Use it when you need it.</h2></div><p>Credits begin deducting only after Start Listening begins. The portal shows your remaining balance and account activity.</p><div class="paymentNote">Secure checkout · digital interview credits · refund terms available before purchase</div></div>
-    <div class="priceCard"><span>INTERVIEW PACK</span><div><strong>₹599</strong><small>one-time purchase</small></div><ul><li>60 interview minutes</li><li>Live system-audio transcription</li><li>Resume and optional JD grounding</li><li>Screen-context prompts</li><li>Session transcript history</li></ul><a href="#auth" class="primaryLink guestOnly">Create account</a><a href="#account" class="primaryLink authOnly">Buy from account</a><small>By purchasing, you agree to the <a href="terms.html">Terms</a> and <a href="refund-policy.html">Refund Policy</a>.</small></div>
+    <div class="priceCard"><span>INTERVIEW PACK</span><div><strong>₹599</strong><small>one-time purchase</small></div><ul><li>60 interview minutes</li><li>Live system-audio transcription</li><li>Resume and optional JD grounding</li><li>Screen-context prompts</li><li>Session transcript history</li></ul><a href="#auth" class="primaryLink guestOnly">Create account</a><a href="#account" class="primaryLink authOnly">Buy from account</a><small>Digital delivery after confirmed payment · no physical shipping. By purchasing, you agree to the <a href="terms.html">Terms</a>, <a href="refund-policy.html">Refund Policy</a> and <a href="delivery.html">Delivery Policy</a>. <a href="pricing.html">Full pricing details</a>.</small></div>
   </section>
 
   <section id="auth" class="authSection guestOnly">
-    <div class="authIntro"><span>YOUR TOPPER ACCOUNT</span><h2>One login for credits, history and secure desktop launch.</h2><p>Already registered? Log in. New to Topper? Create an account using your name, email and a password of at least 8 characters.</p><div class="authBenefits"><span>✓ Secure desktop launch</span><span>✓ Credit balance & payment history</span><span>✓ Recent transcript access</span></div><a href="mailto:support.topper@gmail.com">support.topper@gmail.com</a></div>
+    <div class="authIntro"><span>YOUR TOPPER ACCOUNT</span><h2>One login for credits, history and secure desktop launch.</h2><p>Already registered? Log in. New to Topper? Create an account using your name, email and a password of at least 8 characters.</p><div class="authBenefits"><span>✓ Secure desktop launch</span><span>✓ Credit balance & payment history</span><span>✓ Recent transcript access</span></div><a data-business-link="email" href="mailto:support.topper@gmail.com">support.topper@gmail.com</a></div>
     <div class="authCard"><h2>Login or create account</h2><input id="name" autocomplete="name" placeholder="Full name — registration only"><input id="email" type="email" autocomplete="email" placeholder="Email address"><input id="password" type="password" autocomplete="current-password" placeholder="Password — minimum 8 characters"><div class="row"><button id="login">Login</button><button id="register" class="ghost">Create account</button></div><p id="authMsg" aria-live="polite"></p><small>By continuing, you agree to our <a href="terms.html">Terms</a> and <a href="privacy.html">Privacy Policy</a>.</small></div>
   </section>
 </main>
 
 <footer>
   <div><a class="logo" href="#top"><span>T</span><b>TOPPER</b></a><p>Real-time AI interview assistance for focused technical conversations.</p><small>Windows desktop application · account-linked digital service</small></div>
-  <div><strong>Product</strong><a href="#features">Features</a><a href="#how">How it works</a><a href="#pricing">Pricing</a><a href="https://github.com/shivanew-hadoop/topper-downloads/releases/latest/download/Topper-Setup.exe">Download</a></div>
+  <div><strong>Product</strong><a href="#features">Features</a><a href="#how">How it works</a><a href="pricing.html">Pricing</a><a href="about.html">About Us</a><a href="https://github.com/shivanew-hadoop/topper-downloads/releases/latest/download/Topper-Setup.exe">Download</a></div>
   <div><strong>Account</strong><a href="#auth" class="guestOnly">Login</a><a href="#account" class="authOnly">Dashboard</a><a href="#interview-history" class="authOnly">Interview history</a><a href="contact.html">Support</a></div>
-  <div><strong>Legal & payments</strong><a href="terms.html">Terms of Service</a><a href="privacy.html">Privacy Policy</a><a href="refund-policy.html">Refund & Cancellation</a><a href="contact.html">Contact</a></div>
+  <div><strong>Legal & payments</strong><a href="terms.html">Terms of Service</a><a href="privacy.html">Privacy Policy</a><a href="refund-policy.html">Refund & Cancellation</a><a href="shipping-policy.html">Delivery & Fulfilment</a><a href="contact.html">Contact</a></div>
+  <div class="merchantFooter"><strong>Business</strong><span data-business-field="legalName" data-business-required>Configure legal name before gateway review</span><span data-business-field="address" data-business-required>Configure business address before gateway review</span><a data-business-link="email" href="mailto:support.topper@gmail.com">support.topper@gmail.com</a><a data-business-link="phone" href="#">Configure support phone</a></div>
 </footer>
+<script src="business-info.js"></script>
 <script src="app.js"></script>
 </body></html>

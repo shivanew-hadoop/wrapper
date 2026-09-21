@@ -278,6 +278,30 @@ if (adminEmail && adminPassword) {
 }
 
   const express=require('express');
+
+  // Public merchant identity used by the website/policy pages. These values are
+  // intentionally limited to customer-facing business information and never
+  // expose payment credentials or KYC documents.
+  const publicBusinessProfile = () => {
+    const legalName=String(process.env.BUSINESS_LEGAL_NAME || '').trim();
+    const brandName=String(process.env.BUSINESS_BRAND_NAME || 'Topper').trim() || 'Topper';
+    const businessType=String(process.env.BUSINESS_TYPE || '').trim();
+    const supportEmail=String(process.env.BUSINESS_SUPPORT_EMAIL || 'support.topper@gmail.com').trim();
+    const supportPhone=String(process.env.BUSINESS_SUPPORT_PHONE || '').trim();
+    const addressLine1=String(process.env.BUSINESS_ADDRESS_LINE1 || '').trim();
+    const addressLine2=String(process.env.BUSINESS_ADDRESS_LINE2 || '').trim();
+    const city=String(process.env.BUSINESS_CITY || '').trim();
+    const state=String(process.env.BUSINESS_STATE || '').trim();
+    const postalCode=String(process.env.BUSINESS_POSTAL_CODE || '').trim();
+    const country=String(process.env.BUSINESS_COUNTRY || 'India').trim() || 'India';
+    const gstin=String(process.env.BUSINESS_GSTIN || '').trim();
+    const udyam=String(process.env.BUSINESS_UDYAM || '').trim();
+    const address=[addressLine1,addressLine2,city,state,postalCode,country].filter(Boolean).join(', ');
+    const profileComplete=Boolean(legalName && businessType && supportEmail && supportPhone && addressLine1 && city && state && postalCode);
+    return {brandName,legalName,businessType,supportEmail,supportPhone,address,addressLine1,addressLine2,city,state,postalCode,country,gstin,udyam,profileComplete};
+  };
+  app.get('/api/public/business-profile',(req,res)=>res.set('Cache-Control','public, max-age=300').json({ok:true,business:publicBusinessProfile()}));
+
   app.use('/portal',express.static(publicDir,{extensions:['html']}));
   app.use('/',express.static(publicDir,{extensions:['html']}));
   app.post('/api/auth/register',(req,res)=>{ try { const email=emailOf(req.body.email), password=String(req.body.password||''); if(!/^\S+@\S+\.\S+$/.test(email)||password.length<8)return res.status(400).json({ok:false,error:'Use a valid email and an 8+ character password'}); const info=db.prepare('INSERT INTO users(email,password_hash,name) VALUES(?,?,?)').run(email,bcrypt.hashSync(password,12),String(req.body.name||'').trim().slice(0,80)); const u=db.prepare('SELECT * FROM users WHERE id=?').get(info.lastInsertRowid); res.json({ok:true,token:sign(u),user:publicUser(u)}); }catch(e){res.status(409).json({ok:false,error:'Email is already registered'});} });

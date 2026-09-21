@@ -1,15 +1,33 @@
-# Topper v14.7.4
+# Topper v14.7.5
 
-Replacement package based directly on v14.7.3. No new Railway environment variables are required.
+Replacement package based directly on v14.7.4. Interview, overlay, model, audio, RAG, payment-order and credit flows are unchanged.
 
-## Change in this build
+## Payment-gateway website readiness
 
-- Stabilized overlay answer rendering for long responses: the streamed text is no longer rebuilt again on normal completion.
-- Locked each answer turn to the same configured font size and line height from first token through completion.
-- Manual scrolling is preserved; completion does not reposition or resize the answer the user is already reading.
-- Explicit backend format-repair events still work exactly as before when a code/diagram response genuinely requires repair.
-- No model, prompt, grounding, token-cost, latency, RAG, audio, capture, payment, SQL, licensing or portal behavior was changed.
+This build adds only public website/compliance improvements:
 
-## Intentionally unchanged
+- Dedicated About Us page.
+- Dedicated Pricing page with the existing ₹599 / 60-minute digital pack.
+- Dedicated Shipping & Delivery / Fulfilment policy for the digital service.
+- Stronger Contact page with customer-care email, phone, legal business name, business type and registered/principal address.
+- Business identity disclosure on the public footer and legal pages.
+- Refund policy now states a clear approved-refund initiation target.
+- Existing Terms, Privacy, Refund/Cancellation and product/service information remain available before login and after login.
+- Added a public read-only business-profile endpoint. It exposes only customer-facing business information, never KYC documents, PAN, bank details or payment credentials.
+- Existing PhonePe Standard Checkout v2 implementation was not changed.
 
-Everything else from v14.7.3 remains unchanged, including GPT-5.6 prompt caching, re-answer history behavior, multi-question handling, role/experience inference, portal UI, RAG evidence selection, CV/JD grounding, adaptive examples, Deepgram/system audio, screen capture, PDF behavior, overlay size/position and Railway configuration.
+## Before submitting the site to PhonePe / Cashfree / Razorpay
+
+Set these Railway environment variables to the exact real details that match the payment-gateway KYC application:
+
+- `BUSINESS_LEGAL_NAME`
+- `BUSINESS_TYPE`
+- `BUSINESS_SUPPORT_PHONE`
+- `BUSINESS_ADDRESS_LINE1`
+- `BUSINESS_CITY`
+- `BUSINESS_STATE`
+- `BUSINESS_POSTAL_CODE`
+
+`BUSINESS_SUPPORT_EMAIL` defaults to `support.topper@gmail.com`, and `BUSINESS_COUNTRY` defaults to `India`. Optional `BUSINESS_GSTIN` and `BUSINESS_UDYAM` are displayed only when provided.
+
+Do not submit the gateway application while the public site still shows “Configure before payment-gateway review”. The legal name/business type/address/phone should match the KYC documents and bank account details used in the gateway application.
