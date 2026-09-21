@@ -29,6 +29,8 @@ const HYBRID_SOL_UPGRADE_TIMEOUT_MS = Math.max(4000, Number(process.env.HYBRID_S
 const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5.6-sol').trim();
 const OPENAI_TERRA_MODEL = String(process.env.OPENAI_TERRA_MODEL || 'gpt-5.6-terra').trim();
 const OPENAI_LUNA_MODEL = String(process.env.OPENAI_LUNA_MODEL || 'gpt-5.6-luna').trim();
+const OPENAI_4O_MODEL = String(process.env.OPENAI_4O_MODEL || 'gpt-4o').trim();
+const OPENAI_4O_MINI_MODEL = String(process.env.OPENAI_4O_MINI_MODEL || 'gpt-4o-mini').trim();
 const OPENAI_PROFILE_MODEL = String(process.env.OPENAI_PROFILE_MODEL || OPENAI_MODEL).trim();
 const OPENAI_VISION_MODEL = String(process.env.OPENAI_VISION_MODEL || OPENAI_MODEL).trim();
 // One OpenAI Responses API path for text, profile generation and vision. The surrounding
@@ -225,6 +227,9 @@ function normalizedReasoningEffort(effort) {
   const value=String(effort||'low').trim().toLowerCase();
   return ['none','low','medium','high','xhigh','max'].includes(value) ? value : 'low';
 }
+function isLegacy4oFamily(model) {
+  return /^gpt-4o(?:-mini)?(?:-|$)/i.test(String(model||'').trim());
+}
 function supportsOpenAIPromptCacheOptions(model) {
   // GPT-5.6 Responses API supports prompt_cache_key + prompt_cache_options.
   // Keep this gated so a custom older OPENAI_MODEL cannot fail because of a new field.
@@ -244,11 +249,15 @@ function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',ef
     service_tier:OPENAI_SERVICE_TIER,
     instructions:String(instructions||''),
     input,
-    reasoning:{effort:normalizedReasoningEffort(effort)},
-    text:{verbosity:String(verbosity||'medium')},
     max_output_tokens:maxTokens,
     stream:!!stream
   };
+  // GPT-4o / GPT-4o mini are non-reasoning models. Keep the exact same Topper prompt,
+  // retrieval evidence and output ceiling, but do not send GPT-5.6-only controls.
+  if(!isLegacy4oFamily(model)) {
+    body.reasoning={effort:normalizedReasoningEffort(effort)};
+    body.text={verbosity:String(verbosity||'medium')};
+  }
   // Cost-only optimization: this does not alter instructions, prompt content, reasoning,
   // retrieval, token ceilings, or generated-answer behavior. OpenAI can bill matching
   // prompt prefixes at the cached-input rate after the cache is warm.
@@ -1171,6 +1180,8 @@ function selectAnswerRoute(_question, prepared=null, _options={}) {
   if(selected==='cerebras') return {provider:'cerebras',model:CEREBRAS_MODEL,effort:CEREBRAS_REASONING_EFFORT,tier:'cerebras',reason:'user-selected-cerebras-gpt-oss-120b'};
   if(selected==='terra') return {provider:'openai',model:OPENAI_TERRA_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-terra-fast',reason:'user-selected-openai-terra-fast'};
   if(selected==='luna') return {provider:'openai',model:OPENAI_LUNA_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-luna-fast',reason:'user-selected-openai-luna-fast'};
+  if(selected==='gpt4o') return {provider:'openai',model:OPENAI_4O_MODEL,effort:'none',tier:'openai-gpt-4o',reason:'user-selected-openai-gpt-4o'};
+  if(selected==='gpt4omini') return {provider:'openai',model:OPENAI_4O_MINI_MODEL,effort:'none',tier:'openai-gpt-4o-mini',reason:'user-selected-openai-gpt-4o-mini'};
   return {provider:'openai',model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-sol-fast',reason:'user-selected-openai-sol-fast'};
 }
 function addTurn(session, question, answer, retrieved=[],responseType='spoken') {
@@ -1240,7 +1251,7 @@ async function prepareQuestion(email, question, {inputSource='', requestId='', c
   perf.promptTokenEstimate = Math.ceil(perf.promptChars / 4);
   return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, intentQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt, ...perf } };
 }
-app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, terraModel:OPENAI_TERRA_MODEL, lunaModel:OPENAI_LUNA_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',options:['openai','terra','luna','cerebras']}, embeddingModel:EMBEDDING_MODEL }));
+app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, terraModel:OPENAI_TERRA_MODEL, lunaModel:OPENAI_LUNA_MODEL, gpt4oModel:OPENAI_4O_MODEL, gpt4oMiniModel:OPENAI_4O_MINI_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',options:['openai','terra','luna','gpt4o','gpt4omini','cerebras']}, embeddingModel:EMBEDDING_MODEL }));
 app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, openaiConfigured:!!OPENAI_API_KEY, cerebrasConfigured:!!CEREBRAS_API_KEY, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT }));
 
 app.post('/validate-license', (req, res) => {
@@ -1258,9 +1269,9 @@ app.post('/prepare-context', async (req, res) => {
   const yearsExperience=(rawYears===null||rawYears===undefined||String(rawYears).trim()==='')?null:Number(rawYears);
   const role = normalizeText(req.body.role || '').slice(0,160);
   const requestedProvider=String(req.body.answerProvider || 'openai').trim().toLowerCase();
-  const answerProvider=['openai','terra','luna','cerebras'].includes(requestedProvider)?requestedProvider:'openai';
+  const answerProvider=['openai','terra','luna','gpt4o','gpt4omini','cerebras'].includes(requestedProvider)?requestedProvider:'openai';
   if(answerProvider==='cerebras'&&!CEREBRAS_API_KEY)return res.status(500).json({ok:false,error:'CEREBRAS_API_KEY missing on backend for selected model'});
-  if((answerProvider==='openai'||answerProvider==='terra'||answerProvider==='luna')&&!OPENAI_API_KEY)return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for selected model'});
+  if((answerProvider==='openai'||answerProvider==='terra'||answerProvider==='luna'||answerProvider==='gpt4o'||answerProvider==='gpt4omini')&&!OPENAI_API_KEY)return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for selected model'});
   if (yearsExperience!==null && (!Number.isFinite(yearsExperience) || yearsExperience < 0 || yearsExperience > 60)) return res.status(400).json({ ok:false, error:'yearsExperience must be between 0 and 60 when provided' });
   if (!req.body.resume) return res.status(400).json({ ok:false, error:'Resume is required' });
   const t0 = Date.now();
@@ -1287,7 +1298,7 @@ app.post('/prepare-context', async (req, res) => {
       stats:{ resumeChars:resumeText.length, jdChars:jdText.length, chunkCount:chunks.length, parseMs, summaryMs, embeddingMs }
     });
     console.log(`[RAG] Prepared ${email}: ${chunks.length} chunks in ${Date.now()-t0}ms`);
-    return res.json({ ok:true, answerProvider, answerModel:answerProvider==='cerebras'?CEREBRAS_MODEL:(answerProvider==='terra'?OPENAI_TERRA_MODEL:(answerProvider==='luna'?OPENAI_LUNA_MODEL:LLM_DEFAULT_MODEL)), chunkCount:chunks.length, profile:{ yearsExperience:resolvedYears, targetRole:resolvedRole, primarySkills:(profile.primarySkills || []).slice(0,12), jdProvided:!!jdText }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
+    return res.json({ ok:true, answerProvider, answerModel:answerProvider==='cerebras'?CEREBRAS_MODEL:(answerProvider==='terra'?OPENAI_TERRA_MODEL:(answerProvider==='luna'?OPENAI_LUNA_MODEL:(answerProvider==='gpt4o'?OPENAI_4O_MODEL:(answerProvider==='gpt4omini'?OPENAI_4O_MINI_MODEL:LLM_DEFAULT_MODEL)))), chunkCount:chunks.length, profile:{ yearsExperience:resolvedYears, targetRole:resolvedRole, primarySkills:(profile.primarySkills || []).slice(0,12), jdProvided:!!jdText }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
   } catch (err) {
     console.error('[RAG] Prepare error:', err.message);
     return res.status(500).json({ ok:false, error:err.message || 'Context preparation failed' });

@@ -31,3 +31,7 @@ Set these Railway environment variables to the exact real details that match the
 `BUSINESS_SUPPORT_EMAIL` defaults to `support.topper@gmail.com`, and `BUSINESS_COUNTRY` defaults to `India`. Optional `BUSINESS_GSTIN` and `BUSINESS_UDYAM` are displayed only when provided.
 
 Do not submit the gateway application while the public site still shows “Configure before payment-gateway review”. The legal name/business type/address/phone should match the KYC documents and bank account details used in the gateway application.
+
+
+## v14.7.6 cost-comparison update
+Added manual GPT-4o and GPT-4o Mini live-answer choices. Existing Sol/Terra/Luna/Cerebras routing, RAG, grounding, streaming, STT, screen capture, commerce, licensing and payment behavior remain unchanged. GPT-4o-family calls reuse the same Topper prompt/evidence/output limits while omitting GPT-5.6-only reasoning/verbosity request fields; OpenAI automatic prompt caching remains available where supported.
