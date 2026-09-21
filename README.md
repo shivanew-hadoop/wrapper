@@ -1,4 +1,4 @@
-# Topper v14.7.5
+# Topper v14.7.7
 
 Replacement package based directly on v14.7.4. Interview, overlay, model, audio, RAG, payment-order and credit flows are unchanged.
 
@@ -35,3 +35,7 @@ Do not submit the gateway application while the public site still shows “Confi
 
 ## v14.7.6 cost-comparison update
 Added manual GPT-4o and GPT-4o Mini live-answer choices. Existing Sol/Terra/Luna/Cerebras routing, RAG, grounding, streaming, STT, screen capture, commerce, licensing and payment behavior remain unchanged. GPT-4o-family calls reuse the same Topper prompt/evidence/output limits while omitting GPT-5.6-only reasoning/verbosity request fields; OpenAI automatic prompt caching remains available where supported.
+
+
+## v14.7.7 low-cost architecture restoration
+The OpenAI live-answer request path has been restored to the v14.7.2 architecture: no application-managed `prompt_cache_key`, no explicit cache TTL/options, and no extra cache plumbing through answer/conformance/streaming calls. The existing prompt, RAG evidence, intent handling, answer token budgets, reasoning effort, streaming, re-answer and multi-question behavior are unchanged. GPT-4o and GPT-4o Mini choices from v14.7.6 remain available, with only the compatibility omission of GPT-5.6-specific reasoning/verbosity request fields. All v14.7.5 portal/payment-readiness work remains intact.
