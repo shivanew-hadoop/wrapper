@@ -1,4 +1,4 @@
-# Topper v14.7.7
+# Topper v14.7.8
 
 Replacement package based directly on v14.7.4. Interview, overlay, model, audio, RAG, payment-order and credit flows are unchanged.
 
@@ -39,3 +39,7 @@ Added manual GPT-4o and GPT-4o Mini live-answer choices. Existing Sol/Terra/Luna
 
 ## v14.7.7 low-cost architecture restoration
 The OpenAI live-answer request path has been restored to the v14.7.2 architecture: no application-managed `prompt_cache_key`, no explicit cache TTL/options, and no extra cache plumbing through answer/conformance/streaming calls. The existing prompt, RAG evidence, intent handling, answer token budgets, reasoning effort, streaming, re-answer and multi-question behavior are unchanged. GPT-4o and GPT-4o Mini choices from v14.7.6 remain available, with only the compatibility omission of GPT-5.6-specific reasoning/verbosity request fields. All v14.7.5 portal/payment-readiness work remains intact.
+
+
+## v14.7.8 Gemini 2.5 Flash comparison
+Added Google Gemini 2.5 Flash as a manual live-answer choice. It uses the same prepared Topper question prompt, retrieved CV/JD evidence, intent rules, output budget, streaming UI and format-conformance path as the other live-answer providers. OpenAI remains unchanged for embeddings, profile/vision processing, and all existing OpenAI model choices. Railway requires `GEMINI_API_KEY`; `GEMINI_MODEL=gemini-2.5-flash` is optional because that is the built-in default.
