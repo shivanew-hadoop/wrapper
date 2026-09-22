@@ -16,7 +16,7 @@ const DEEPGRAM_API_KEY = String(process.env.DEEPGRAM_API_KEY || '').trim();
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const CEREBRAS_API_KEY = String(process.env.CEREBRAS_API_KEY || '').trim();
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
-const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
+const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-3.6-flash').trim();
 const GEMINI_API_BASE = String(process.env.GEMINI_API_BASE || 'https://generativelanguage.googleapis.com/v1beta').trim().replace(/\/+$/, '');
 // Cerebras selection is intentionally pinned to OpenAI GPT-OSS 120B.
 // Do not allow an old Railway CEREBRAS_MODEL value to silently route this option to another model.
@@ -288,26 +288,39 @@ async function cerebrasJson({instructions='',input='',maxTokens=420,effort=CEREB
   if(!response.ok)throw new Error(data?.error?.message||`Cerebras request failed (${response.status})`);
   return data;
 }
-function geminiBody({instructions='',input='',maxTokens=420}) {
-  const text=typeof input==='string'?input:JSON.stringify(input);
+function geminiInteractionBody({instructions='',input='',maxTokens=420,stream=false}) {
   return {
-    system_instruction:{parts:[{text:String(instructions||'')}]},
-    contents:[{role:'user',parts:[{text}]}],
-    generationConfig:{maxOutputTokens:maxTokens}
+    model:GEMINI_MODEL,
+    system_instruction:String(instructions||''),
+    input:typeof input==='string'?input:JSON.stringify(input),
+    generation_config:{max_output_tokens:maxTokens,thinking_level:'low'},
+    stream:!!stream,
+    store:false
   };
 }
 function geminiOutputText(data) {
-  return String((data?.candidates||[]).flatMap(c=>c?.content?.parts||[]).map(part=>part?.text||'').join('')).trim();
+  return String((data?.steps||[])
+    .filter(step=>step?.type==='model_output')
+    .flatMap(step=>step?.content||[])
+    .filter(content=>content?.type==='text')
+    .map(content=>content?.text||'')
+    .join('')).trim();
 }
 async function geminiJson({instructions='',input='',maxTokens=420}) {
   if(!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY missing on backend');
-  const response=await fetch(`${GEMINI_API_BASE}/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`,{
-    method:'POST',headers:{'content-type':'application/json','x-goog-api-key':GEMINI_API_KEY},
-    body:JSON.stringify(geminiBody({instructions,input,maxTokens}))
-  });
-  const data=await response.json().catch(()=>({}));
-  if(!response.ok)throw new Error(data?.error?.message||`Gemini request failed (${response.status})`);
-  return data;
+  let lastError;
+  for(let attempt=0;attempt<2;attempt++){
+    const response=await fetch(`${GEMINI_API_BASE}/interactions`,{
+      method:'POST',headers:{'content-type':'application/json','x-goog-api-key':GEMINI_API_KEY},
+      body:JSON.stringify(geminiInteractionBody({instructions,input,maxTokens,stream:false}))
+    });
+    const data=await response.json().catch(()=>({}));
+    if(response.ok)return data;
+    lastError=new Error(data?.error?.message||`Gemini request failed (${response.status})`);
+    if(![429,503].includes(response.status)||attempt>0)throw lastError;
+    await new Promise(resolve=>setTimeout(resolve,750));
+  }
+  throw lastError;
 }
 async function providerResponseJson({provider='openai',model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY}) {
   if(provider==='cerebras') return cerebrasJson({instructions,input,maxTokens,effort});
@@ -1187,7 +1200,7 @@ function selectAnswerRoute(_question, prepared=null, _options={}) {
   // No automatic routing/classifier is introduced, so latency and answer flow remain deterministic.
   const selected=String(prepared?.session?.answerProvider||'openai');
   if(selected==='cerebras') return {provider:'cerebras',model:CEREBRAS_MODEL,effort:CEREBRAS_REASONING_EFFORT,tier:'cerebras',reason:'user-selected-cerebras-gpt-oss-120b'};
-  if(selected==='gemini') return {provider:'gemini',model:GEMINI_MODEL,effort:'default',tier:'gemini-2.5-flash',reason:'user-selected-gemini-2.5-flash'};
+  if(selected==='gemini') return {provider:'gemini',model:GEMINI_MODEL,effort:'low',tier:GEMINI_MODEL,reason:'user-selected-gemini'};
   if(selected==='terra') return {provider:'openai',model:OPENAI_TERRA_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-terra-fast',reason:'user-selected-openai-terra-fast'};
   if(selected==='luna') return {provider:'openai',model:OPENAI_LUNA_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-luna-fast',reason:'user-selected-openai-luna-fast'};
   if(selected==='gpt4o') return {provider:'openai',model:OPENAI_4O_MODEL,effort:'none',tier:'openai-gpt-4o',reason:'user-selected-openai-gpt-4o'};
@@ -1636,9 +1649,9 @@ ${strictModeInstructions(prepared.responseType)}`;
         const streamBody=route.provider==='cerebras'
           ? cerebrasChatBody({instructions,input:prepared.prompt,maxTokens,stream:true,effort:route.effort})
           : route.provider==='gemini'
-            ? geminiBody({instructions,input:prepared.prompt,maxTokens})
+            ? geminiInteractionBody({instructions,input:prepared.prompt,maxTokens,stream:true})
             : openAIResponseBody({model:route.model,instructions,input:prepared.prompt,effort:route.effort,maxTokens,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',stream:true});
-        const upstreamUrl=route.provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:route.provider==='gemini'?`${GEMINI_API_BASE}/models/${encodeURIComponent(GEMINI_MODEL)}:streamGenerateContent?alt=sse`:'https://api.openai.com/v1/responses';
+        const upstreamUrl=route.provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:route.provider==='gemini'?`${GEMINI_API_BASE}/interactions`:'https://api.openai.com/v1/responses';
         const upstreamKey=route.provider==='cerebras'?CEREBRAS_API_KEY:route.provider==='gemini'?GEMINI_API_KEY:OPENAI_API_KEY;
         if(!upstreamKey)throw new Error(route.provider==='cerebras'?'CEREBRAS_API_KEY missing on backend':route.provider==='gemini'?'GEMINI_API_KEY missing on backend':'OPENAI_API_KEY missing on backend');
         providerRequestAtMs = Date.now() - prepared.latency.startedAt;
@@ -1652,7 +1665,9 @@ ${strictModeInstructions(prepared.responseType)}`;
         if (!upstream.ok) {
           clearTimeout(firstTokenTimer);
           const data = await upstream.json().catch(() => ({}));
-          throw new Error(data?.error?.message || `${route.provider==='cerebras'?'Cerebras':route.provider==='gemini'?'Gemini':'OpenAI'} request failed (${upstream.status})`);
+          const upstreamError = new Error(data?.error?.message || `${route.provider==='cerebras'?'Cerebras':route.provider==='gemini'?'Gemini':'OpenAI'} request failed (${upstream.status})`);
+          upstreamError.retryable = route.provider==='gemini' && [429,503].includes(upstream.status);
+          throw upstreamError;
         }
         const reader = upstream.body.getReader();
         const decoder = new TextDecoder();
@@ -1673,7 +1688,7 @@ ${strictModeInstructions(prepared.responseType)}`;
             const delta=route.provider==='cerebras'
               ? String(evt?.choices?.[0]?.delta?.content||'')
               : route.provider==='gemini'
-                ? String((evt?.candidates||[]).flatMap(c=>c?.content?.parts||[]).map(part=>part?.text||'').join(''))
+                ? (String(evt?.event_type||'')==='step.delta' && evt?.delta?.type==='text' ? String(evt?.delta?.text||'') : '')
                 : (eventType==='response.output_text.delta' ? String(evt?.delta||'') : '');
             if (delta) {
               if (firstTokenMs === null) {
@@ -1694,9 +1709,10 @@ ${strictModeInstructions(prepared.responseType)}`;
       } catch (attemptErr) {
         clearTimeout(firstTokenTimer);
         const timedOut = upstreamController.signal.aborted && firstTokenMs === null;
-        if (timedOut && streamAttempt < 2) {
-          console.warn(`[LLM stream] first-token timeout after ${firstTokenTimeoutMs}ms; retrying once`);
-          emit('meta', { model:route.model, modelTier:route.tier, phase:'retry', reason:'provider first-token timeout' });
+        if ((timedOut || attemptErr?.retryable) && streamAttempt < 2) {
+          if(attemptErr?.retryable) await new Promise(resolve=>setTimeout(resolve,750));
+          console.warn(timedOut ? `[LLM stream] first-token timeout after ${firstTokenTimeoutMs}ms; retrying once` : '[LLM stream] Gemini temporary capacity/rate-limit response; retrying once');
+          emit('meta', { model:route.model, modelTier:route.tier, phase:'retry', reason:timedOut?'provider first-token timeout':'Gemini temporary capacity/rate limit' });
           continue;
         }
         throw attemptErr;
