@@ -578,13 +578,14 @@ ipcMain.on('prefetch-llm-query', async (_event, payload) => {
 });
 
 ipcMain.on('ask-llm-stream', async (event, payload) => {
+  const mainIpcReceivedAt = Date.now();
   const requestId = String(payload?.requestId || Date.now());
   const prompt = String(payload?.text || '').trim();
   const imageDataUrl = String(payload?.imageDataUrl || '').trim();
   const captureSource = String(payload?.captureSource || '').trim();
   const inputSource = String(payload?.inputSource || '').trim().slice(0,40);
   const clientSentAt = Number(payload?.clientSentAt || 0);
-  const userActionAt = Number(payload?.userActionAt || 0);
+  const clientClickedAt = Number(payload?.clientClickedAt || 0);
   const regenerate = payload?.regenerate === true;
   const email = String(payload?.licenseEmail || global.currentLicenseEmail || '').trim().toLowerCase();
   const send = data => {
@@ -594,25 +595,42 @@ ipcMain.on('ask-llm-stream', async (event, payload) => {
 
   const controller = new AbortController();
   activeLLMStreams.set(requestId, controller);
+  let backendFetchStartedAt = null;
+  let backendHeadersAt = null;
+  let firstBackendByteAt = null;
+  let firstBackendDeltaAt = null;
+  let backendDoneEventAt = null;
+  const transportTiming = () => ({
+    mainIpcAfterClickMs: clientClickedAt > 0 ? Math.max(0, mainIpcReceivedAt - clientClickedAt) : null,
+    mainIpcAfterClientSendMs: clientSentAt > 0 ? Math.max(0, mainIpcReceivedAt - clientSentAt) : null,
+    mainFetchStartAfterIpcMs: Number.isFinite(backendFetchStartedAt) ? Math.max(0, backendFetchStartedAt - mainIpcReceivedAt) : null,
+    backendHeadersAfterFetchMs: Number.isFinite(backendHeadersAt) && Number.isFinite(backendFetchStartedAt) ? Math.max(0, backendHeadersAt - backendFetchStartedAt) : null,
+    firstBackendByteAfterFetchMs: Number.isFinite(firstBackendByteAt) && Number.isFinite(backendFetchStartedAt) ? Math.max(0, firstBackendByteAt - backendFetchStartedAt) : null,
+    firstBackendDeltaAfterFetchMs: Number.isFinite(firstBackendDeltaAt) && Number.isFinite(backendFetchStartedAt) ? Math.max(0, firstBackendDeltaAt - backendFetchStartedAt) : null,
+    backendDoneAfterFetchMs: Number.isFinite(backendDoneEventAt) && Number.isFinite(backendFetchStartedAt) ? Math.max(0, backendDoneEventAt - backendFetchStartedAt) : null
+  });
   try {
+    backendFetchStartedAt = Date.now();
     const res = await fetch(`${backendBase()}/ask/stream`, {
       method:'POST', signal:controller.signal,
       headers:{'content-type':'application/json'},
-      body:JSON.stringify({ email, text:prompt, imageDataUrl, captureSource, inputSource, requestId, clientSentAt, userActionAt, regenerate })
+      body:JSON.stringify({ email, text:prompt, imageDataUrl, captureSource, inputSource, requestId, clientSentAt, clientClickedAt, regenerate })
     });
+    backendHeadersAt = Date.now();
     if (!res.ok) {
       const body = await res.text();
       let message = `LLM request failed (${res.status})`;
       try { message = JSON.parse(body).error || message; } catch (_) { if (body) message = body.slice(0, 500); }
       return send({ type:'error', error:message });
     }
-    send({ type:'start' });
+    send({ type:'start', transportTiming:transportTiming() });
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      if (firstBackendByteAt === null && value?.byteLength) firstBackendByteAt = Date.now();
       buffer += decoder.decode(value, { stream:true });
       const events = buffer.split('\n\n');
       buffer = events.pop() || '';
@@ -626,10 +644,18 @@ ipcMain.on('ask-llm-stream', async (event, payload) => {
         }
         if (!dataLine) continue;
         let data; try { data = JSON.parse(dataLine); } catch (_) { data = { text:dataLine }; }
-        if (eventName === 'delta') send({ type:'delta', delta:data.delta || '' });
-        else if (eventName === 'replace') send({type:'replace',text:data.text||''});
-        else if (eventName === 'meta') send({ type:'meta', ...data });
-        else if (eventName === 'done') send({ type:'done', ...data });
+        if (eventName === 'delta') {
+          if (firstBackendDeltaAt === null) firstBackendDeltaAt = Date.now();
+          send({ type:'delta', delta:data.delta || '', transportTiming:transportTiming() });
+        }
+        else if (eventName === 'replace') send({type:'replace',text:data.text||'',transportTiming:transportTiming()});
+        else if (eventName === 'meta') send({ type:'meta', ...data, transportTiming:transportTiming() });
+        else if (eventName === 'done') {
+          backendDoneEventAt = Date.now();
+          const timing = transportTiming();
+          console.log(`[TOPPER LATENCY][main] request=${requestId} click->ipc=${timing.mainIpcAfterClickMs??'-'}ms ipc->fetch=${timing.mainFetchStartAfterIpcMs??'-'}ms fetch->headers=${timing.backendHeadersAfterFetchMs??'-'}ms fetch->firstByte=${timing.firstBackendByteAfterFetchMs??'-'}ms fetch->firstDelta=${timing.firstBackendDeltaAfterFetchMs??'-'}ms fetch->done=${timing.backendDoneAfterFetchMs??'-'}ms`);
+          send({ type:'done', ...data, transportTiming:timing });
+        }
         else if (eventName === 'error') send({ type:'error', error:data.error || 'LLM stream failed' });
       }
     }

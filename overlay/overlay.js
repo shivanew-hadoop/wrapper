@@ -64,6 +64,88 @@ let pendingRenderDelta = '';
 let renderFramePending = false;
 let streamRenderState = null;
 let lastSubmittedPrompt = null; // {text,inputSource} for explicit Re-answer
+let pendingUserSendStartedAt = 0;
+let activeLatencyTrace = null;
+let lastLatencyTraceText = '';
+
+function fmtMs(value) {
+  return Number.isFinite(value) ? `${Math.round(value)}ms` : '-';
+}
+function fmtSec(value) {
+  return Number.isFinite(value) ? `${(value/1000).toFixed(value >= 10000 ? 1 : 2)}s` : '-';
+}
+function buildLatencyTraceText(trace, msg={}) {
+  const t = msg.transportTiming || trace?.transportTiming || {};
+  const b = msg.latency || trace?.backendLatency || {};
+  const clickAt = Number(trace?.clickAt || 0);
+  const sentAt = Number(trace?.ipcSentAt || 0);
+  const firstDeltaAt = Number(trace?.firstRendererDeltaAt || 0);
+  const firstPaintAt = Number(trace?.firstPaintAt || 0);
+  const doneAt = Number(trace?.doneAt || 0);
+  const clickToSend = clickAt && sentAt ? sentAt - clickAt : null;
+  const clickToDelta = clickAt && firstDeltaAt ? firstDeltaAt - clickAt : null;
+  const clickToPaint = clickAt && firstPaintAt ? firstPaintAt - clickAt : null;
+  const clickToDone = clickAt && doneAt ? doneAt - clickAt : null;
+  const paintToDone = firstPaintAt && doneAt ? doneAt - firstPaintAt : null;
+  return [
+    'TOPPER LATENCY TRACE',
+    `requestId: ${trace?.requestId || '-'}`,
+    `provider/model: ${msg.model || trace?.model || '-'}`,
+    `inputSource: ${trace?.inputSource || '-'}`,
+    '',
+    `01 user action -> IPC send: ${fmtMs(clickToSend)}`,
+    `02 IPC send -> Electron main receive: ${fmtMs(t.mainIpcAfterClientSendMs)}`,
+    `03 Electron main -> backend fetch start: ${fmtMs(t.mainFetchStartAfterIpcMs)}`,
+    `04 backend fetch -> SSE headers: ${fmtMs(t.backendHeadersAfterFetchMs)}`,
+    `05 backend fetch -> first SSE byte: ${fmtMs(t.firstBackendByteAfterFetchMs)}`,
+    `06 client send -> backend prepare start (clock-based): ${fmtMs(b.clientToBackendMs)}`,
+    `07 backend handler -> prepare start: ${fmtMs(b.backendHandlerToPrepareStartMs)}`,
+    `08 backend prompt ready: ${fmtMs(b.promptReadyMs)}`,
+    `   intent: ${fmtMs(b.intentMs)} | retrieval decision: ${fmtMs(b.retrievalDecisionMs)} | embedding: ${fmtMs(b.embeddingMs)} | retrieval: ${fmtMs(b.retrievalMs)} | prompt build: ${fmtMs(b.promptBuildMs)}`,
+    `   retrieval mode: ${b.retrievalMode || '-'} | embedding cache: ${b.embeddingCacheHit === true ? 'hit' : b.embeddingCacheHit === false ? 'miss' : '-'} | retrieval cache: ${b.retrievalCacheHit === true ? 'hit' : b.retrievalCacheHit === false ? 'miss' : '-'}`,
+    `   prompt size: ${Number.isFinite(b.promptChars) ? b.promptChars : '-'} chars / ~${Number.isFinite(b.promptTokenEstimate) ? b.promptTokenEstimate : '-'} tokens`,
+    `09 backend prepare start -> provider request: ${fmtMs(b.providerRequestAtMs)}`,
+    `10 provider request -> response headers: ${fmtMs(b.providerHeadersMs)}`,
+    `11 provider request -> first text delta: ${fmtMs(b.firstProviderDeltaAfterRequestMs)}`,
+    `12 provider generation after first delta: ${fmtMs(b.providerGenerationAfterFirstDeltaMs)}`,
+    `13 backend first delta write from prepare start: ${fmtMs(b.firstBackendDeltaWriteMs)}`,
+    `14 backend post-processing after provider stream: ${fmtMs(b.backendPostProcessMs)}`,
+    `15 backend fetch -> first delta seen by Electron: ${fmtMs(t.firstBackendDeltaAfterFetchMs)}`,
+    `16 user action -> first renderer delta: ${fmtMs(clickToDelta)}`,
+    `17 user action -> first painted answer: ${fmtMs(clickToPaint)}`,
+    `18 first painted answer -> completed answer: ${fmtMs(paintToDone)}`,
+    `19 user action -> completed answer: ${fmtMs(clickToDone)}`,
+    `20 backend LLM section total: ${fmtMs(b.llmMs)}`,
+    `21 backend internal total: ${fmtMs(b.totalMs)}`,
+    `22 Electron backend fetch -> done event: ${fmtMs(t.backendDoneAfterFetchMs)}`,
+    `attempts: ${Number.isFinite(b.attempts) ? b.attempts : '-'}`
+  ].join('\n');
+}
+function updateLatencyLabel(trace, msg={}) {
+  if (!trace) return;
+  if (msg.transportTiming) trace.transportTiming = msg.transportTiming;
+  if (msg.latency) trace.backendLatency = msg.latency;
+  if (msg.model) trace.model = msg.model;
+  const b = trace.backendLatency || {};
+  const clickAt = Number(trace.clickAt || 0);
+  const paintMs = clickAt && trace.firstPaintAt ? trace.firstPaintAt - clickAt : null;
+  const doneMs = clickAt && trace.doneAt ? trace.doneAt - clickAt : null;
+  const parts = [trace.model || 'LLM'];
+  if (Number.isFinite(paintMs)) parts.push(`click→paint ${fmtSec(paintMs)}`);
+  if (Number.isFinite(b.promptReadyMs)) parts.push(`prep ${fmtSec(b.promptReadyMs)}`);
+  if (Number.isFinite(b.firstProviderDeltaAfterRequestMs)) parts.push(`provider→1st ${fmtSec(b.firstProviderDeltaAfterRequestMs)}`);
+  if (Number.isFinite(b.providerGenerationAfterFirstDeltaMs)) parts.push(`gen ${fmtSec(b.providerGenerationAfterFirstDeltaMs)}`);
+  if (Number.isFinite(doneMs)) parts.push(`total ${fmtSec(doneMs)}`);
+  modelLabel.textContent = parts.join(' · ');
+  modelLabel.style.cursor = 'copy';
+  modelLabel.style.userSelect = 'text';
+  lastLatencyTraceText = buildLatencyTraceText(trace, msg);
+}
+modelLabel.addEventListener('click', async () => {
+  if (!lastLatencyTraceText) return;
+  const copied = await window.electronAPI.copyToClipboard(lastLatencyTraceText).catch(()=>({success:false}));
+  feedback(copied?.success ? 'Latency trace copied.' : 'Could not copy latency trace.', !copied?.success);
+});
 
 function normalizedCodeLanguage(value) {
   const raw=String(value||'').trim().toLowerCase().replace(/[^a-z0-9+#.-]/g,'');
@@ -202,6 +284,15 @@ function flushPendingAnswerDelta() {
   if (activeAnswerTurn) {
     activeAnswerTurn.answer = cleanStoredAnswer(streamedAnswerText);
     ensureCurrentTurnReadingSlot(activeAnswerTurn);
+  }
+  if (activeLatencyTrace && !activeLatencyTrace.firstPaintAt && !activeLatencyTrace.paintProbePending) {
+    activeLatencyTrace.paintProbePending = true;
+    requestAnimationFrame(() => {
+      if (!activeLatencyTrace || activeLatencyTrace.firstPaintAt) return;
+      activeLatencyTrace.firstPaintAt = Date.now();
+      activeLatencyTrace.paintProbePending = false;
+      updateLatencyLabel(activeLatencyTrace);
+    });
   }
 }
 function queuePlainAnswerDelta(delta) {
@@ -633,7 +724,7 @@ function isLikelyContinuation(fragment) {
   return /^(and|also|but|or|then|so|because|which|where|when|with|without|using|for|from|in|on|to|if|while|plus|along with)\b/.test(q);
 }
 
-function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = '', inputSource = '', regenerate = false, userActionAt = 0 } = {}) {
+function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = '', inputSource = '', regenerate = false } = {}) {
   clearTimeout(llmTimer);
   clearTimeout(manualSendTimer);
   manualSendTimer=null;
@@ -645,6 +736,7 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   const source=inputSource||(typed?(manualPromptContainsCapture?`screen-capture-${manualPromptTaskType}`:'typed'):'system-audio');
 
   if (!text || text.length < 2) {
+    pendingUserSendStartedAt = 0;
     feedback('Nothing to send.', true);
     return false;
   }
@@ -709,7 +801,12 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
 
   if (activeStreamRequestId) window.electronAPI.cancelLLMStream(activeStreamRequestId);
   const requestId = `q-${Date.now()}-${++llmRequestId}`;
+  const ipcSentAt = Date.now();
+  const clickAt = pendingUserSendStartedAt || ipcSentAt;
+  pendingUserSendStartedAt = 0;
   activeStreamRequestId = requestId;
+  activeLatencyTrace = { requestId, clickAt, ipcSentAt, inputSource:source, firstRendererDeltaAt:null, firstPaintAt:null, doneAt:null, transportTiming:null, backendLatency:null, model:'' };
+  lastLatencyTraceText = '';
   streamHasText = false;
   streamedAnswerText = '';
   pendingRenderDelta = '';
@@ -725,8 +822,7 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   // local 'Thinking' state; the first provider delta is rendered immediately.
   modelLabel.textContent = '';
   feedback(regenerate ? 'Re-answering…' : (auto ? 'Auto sent' : 'Sent'));
-  const clientSentAt=Date.now();
-  window.electronAPI.startLLMStream({ requestId, text, inputSource:source, licenseEmail:effectiveEmail(), clientSentAt, userActionAt:Number(userActionAt)||clientSentAt, regenerate });
+  window.electronAPI.startLLMStream({ requestId, text, inputSource:source, licenseEmail:effectiveEmail(), clientSentAt:ipcSentAt, clientClickedAt:clickAt, regenerate });
   return true;
 }
 
@@ -779,15 +875,13 @@ ${spoken}`;
 }
 
 function sendManualOrPending() {
-  const actionAt=Date.now();
   const typed = manualPrompt.value.trim();
   if (typed) {
     const combined=capturedPromptWithPendingSpeech(typed);
-    return sendUtteranceToLLM({auto:false,typedText:combined,inputSource:manualPromptContainsCapture?`screen-capture-${manualPromptTaskType}`:'typed',userActionAt:actionAt});
+    return sendUtteranceToLLM({auto:false,typedText:combined,inputSource:manualPromptContainsCapture?`screen-capture-${manualPromptTaskType}`:'typed'});
   }
   clearTimeout(manualSendTimer);
-  if (!manualSendStartedAt) manualSendStartedAt=actionAt;
-  const clickAt=manualSendStartedAt;
+  if (!manualSendStartedAt) manualSendStartedAt=Date.now();
   const run=()=>{
     const quietFor=Date.now()-lastTranscriptAt;
     const waited=Date.now()-manualSendStartedAt;
@@ -796,25 +890,23 @@ function sendManualOrPending() {
     }
     manualSendStartedAt=0;
     const recent=getCompleteUnsentTranscript();
-    if (recent) sendUtteranceToLLM({auto:false,replacementText:recent,inputSource:'system-audio',userActionAt:clickAt});
-    else feedback('Nothing to send.',true);
+    if (recent) sendUtteranceToLLM({auto:false,replacementText:recent,inputSource:'system-audio'});
+    else { pendingUserSendStartedAt = 0; feedback('Nothing to send.',true); }
   };
   run();
   return true;
 }
 
 async function copyRecentAndSend() {
-  const actionAt=Date.now();
   const typed=manualPrompt.value.trim();
   if (typed) {
     const combined=capturedPromptWithPendingSpeech(typed);
     const copied=await window.electronAPI.copyToClipboard(combined).catch(()=>({success:false}));
     if (!copied?.success) feedback('Could not copy prompt to clipboard.',true);
-    return sendUtteranceToLLM({auto:false,typedText:combined,inputSource:manualPromptContainsCapture?`screen-capture-${manualPromptTaskType}`:'typed',userActionAt:actionAt});
+    return sendUtteranceToLLM({auto:false,typedText:combined,inputSource:manualPromptContainsCapture?`screen-capture-${manualPromptTaskType}`:'typed'});
   }
   clearTimeout(manualSendTimer);
-  if (!manualSendStartedAt) manualSendStartedAt=actionAt;
-  const clickAt=manualSendStartedAt;
+  if (!manualSendStartedAt) manualSendStartedAt=Date.now();
   const run=async()=>{
     const quietFor=Date.now()-lastTranscriptAt;
     const waited=Date.now()-manualSendStartedAt;
@@ -823,11 +915,11 @@ async function copyRecentAndSend() {
     }
     manualSendStartedAt=0;
     const recent=getCompleteUnsentTranscript();
-    if (!recent) { feedback('Nothing to send.',true);return; }
+    if (!recent) { pendingUserSendStartedAt = 0; feedback('Nothing to send.',true);return; }
     // Copy and send the same complete snapshot after the short transcript flush.
     const copied=await window.electronAPI.copyToClipboard(recent).catch(()=>({success:false}));
     if (!copied?.success) feedback('Could not copy prompt to clipboard.',true);
-    sendUtteranceToLLM({auto:false,replacementText:recent,inputSource:'system-audio',userActionAt:clickAt});
+    sendUtteranceToLLM({auto:false,replacementText:recent,inputSource:'system-audio'});
   };
   run();
   return true;
@@ -887,6 +979,7 @@ async function captureWindowAndSolve() {
 captureWindowBtn.onclick = captureWindowAndSolve;
 if (reanswerBtn) reanswerBtn.onclick = () => {
   if (!lastSubmittedPrompt?.text) return feedback('No previous question to re-answer.', true);
+  pendingUserSendStartedAt = Date.now();
   sendUtteranceToLLM({
     auto:false,
     typedText:lastSubmittedPrompt.text,
@@ -897,7 +990,7 @@ if (reanswerBtn) reanswerBtn.onclick = () => {
 manualPrompt.addEventListener('input',()=>{if(!manualPrompt.value.trim()){manualPromptContainsCapture=false;manualPromptTaskType='other';capturedScreenCount=0}});
 manualPrompt.addEventListener('input',()=>{ if(!autoSend) prefetchQuestionEvidence(manualPrompt.value, 320); });
 
-sendBtn.onclick = sendManualOrPending;
+sendBtn.onclick = () => { pendingUserSendStartedAt = Date.now(); sendManualOrPending(); };
 
 // Keyboard shortcuts work at overlay level, not only when the text box already has focus.
 document.addEventListener('keydown', e => {
@@ -905,6 +998,7 @@ document.addEventListener('keydown', e => {
   if (e.ctrlKey) {
     e.preventDefault();
     e.stopPropagation();
+    pendingUserSendStartedAt = Date.now();
     copyRecentAndSend();
     return;
   }
@@ -912,30 +1006,25 @@ document.addEventListener('keydown', e => {
   if (!autoSend || manualPrompt.value.trim()) {
     e.preventDefault();
     e.stopPropagation();
+    pendingUserSendStartedAt = Date.now();
     sendManualOrPending();
   }
 }, true);
 renderAutoSend();
 
-function formatLatencyFacts(model, latency) {
-  if(!latency)return String(model||'');
-  const clickToBackend=Number.isFinite(latency.userActionToBackendMs)?latency.userActionToBackendMs:(Number.isFinite(latency.clientToBackendMs)?latency.clientToBackendMs:0);
-  const firstBackend=Number.isFinite(latency.firstTokenMs)?latency.firstTokenMs:null;
-  const firstUser=firstBackend===null?null:Math.round(clickToBackend+firstBackend);
-  const prep=Number.isFinite(latency.promptReadyMs)?Math.round(latency.promptReadyMs):null;
-  const provider=Number.isFinite(latency.firstProviderDeltaAfterRequestMs)?Math.round(latency.firstProviderDeltaAfterRequestMs):null;
-  const generation=(Number.isFinite(latency.totalMs)&&firstBackend!==null)?Math.max(0,Math.round(latency.totalMs-firstBackend)):null;
-  const bits=[String(model||'').trim()];
-  if(firstUser!==null)bits.push(`click→first ${firstUser}ms`);
-  if(prep!==null)bits.push(`prep ${prep}ms`);
-  if(provider!==null)bits.push(`provider ${provider}ms`);
-  if(generation!==null)bits.push(`gen ${generation}ms`);
-  return bits.filter(Boolean).join(' · ');
-}
-
 window.electronAPI.onLLMStream(msg => {
   if (!msg || msg.requestId !== activeStreamRequestId) return;
-  if (msg.type === 'delta') {
+  if (msg.type === 'start') {
+    if (activeLatencyTrace) {
+      activeLatencyTrace.transportTiming = msg.transportTiming || activeLatencyTrace.transportTiming;
+      updateLatencyLabel(activeLatencyTrace, msg);
+    }
+  } else if (msg.type === 'delta') {
+    if (activeLatencyTrace) {
+      if (!activeLatencyTrace.firstRendererDeltaAt) activeLatencyTrace.firstRendererDeltaAt = Date.now();
+      if (msg.transportTiming) activeLatencyTrace.transportTiming = msg.transportTiming;
+      updateLatencyLabel(activeLatencyTrace, msg);
+    }
     if (!streamHasText) {
       streamedAnswerText = '';
       streamHasText = true;
@@ -955,6 +1044,12 @@ window.electronAPI.onLLMStream(msg => {
       renderPlainAnswer(msg.text||'No answer returned.');
     }
   } else if (msg.type === 'meta') {
+    if (activeLatencyTrace) {
+      if (msg.transportTiming) activeLatencyTrace.transportTiming = msg.transportTiming;
+      if (msg.latency) activeLatencyTrace.backendLatency = msg.latency;
+      if (msg.model) activeLatencyTrace.model = msg.model;
+      updateLatencyLabel(activeLatencyTrace, msg);
+    }
     if (msg.phase === 'retrieval') {
       const bits = [];
       if (msg.retrievalMode) bits.push(msg.retrievalMode);
@@ -968,9 +1063,16 @@ window.electronAPI.onLLMStream(msg => {
     } else if (msg.phase === 'format-retry') {
       modelLabel.textContent='completing required format…';
     } else if (msg.phase === 'complete' && msg.latency) {
-      modelLabel.textContent = formatLatencyFacts(msg.model,msg.latency);
+      const first = msg.latency.firstTokenMs;
+      modelLabel.textContent = `${msg.model || ''}${Number.isFinite(first) ? ` · first ${first}ms` : ''}`.trim();
     }
   } else if (msg.type === 'done') {
+    if (activeLatencyTrace) {
+      activeLatencyTrace.doneAt = Date.now();
+      if (msg.transportTiming) activeLatencyTrace.transportTiming = msg.transportTiming;
+      if (msg.latency) activeLatencyTrace.backendLatency = msg.latency;
+      if (msg.model) activeLatencyTrace.model = msg.model;
+    }
     flushPendingAnswerDelta();
     finalizeStreamingRenderer();
     // Do not rebuild a response that the user has already been reading. Replacing the
@@ -985,8 +1087,13 @@ window.electronAPI.onLLMStream(msg => {
       // a `replace` event and is therefore already reflected in streamedAnswerText.
       activeAnswerTurn.answer = cleanStoredAnswer(streamedAnswerText);
     }
-    if (msg.model) {
-      modelLabel.textContent = formatLatencyFacts(msg.model,msg.latency);
+    if (activeLatencyTrace) {
+      updateLatencyLabel(activeLatencyTrace, msg);
+      console.log(lastLatencyTraceText);
+      feedback('Latency trace ready — click the timing line to copy it.');
+    } else if (msg.model) {
+      const first = msg.latency?.firstTokenMs;
+      modelLabel.textContent = `${msg.model}${Number.isFinite(first) ? ` · first ${first}ms` : ''}`;
     }
     if (activeAnswerTurn && activeAnswerTurn.requestId === msg.requestId) activeAnswerTurn.answeredAt = Date.now();
     ensureCurrentTurnReadingSlot(activeAnswerTurn);
