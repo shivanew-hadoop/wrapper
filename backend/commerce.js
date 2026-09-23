@@ -177,25 +177,51 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
       .normalize('NFKD').replace(/[\u0300-\u036f]/g,'')
       .replace(/[^\x09\x0A\x0D\x20-\x7E]/g,'?');
   }
-  function wrapPdfLine(text,width=92){
+  function wrapPdfLine(text,width=86,{preserveWhitespace=false}={}){
     const source=pdfSafe(text).replace(/\t/g,'  ');
-    const lines=[];
-    for(const paragraph of source.split('\n')){
-      const words=paragraph.trim().split(/\s+/).filter(Boolean);
-      if(!words.length){lines.push('');continue;}
+    const out=[];
+    for(const rawParagraph of source.split('\n')){
+      if(rawParagraph===''){out.push('');continue;}
+      if(preserveWhitespace){
+        const indent=(rawParagraph.match(/^\s*/)||[''])[0];
+        const body=rawParagraph.slice(indent.length);
+        if(!body){out.push(rawParagraph);continue;}
+        const available=Math.max(16,width-indent.length);
+        for(let i=0;i<body.length;i+=available)out.push(`${indent}${body.slice(i,i+available)}`);
+        continue;
+      }
+      const words=rawParagraph.trim().split(/\s+/).filter(Boolean);
+      if(!words.length){out.push('');continue;}
       let line='';
       for(const word of words){
         if(word.length>width){
-          if(line){lines.push(line);line='';}
-          for(let i=0;i<word.length;i+=width)lines.push(word.slice(i,i+width));
+          if(line){out.push(line);line='';}
+          for(let i=0;i<word.length;i+=width)out.push(word.slice(i,i+width));
           continue;
         }
         const candidate=line?`${line} ${word}`:word;
-        if(candidate.length>width){lines.push(line);line=word;}else line=candidate;
+        if(candidate.length>width){if(line)out.push(line);line=word;}else line=candidate;
       }
-      if(line)lines.push(line);
+      if(line)out.push(line);
     }
-    return lines;
+    return out;
+  }
+  function transcriptAnswerPdfLines(answer){
+    const records=[];
+    let inCode=false;
+    let language='';
+    for(const rawLine of String(answer||'').replace(/\r/g,'').split('\n')){
+      const fence=rawLine.match(/^\s*```\s*([A-Za-z0-9_+#.-]*)\s*$/);
+      if(fence){
+        inCode=!inCode;
+        language=inCode?String(fence[1]||'code'):'';
+        if(inCode&&language)records.push({text:`[${language}]`,font:'F3',size:8.2,leading:10.5});
+        continue;
+      }
+      const wrapped=wrapPdfLine(rawLine,inCode?82:86,{preserveWhitespace:inCode});
+      for(const line of wrapped)records.push({text:line,font:inCode?'F3':'F1',size:inCode?8.2:9,leading:inCode?10.5:12});
+    }
+    return records;
   }
   function buildTranscriptPdf(session,user){
     const meta=session.metadata||{};
@@ -205,40 +231,63 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
     const totalSec=Math.round(durationMs/1000), mins=Math.floor(totalSec/60), secs=totalSec%60;
     const duration=`${mins}m ${String(secs).padStart(2,'0')}s`;
     const years=(meta.yearsExperience===0||meta.yearsExperience)?String(meta.yearsExperience):'Not provided';
-    const lines=[
-      'TOPPER INTERVIEW TRANSCRIPT',
-      `CV/Resume: ${pdfSafe(meta.resumeFileName||'Not available')}`,
-      `Target Role: ${pdfSafe(meta.targetRole||'Not provided')}    Experience: ${pdfSafe(years)} years`,
-      `Start time: ${fmtDateTime(session.startedAt)}    End time: ${fmtDateTime(session.endedAt)}    Duration: ${duration}`,
-      `Number of questions: ${session.turnCount}`,
-      `Summary: ${pdfSafe(session.summary?.overview||'Completed interview session.')}`,
-      ''
-    ];
+
+    const records=[];
+    const addWrapped=(text,font='F1',size=9,leading=12,width=86)=>{
+      for(const line of wrapPdfLine(text,width))records.push({text:line,font,size,leading});
+    };
+    records.push({text:'TOPPER INTERVIEW TRANSCRIPT',font:'F2',size:11,leading:15});
+    addWrapped(`CV/Resume: ${pdfSafe(meta.resumeFileName||'Not available')}`);
+    addWrapped(`Target Role: ${pdfSafe(meta.targetRole||'Not provided')}    Experience: ${pdfSafe(years)} years`);
+    addWrapped(`Start time: ${fmtDateTime(session.startedAt)}    End time: ${fmtDateTime(session.endedAt)}    Duration: ${duration}`);
+    addWrapped(`Number of questions: ${session.turnCount}`);
+    addWrapped(`Summary: ${pdfSafe(session.summary?.overview||'Completed interview session.')}`);
+    records.push({text:'',font:'F1',size:9,leading:10});
+
     session.turns.forEach((turn,index)=>{
-      lines.push(...wrapPdfLine(`Q${index+1}-${turn.question}    [${fmtTime(turn.askedAt)}]`));
-      lines.push('');
-      lines.push(...wrapPdfLine(turn.answer));
-      lines.push('');
-      lines.push('............................................................................................');
-      lines.push('');
+      // Interviewer prompt/context is bold. Long prompts are wrapped inside the page width.
+      const question=`Q${index+1} - ${turn.question}    [${fmtTime(turn.askedAt)}]`;
+      for(const line of wrapPdfLine(question,84))records.push({text:line,font:'F2',size:9,leading:12});
+      records.push({text:'',font:'F1',size:9,leading:8});
+      records.push(...transcriptAnswerPdfLines(turn.answer));
+      records.push({text:'',font:'F1',size:9,leading:8});
+      records.push({text:'......................................................................................',font:'F1',size:8.5,leading:10});
+      records.push({text:'',font:'F1',size:9,leading:8});
     });
-    const perPage=55,pages=[];
-    for(let i=0;i<lines.length;i+=perPage)pages.push(lines.slice(i,i+perPage));
-    if(!pages.length)pages.push(['TOPPER INTERVIEW TRANSCRIPT','No transcript content.']);
+
+    const pageWidth=595,pageHeight=842,left=44,right=44,top=796,bottom=44;
+    const pages=[];
+    let current=[],y=top;
+    const pushPage=()=>{pages.push(current);current=[];y=top;};
+    for(const record of records){
+      const leading=Math.max(8,Number(record.leading)||12);
+      if(y-leading<bottom && current.length)pushPage();
+      current.push({...record,y});
+      y-=leading;
+    }
+    if(current.length)pages.push(current);
+    if(!pages.length)pages.push([{text:'TOPPER INTERVIEW TRANSCRIPT',font:'F2',size:11,leading:15,y:top},{text:'No transcript content.',font:'F1',size:9,leading:12,y:top-15}]);
+
     const objects=[];
     const add=body=>{objects.push(body);return objects.length;};
     const catalogId=add('');
     const pagesId=add('');
-    const fontId=add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
-    const pageIds=[];
+    const regularFontId=add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+    const boldFontId=add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>');
+    const monoFontId=add('<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>');
     const escPdf=t=>pdfSafe(t).replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)');
-    for(const pageLines of pages){
-      const stream=['BT','/F1 9 Tf','48 800 Td','12 TL'];
-      for(const line of pageLines){stream.push(`(${escPdf(line)}) Tj`,'T*');}
-      stream.push('ET');
+    const pageIds=[];
+    for(const pageRecords of pages){
+      const stream=[];
+      for(const record of pageRecords){
+        const font=['F1','F2','F3'].includes(record.font)?record.font:'F1';
+        const size=Math.max(7,Math.min(12,Number(record.size)||9));
+        const yPos=Math.max(bottom,Math.min(top,Number(record.y)||top));
+        stream.push('BT',`/${font} ${size} Tf`,`1 0 0 1 ${left} ${yPos.toFixed(1)} Tm`,`(${escPdf(record.text)}) Tj`,'ET');
+      }
       const content=stream.join('\n');
       const contentId=add(`<< /Length ${Buffer.byteLength(content,'latin1')} >>\nstream\n${content}\nendstream`);
-      const pageId=add(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentId} 0 R >>`);
+      const pageId=add(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${regularFontId} 0 R /F2 ${boldFontId} 0 R /F3 ${monoFontId} 0 R >> >> /Contents ${contentId} 0 R >>`);
       pageIds.push(pageId);
     }
     objects[catalogId-1]=`<< /Type /Catalog /Pages ${pagesId} 0 R >>`;

@@ -584,6 +584,7 @@ ipcMain.on('ask-llm-stream', async (event, payload) => {
   const captureSource = String(payload?.captureSource || '').trim();
   const inputSource = String(payload?.inputSource || '').trim().slice(0,40);
   const clientSentAt = Number(payload?.clientSentAt || 0);
+  const userActionAt = Number(payload?.userActionAt || 0);
   const regenerate = payload?.regenerate === true;
   const email = String(payload?.licenseEmail || global.currentLicenseEmail || '').trim().toLowerCase();
   const send = data => {
@@ -597,7 +598,7 @@ ipcMain.on('ask-llm-stream', async (event, payload) => {
     const res = await fetch(`${backendBase()}/ask/stream`, {
       method:'POST', signal:controller.signal,
       headers:{'content-type':'application/json'},
-      body:JSON.stringify({ email, text:prompt, imageDataUrl, captureSource, inputSource, requestId, clientSentAt, regenerate })
+      body:JSON.stringify({ email, text:prompt, imageDataUrl, captureSource, inputSource, requestId, clientSentAt, userActionAt, regenerate })
     });
     if (!res.ok) {
       const body = await res.text();

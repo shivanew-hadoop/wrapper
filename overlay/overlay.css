@@ -1135,3 +1135,52 @@ body { font-family: Arial, "Segoe UI", sans-serif; }
   text-size-adjust: 100%;
 }
 
+
+/* v14.8 immutable streaming code blocks.
+   Formatting is applied while deltas arrive; completed answers are never rebuilt.
+   Code uses the same user-selected base size as prose to avoid any end-of-stream jump. */
+.v6Answer .qaResponse .answerCodeBlock {
+  position: relative;
+  display: block;
+  margin: 7px 0;
+  padding: 24px 10px 9px 10px;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: pre;
+  overflow-wrap: normal;
+  background: rgba(7, 12, 19, .72) !important;
+  border: 1px solid rgba(255,255,255,.12) !important;
+  border-left: 3px solid rgba(105,190,255,.64) !important;
+  border-radius: 7px !important;
+  font-size: var(--transcript-font) !important;
+  line-height: 1.38 !important;
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+}
+.v6Answer .qaResponse .answerCodeBlock::before {
+  content: attr(data-language);
+  position: absolute;
+  top: 4px;
+  left: 8px;
+  font: 700 10px/1.2 Arial, "Segoe UI", sans-serif;
+  letter-spacing: .04em;
+  color: rgba(190,225,255,.84);
+}
+.v6Answer .qaResponse .answerCodeBlock .answerCode {
+  display: block;
+  padding: 0 !important;
+  margin: 0 !important;
+  white-space: pre !important;
+  overflow-wrap: normal !important;
+  background: transparent !important;
+  border: 0 !important;
+  font-family: Consolas, "Cascadia Code", "Courier New", monospace !important;
+  font-size: var(--transcript-font) !important;
+  line-height: 1.38 !important;
+  color: #eef3f8 !important;
+}
+.v6Answer .qaResponse .answerCodeBlock .codeKeyword { color: #7fd7ff !important; font-weight: 700 !important; }
+.v6Answer .qaResponse .answerCodeBlock .codeString { color: #b9e98f !important; }
+.v6Answer .qaResponse .answerCodeBlock .codeComment { color: #91a3b5 !important; font-style: italic !important; }
+.v6Answer .qaResponse .answerCodeBlock .codeNumber { color: #f0c27b !important; }
