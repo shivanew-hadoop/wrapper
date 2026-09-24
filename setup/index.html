@@ -33,7 +33,7 @@
       <div class="field">
         <label>Job description <span>optional · PDF, DOC, DOCX, RTF and common text formats</span></label>
         <div class="fileRow"><input id="jd" type="file" accept="*/*"><button id="removeJd" type="button" class="removeFile hidden">Remove</button></div>
-        <small id="jdMeta">Optional · upload a JD or paste it below.</small>
+        <small id="jdMeta">Optional · upload a JD file.</small>
       </div>
       <div class="field compact">
         <label>Years of experience <span>auto from CV / project timeline</span></label>
@@ -49,16 +49,14 @@
           <option value="openai">OpenAI · GPT-5.6 Sol Fast</option>
           <option value="terra">OpenAI · GPT-5.6 Terra Fast</option>
           <option value="luna">OpenAI · GPT-5.6 Luna Fast</option>
-          <option value="gpt4o">OpenAI · GPT-4o</option>
-          <option value="gpt4omini">OpenAI · GPT-4o Mini</option>
-          <option value="gemini">Google · Gemini 3.6 Flash</option>
           <option value="cerebras">Cerebras · GPT-OSS 120B</option>
         </select>
-        <small>Choose Sol, Terra, Luna, GPT-4o, GPT-4o Mini, Gemini 3.6 Flash, or Cerebras for live answers. OpenAI remains available for embeddings and screen understanding.</small>
+        <small>Choose Sol, Terra, Luna, or Cerebras for live answers. OpenAI remains available for embeddings and screen understanding.</small>
       </div>
       <div class="field full">
-        <label>Or paste job description <span>optional</span></label>
-        <textarea id="jdText" rows="5" placeholder="Paste the JD here if you do not upload a file..."></textarea>
+        <label>User instructions <span>optional · applied throughout this interview session</span></label>
+        <textarea id="userInstructions" rows="5" placeholder="Examples: Use STAR for behavioral questions. Keep answers very short. Explain in simple interview language. Answer from my experience where the resume supports it."></textarea>
+        <small>These instructions control answer style/format for every question in this prepared session.</small>
       </div>
     </section>
 
@@ -74,7 +72,7 @@
       <div class="spinner"></div>
       <div><strong id="progressTitle">Preparing context…</strong><div id="progressText">Parsing documents and creating embeddings.</div></div>
     </div>
-    <footer>Resume content and optional JD content are kept in backend memory for this runtime. Your portal account is validated before listening starts.</footer>
+    <footer>Resume, optional JD, and your answer-format instructions are kept in backend memory for this runtime. Your portal account is validated before listening starts.</footer>
   </main>
   <script src="setup.js"></script>
 </body>

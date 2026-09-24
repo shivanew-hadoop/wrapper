@@ -15,9 +15,6 @@ const PORT = Number(process.env.PORT || 8080);
 const DEEPGRAM_API_KEY = String(process.env.DEEPGRAM_API_KEY || '').trim();
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const CEREBRAS_API_KEY = String(process.env.CEREBRAS_API_KEY || '').trim();
-const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
-const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-3.6-flash').trim();
-const GEMINI_API_BASE = String(process.env.GEMINI_API_BASE || 'https://generativelanguage.googleapis.com/v1beta').trim().replace(/\/+$/, '');
 // Cerebras selection is intentionally pinned to OpenAI GPT-OSS 120B.
 // Do not allow an old Railway CEREBRAS_MODEL value to silently route this option to another model.
 const CEREBRAS_MODEL = 'gpt-oss-120b';
@@ -31,8 +28,6 @@ const HYBRID_SOL_UPGRADE_TIMEOUT_MS = Math.max(4000, Number(process.env.HYBRID_S
 const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5.6-sol').trim();
 const OPENAI_TERRA_MODEL = String(process.env.OPENAI_TERRA_MODEL || 'gpt-5.6-terra').trim();
 const OPENAI_LUNA_MODEL = String(process.env.OPENAI_LUNA_MODEL || 'gpt-5.6-luna').trim();
-const OPENAI_4O_MODEL = String(process.env.OPENAI_4O_MODEL || 'gpt-4o').trim();
-const OPENAI_4O_MINI_MODEL = String(process.env.OPENAI_4O_MINI_MODEL || 'gpt-4o-mini').trim();
 const OPENAI_PROFILE_MODEL = String(process.env.OPENAI_PROFILE_MODEL || OPENAI_MODEL).trim();
 const OPENAI_VISION_MODEL = String(process.env.OPENAI_VISION_MODEL || OPENAI_MODEL).trim();
 // One OpenAI Responses API path for text, profile generation and vision. The surrounding
@@ -79,7 +74,6 @@ else {
 }
 console.log('[BOOT] OPENAI_API_KEY present:', !!OPENAI_API_KEY, '(Sol + embeddings + vision)');
 console.log('[BOOT] CEREBRAS_API_KEY present:', !!CEREBRAS_API_KEY, '| model:', CEREBRAS_MODEL);
-console.log('[BOOT] GEMINI_API_KEY present:', !!GEMINI_API_KEY, '| model:', GEMINI_MODEL);
 console.log('[BOOT] LLM provider: OpenAI ->', LLM_DEFAULT_MODEL, '| profile:', LLM_PROFILE_MODEL, '| vision:', LLM_VISION_EXTRACT_MODEL, '| embedding:', EMBEDDING_MODEL, '| dims:', EMBEDDING_DIMENSIONS);
 console.log('[BOOT] OpenAI service tier:', OPENAI_SERVICE_TIER, '| reasoning effort:', LLM_REASONING_EFFORT);
 
@@ -230,24 +224,17 @@ function normalizedReasoningEffort(effort) {
   const value=String(effort||'low').trim().toLowerCase();
   return ['none','low','medium','high','xhigh','max'].includes(value) ? value : 'low';
 }
-function isLegacy4oFamily(model) {
-  return /^gpt-4o(?:-mini)?(?:-|$)/i.test(String(model||'').trim());
-}
 function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY,stream=false}) {
   const body={
     model,
     service_tier:OPENAI_SERVICE_TIER,
     instructions:String(instructions||''),
     input,
-    max_output_tokens:maxTokens,
+    reasoning:{effort:normalizedReasoningEffort(effort)},
+    text:{verbosity:String(verbosity||'medium')},
     stream:!!stream
   };
-  // Preserve the v14.7.2 OpenAI request architecture. GPT-4o / GPT-4o mini do not
-  // receive GPT-5.6-only reasoning/verbosity controls, but use the same Topper prompt.
-  if(!isLegacy4oFamily(model)) {
-    body.reasoning={effort:normalizedReasoningEffort(effort)};
-    body.text={verbosity:String(verbosity||'medium')};
-  }
+  if(Number.isFinite(maxTokens)&&maxTokens>0)body.max_output_tokens=maxTokens;
   return body;
 }
 async function openAIResponseJson({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY}) {
@@ -270,10 +257,10 @@ function cerebrasChatBody({instructions='',input='',maxTokens=420,stream=false,e
       {role:'developer',content:String(instructions||'')},
       {role:'user',content:typeof input==='string'?input:JSON.stringify(input)}
     ],
-    max_completion_tokens:maxTokens,
     reasoning_effort:cerebrasReasoningEffort(effort),
     stream:!!stream
   };
+  if(Number.isFinite(maxTokens)&&maxTokens>0)body.max_completion_tokens=maxTokens;
   const serviceTier=String(CEREBRAS_SERVICE_TIER||'default').trim().toLowerCase();
   if(['default','auto','flex','priority'].includes(serviceTier)) body.service_tier=serviceTier;
   return body;
@@ -288,50 +275,11 @@ async function cerebrasJson({instructions='',input='',maxTokens=420,effort=CEREB
   if(!response.ok)throw new Error(data?.error?.message||`Cerebras request failed (${response.status})`);
   return data;
 }
-function geminiInteractionBody({instructions='',input='',maxTokens=420,stream=false}) {
-  return {
-    model:GEMINI_MODEL,
-    system_instruction:String(instructions||''),
-    input:typeof input==='string'?input:JSON.stringify(input),
-    generation_config:{max_output_tokens:maxTokens,thinking_level:'low'},
-    stream:!!stream,
-    store:false
-  };
-}
-function geminiOutputText(data) {
-  return String((data?.steps||[])
-    .filter(step=>step?.type==='model_output')
-    .flatMap(step=>step?.content||[])
-    .filter(content=>content?.type==='text')
-    .map(content=>content?.text||'')
-    .join('')).trim();
-}
-async function geminiJson({instructions='',input='',maxTokens=420}) {
-  if(!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY missing on backend');
-  let lastError;
-  for(let attempt=0;attempt<2;attempt++){
-    const response=await fetch(`${GEMINI_API_BASE}/interactions`,{
-      method:'POST',headers:{'content-type':'application/json','x-goog-api-key':GEMINI_API_KEY},
-      body:JSON.stringify(geminiInteractionBody({instructions,input,maxTokens,stream:false}))
-    });
-    const data=await response.json().catch(()=>({}));
-    if(response.ok)return data;
-    lastError=new Error(data?.error?.message||`Gemini request failed (${response.status})`);
-    if(![429,503].includes(response.status)||attempt>0)throw lastError;
-    await new Promise(resolve=>setTimeout(resolve,750));
-  }
-  throw lastError;
-}
 async function providerResponseJson({provider='openai',model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY}) {
   if(provider==='cerebras') return cerebrasJson({instructions,input,maxTokens,effort});
-  if(provider==='gemini') return geminiJson({instructions,input,maxTokens});
   return openAIResponseJson({model,instructions,input,effort,maxTokens,verbosity});
 }
-function providerOutputText(provider,data){
-  if(provider==='cerebras') return cerebrasOutputText(data);
-  if(provider==='gemini') return geminiOutputText(data);
-  return outputText(data);
-}
+function providerOutputText(provider,data){ return provider==='cerebras' ? cerebrasOutputText(data) : outputText(data); }
 async function embedTexts(texts) {
   if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY missing on backend');
   const clean = texts.map(t => String(t || '').slice(0, 12000));
@@ -533,17 +481,36 @@ function inferYearsExperienceFromResume(resumeText) {
   return null;
 }
 function normalizeRoleTitle(value) {
-  return String(value||'')
-    .replace(/[|•·].*$/,'')
+  let text=String(value||'')
+    .replace(/^\s*(?:job\s+title|current\s+role|role|title|designation|position|job\s+description\s+for|opening\s+for|opportunity\s+for)\s*[:\-–—]?\s*/i,'')
+    .replace(/\s+(?:at|with)\s+[A-Z][\w&.,' -]{2,}$/,'')
+    .replace(/\s+[|•·]\s+.*$/,'')
+    .replace(/\s+\/\s+.*$/,'')
     .replace(/\s{2,}/g,' ')
     .replace(/^[-–—:,;\s]+|[-–—:,;\s]+$/g,'')
-    .trim()
-    .slice(0,160);
+    .trim();
+  // A target role must be a compact job title, never a JD sentence or requirement clause.
+  text=text.split(/\s+(?:responsible\s+for|who\s+will|to\s+join|to\s+work|with\s+experience\s+in|having\s+experience\s+in|for\s+our\s+team)\b/i)[0].trim();
+  const words=text.split(/\s+/).filter(Boolean);
+  if(words.length>9)text=words.slice(0,9).join(' ');
+  return text.slice(0,100);
 }
 function explicitRolePattern() {
-  return /\b(?:(?:senior|sr\.?|lead|principal|staff|associate|junior|jr\.?|technical|solution|solutions|cloud)\s+)?(?:qa\s+automation|quality\s+assurance|test\s+automation|software|java|python|\.net|dotnet|data|analytics|business\s+intelligence|bi|power\s*bi|cloud|devops|sre|site\s+reliability|automation|full[- ]?stack|backend|front[- ]?end|machine\s+learning|ml|ai|solutions?|technical|application|systems?)\s+(?:engineer|developer|architect|tester|analyst|consultant|lead|manager)\b|\b(?:sdet|software\s+engineer|software\s+developer|solution\s+architect|solutions\s+architect|data\s+engineer|data\s+scientist|devops\s+engineer|qa\s+engineer|automation\s+engineer|test\s+engineer|technical\s+lead|team\s+lead|business\s+analyst|data\s+analyst)\b/i;
+  // Keep the match constrained to normal job-title vocabulary so a role field cannot
+  // accidentally become a long sentence from a resume/JD heading or summary line.
+  return /\b(?:(?:senior|sr\.?|lead|principal|staff|associate|junior|jr\.?|technical|solution|solutions|cloud|azure|aws|java|python|\.net|dotnet|full[- ]?stack|backend|front[- ]?end|data|analytics|business\s+intelligence|bi|power\s*bi|devops|sre|site\s+reliability|qa|quality\s+assurance|test|automation|machine\s+learning|ml|ai|react|angular|software|application|systems?|platform)\s+){0,5}(?:engineer|developer|architect|tester|analyst|consultant|lead|manager|specialist|administrator)\b|\b(?:sdet|software\s+engineer|software\s+developer|solution\s+architect|solutions\s+architect|data\s+engineer|data\s+scientist|devops\s+engineer|qa\s+engineer|automation\s+engineer|test\s+engineer|technical\s+lead|team\s+lead|business\s+analyst|data\s+analyst)\b/i;
 }
-function extractExplicitRoleFromDocument(documentText) {
+function compactRoleCandidate(value) {
+  const candidate=normalizeRoleTitle(value);
+  if(!candidate)return '';
+  const direct=candidate.match(explicitRolePattern());
+  if(direct)return normalizeRoleTitle(direct[0]);
+  const words=candidate.split(/\s+/).filter(Boolean);
+  const hasRoleNoun=/\b(engineer|developer|architect|tester|analyst|consultant|lead|manager|specialist|administrator|sdet)\b/i.test(candidate);
+  if(hasRoleNoun&&words.length<=9&&!/[.!?;]/.test(candidate))return candidate;
+  return '';
+}
+function extractExplicitRoleFromResume(documentText) {
   const text=normalizeText(documentText);
   if(!text)return '';
   const lines=text.split('\n').map(line=>line.trim()).filter(Boolean);
@@ -551,20 +518,50 @@ function extractExplicitRoleFromDocument(documentText) {
   for(const line of lines.slice(0,180)){
     const label=line.match(labelled);
     if(!label)continue;
-    const direct=label[1].match(explicitRolePattern());
-    if(direct)return normalizeRoleTitle(direct[0]);
-    const fallback=normalizeRoleTitle(label[1]);
-    if(fallback.length>=3&&fallback.length<=100)return fallback;
+    const candidate=compactRoleCandidate(label[1]);
+    if(candidate)return candidate;
   }
-  // Resumes commonly place the current title near the top or at the first job.
-  const top=text.slice(0,9000);
-  const direct=top.match(explicitRolePattern());
-  return direct?normalizeRoleTitle(direct[0]):'';
+  // Resume titles are normally near the header or first/current employment entry.
+  for(const line of lines.slice(0,90)){
+    const candidate=compactRoleCandidate(line);
+    if(candidate)return candidate;
+  }
+  return '';
+}
+function extractExplicitRoleFromJD(documentText) {
+  const text=normalizeText(documentText);
+  if(!text)return '';
+  const lines=text.split('\n').map(line=>line.trim()).filter(Boolean);
+  const labelled=[
+    /\b(?:job\s+title|role|title|position|designation)\s*[:\-–—]\s*(.+)$/i,
+    /\bjob\s+description\s+for\s*[:\-–—]?\s*(.+)$/i,
+    /\b(?:opening|opportunity)\s+for\s+(?:an?\s+)?(.+)$/i,
+    /\b(?:we\s+are\s+(?:looking|hiring|seeking)\s+for|looking\s+for|seeking)\s+(?:an?\s+)?(.+?)\s*(?:to\s+join|with\s+|who\s+|$)/i
+  ];
+  for(const line of lines.slice(0,160)){
+    for(const pattern of labelled){
+      const match=line.match(pattern);
+      if(!match)continue;
+      const candidate=compactRoleCandidate(match[1]);
+      if(candidate)return candidate;
+    }
+  }
+  // Many JDs start with a bare title line before "About the role"/responsibilities.
+  for(const line of lines.slice(0,45)){
+    const candidate=compactRoleCandidate(line);
+    if(candidate)return candidate;
+  }
+  return '';
+}
+function extractExplicitRoleFromDocument(documentText) {
+  // Backward-compatible helper used by older call sites; resume-first behavior is
+  // implemented explicitly in inferTargetRoleFromDocuments/generateStructuredProfile.
+  return extractExplicitRoleFromResume(documentText);
 }
 function inferRoleFromSkills(resumeText,jdText) {
   const resume=normalizeText(resumeText).toLowerCase();
   const jd=normalizeText(jdText).toLowerCase();
-  const combined=`${resume} ${resume} ${jd}`; // resume evidence receives slightly more weight.
+  const combined=`${resume} ${resume} ${jd}`; // resume evidence receives slightly more weight when both are supplied.
   const rules=[
     ['QA Automation Engineer',[/\bselenium\b/g,/\bplaywright\b/g,/\bcypress\b/g,/\btestng\b/g,/\bjunit\b/g,/\bcucumber\b/g,/\bapi testing\b/g,/\bautomation testing\b/g]],
     ['Data Engineer',[/\bdatabricks\b/g,/\bapache spark\b|\bspark\b/g,/\bdata factory\b|\badf\b/g,/\betl\b/g,/\bdelta lake\b/g,/\bdata pipeline/g,/\bsnowflake\b/g]],
@@ -583,18 +580,21 @@ function inferRoleFromSkills(resumeText,jdText) {
     for(const pattern of patterns)score+=(combined.match(pattern)||[]).length;
     if(score>bestScore){bestScore=score;best=title;}
   }
-  // A clear mix of frontend and backend technologies is better represented as full stack.
   const frontend=(combined.match(/\b(?:react|angular|vue)\b/g)||[]).length;
   const backend=(combined.match(/\b(?:spring boot|spring|node(?:\.js)?|express|django|fastapi|asp\.net)\b/g)||[]).length;
   if(frontend>=2&&backend>=2)return 'Full Stack Developer';
   return bestScore>=2?best:'';
 }
 function inferTargetRoleFromDocuments(resumeText,jdText) {
-  // Required priority: an explicit CV title wins; then an explicit JD title;
-  // only then infer from the combined technical profile.
-  return extractExplicitRoleFromDocument(resumeText)
-    || extractExplicitRoleFromDocument(jdText)
-    || inferRoleFromSkills(resumeText,jdText);
+  // Exact priority requested by the setup flow:
+  // 1) explicit role/title in resume; 2) explicit title/role in JD;
+  // 3) infer a concise role from JD; 4) only if no useful JD exists, infer from resume.
+  const resumeRole=extractExplicitRoleFromResume(resumeText);
+  if(resumeRole)return resumeRole;
+  const jdRole=extractExplicitRoleFromJD(jdText);
+  if(jdRole)return jdRole;
+  if(normalizeText(jdText))return inferRoleFromSkills('',jdText);
+  return inferRoleFromSkills(resumeText,'');
 }
 function fallbackProfile(resumeText, jdText, yearsExperience, role) {
   const inferredYears=Number.isFinite(yearsExperience)?yearsExperience:inferYearsExperienceFromResume(resumeText);
@@ -612,10 +612,11 @@ async function generateStructuredProfile(resumeText, jdText, yearsExperience, ro
   const fallback = fallbackProfile(resumeText, jdText, yearsExperience, role);
   const suppliedYears=Number.isFinite(yearsExperience)?yearsExperience:null;
   const deterministicYears=suppliedYears===null?inferYearsExperienceFromResume(resumeText):suppliedYears;
-  const explicitResumeRole=role?'':extractExplicitRoleFromDocument(resumeText);
-  const explicitJdRole=(role||explicitResumeRole)?'':extractExplicitRoleFromDocument(jdText);
-  const inferredSkillRole=inferRoleFromSkills(resumeText,jdText);
-  const deterministicRole=role||explicitResumeRole||explicitJdRole||inferredSkillRole;
+  const explicitResumeRole=role?'':extractExplicitRoleFromResume(resumeText);
+  const explicitJdRole=(role||explicitResumeRole)?'':extractExplicitRoleFromJD(jdText);
+  const inferredJdRole=(!role&&!explicitResumeRole&&!explicitJdRole&&normalizeText(jdText))?inferRoleFromSkills('',jdText):'';
+  const inferredResumeRole=(!role&&!explicitResumeRole&&!explicitJdRole&&!normalizeText(jdText))?inferRoleFromSkills(resumeText,''):'';
+  const deterministicRole=role||explicitResumeRole||explicitJdRole||inferredJdRole||inferredResumeRole;
   try {
     const data = await openAIResponseJson({
       model:LLM_PROFILE_MODEL,
@@ -625,7 +626,8 @@ Deterministic resume timeline years: ${Number.isFinite(deterministicYears)?deter
 Target role supplied by user: ${role || 'not supplied'}
 Explicit role found in CV: ${explicitResumeRole || 'not found'}
 Explicit role found in JD: ${explicitJdRole || 'not found'}
-Skill-based role fallback: ${inferredSkillRole || 'not resolved'}
+JD-based role fallback: ${inferredJdRole || 'not resolved'}
+Resume-based role fallback (only when no JD exists): ${inferredResumeRole || 'not resolved'}
 
 RESUME:
 ${resumeText.slice(0, 30000)}
@@ -633,7 +635,7 @@ ${resumeText.slice(0, 30000)}
 JOB DESCRIPTION:
 ${jdText ? jdText.slice(0, 24000) : 'Not provided. Use resume-only grounding.'}
 
-Return JSON with keys candidateSummary (max 1800 chars), jdSummary (max 1200 chars; empty string when no JD), primarySkills (array max 25), projectHighlights (array max 8), domainVocabulary (array max 60 of exact technology/product/framework/domain terms appearing in the resume or JD, preserving canonical spelling such as LangGraph, LangChain, Kubernetes), targetRole, yearsExperience. For yearsExperience, use a supplied value when present; otherwise prefer the deterministic resume timeline value above and only infer from resume dates if it was unresolved. For targetRole, priority is: supplied role, explicit CV title, explicit JD title, then a conservative role inferred from the technical profile. Do not replace an explicit CV title with a JD title.`,
+Return JSON with keys candidateSummary (max 1800 chars), jdSummary (max 1200 chars; empty string when no JD), primarySkills (array max 25), projectHighlights (array max 8), domainVocabulary (array max 60 of exact technology/product/framework/domain terms appearing in the resume or JD, preserving canonical spelling such as LangGraph, LangChain, Kubernetes), targetRole, yearsExperience. For yearsExperience, use a supplied value when present; otherwise prefer the deterministic resume timeline value above and only infer from resume dates if it was unresolved. For targetRole, use this exact priority: supplied role; explicit CV role/title; explicit JD job title/role/position/job-description-for title; if the JD exists but has no explicit title, infer one concise canonical job title from the JD responsibilities/requirements; only when there is no useful JD, infer from the resume. targetRole must be a job title only (normally 2-6 words, maximum 9), never a sentence, summary, requirement, company description, or slash-separated list. Do not replace an explicit CV title with a JD title.`,
       effort:'low', maxTokens:900, responseFormat:{type:'json_object'}
     });
     const raw = outputText(data);
@@ -642,8 +644,8 @@ Return JSON with keys candidateSummary (max 1800 chars), jdSummary (max 1200 cha
     const rawParsedYears=parsed.yearsExperience;
     const parsedYears=(rawParsedYears===null||rawParsedYears===undefined||String(rawParsedYears).trim()==='')?NaN:Number(rawParsedYears);
     const resolvedYears=Number.isFinite(suppliedYears)?suppliedYears:(Number.isFinite(deterministicYears)?deterministicYears:(Number.isFinite(parsedYears)&&parsedYears>=0&&parsedYears<=60?parsedYears:fallback.yearsExperience));
-    const parsedRole=normalizeRoleTitle(parsed.targetRole || '');
-    const resolvedRole=normalizeRoleTitle(role||explicitResumeRole||explicitJdRole||parsedRole||inferredSkillRole||fallback.targetRole||'Software Engineer');
+    const parsedRole=compactRoleCandidate(parsed.targetRole || '') || normalizeRoleTitle(parsed.targetRole || '');
+    const resolvedRole=normalizeRoleTitle(role||explicitResumeRole||explicitJdRole||parsedRole||inferredJdRole||inferredResumeRole||fallback.targetRole||'Software Engineer');
     return {
       candidateSummary:normalizeText(parsed.candidateSummary || fallback.candidateSummary).slice(0, 2200),
       jdSummary:normalizeText(parsed.jdSummary || fallback.jdSummary).slice(0, 1600),
@@ -667,7 +669,7 @@ function isContextualFollowup(question) {
   const words = q.split(/\s+/).filter(Boolean);
   if (!q) return false;
   // Explicit references/modifiers are continuations even when they contain a technology name.
-  if (/\b(it|that|this|those|these|earlier|above|previous|prior|same|one example|another example|more detail|what about|how about|show code|give code|alternative code|alternate code|another code|other code|another solution|alternative solution|alternate solution|different solution|convert it|rewrite it|same in|do it in|instead|alternative|alternate|another one|dry run|time complexity|space complexity|edge cases?|optimi[sz]e|without|avoid|do not use|don't use|not using|using only|different way|different approach|another way|other approach)\b/.test(q)) return true;
+  if (/\b(it|that|this|those|these|them|earlier|previous|above|same|same thing|one example|another example|more detail|what about|how about|show code|give code|alternative code|alternative solution|alternative approach|convert it|rewrite it|same in|do it in|instead|another one|other way|dry run|time complexity|space complexity|edge cases?|optimi[sz]e|without|avoid|do not use|don't use|not using|using only|different way|different approach|another way)\b/.test(q)) return true;
   if (/^(?:in|using)\s+(?:java|python|c#|c\+\+|javascript|typescript|go|golang|rust|kotlin|swift)\??$/.test(q)) return true;
   if (/\b(explain|walk through|why did you|why have you|modify|change|fix)\b.*\b(code|logic|line|function|method|class|solution|algorithm|loop|map|array|string)\b/.test(q)) return true;
   // A clear standalone topic question should not be attached to the prior turn just because it is short.
@@ -772,34 +774,25 @@ function reframeQuestionIntent(rawQuestion) {
   }
   return candidate.slice(0,2000);
 }
-function isCodeAlternativeFollowup(question) {
-  const q=normalizeText(question).toLowerCase();
-  if(!q)return false;
-  return /\b(?:alternative|alternate|another|different|other)\b.{0,35}\b(?:code|solution|implementation|approach|program|method)\b/.test(q)
-    || /\b(?:code|solution|implementation|program|method)\b.{0,35}\b(?:alternative|alternate|another|different|other)\b/.test(q)
-    || /\b(?:same|previous|prior|earlier|above)\b.{0,25}\b(?:code|solution|implementation|program|method)\b/.test(q);
-}
-function findFollowupAnchorTurn(session, question) {
-  const turns=Array.isArray(session?.turns)?session.turns:[];
-  if(!turns.length)return null;
-  if(isCodeAlternativeFollowup(question)||isCodeConstraintFollowup(question)||isCodingFollowupQuestion(question)){
-    for(let i=turns.length-1;i>=0;i--){
-      const turn=turns[i];
-      if(turn?.responseType==='code'||isCodingQuestion(turn?.question||'')||hasCompleteCode(turn?.answer||''))return turn;
-    }
-  }
-  return turns[turns.length-1]||null;
+function isCodeTurn(turn) {
+  if(!turn)return false;
+  return turn.responseType==='code'||turn.responseType==='snippet'||isCodingQuestion(turn.question)||/\b(?:Logic:|Complete code:|Code snippet:)\b|\b(?:class|function|def|public static|return)\b/i.test(turn.answer||'');
 }
 function resolveFollowupIntent(session, question) {
-  if (!isContextualFollowup(question)) return { isFollowup:false, resolvedQuestion:question, previous:null };
-  const previous = findFollowupAnchorTurn(session, question);
-  if (!previous) return { isFollowup:false, resolvedQuestion:question, previous:null };
-  const mostRecent=session?.turns?.[session.turns.length-1];
-  const codeAnchor=isCodeAlternativeFollowup(question)&&previous!==mostRecent;
+  const turns=session?.turns||[];
+  const immediate=turns[turns.length-1];
+  if(!immediate||!isContextualFollowup(question))return {isFollowup:false,resolvedQuestion:question,previous:null};
+
+  // Code references such as "alternative code", "same code in Python" or a new
+  // constraint should bind to the nearest recent coding turn, even when one short
+  // conceptual question occurred after it. Normal pronouns ("those", "that", "it")
+  // continue to bind to the immediately previous turn.
+  const codeReference=isCodingFollowupQuestion(question)||/\b(?:alternative|same|previous|earlier|above)\s+(?:code|solution|implementation)|\b(?:convert|rewrite)\s+(?:it|that)\b/i.test(normalizeText(question));
+  const previous=codeReference?[...turns].reverse().find(isCodeTurn)||immediate:immediate;
   return {
     isFollowup:true,
     previous,
-    resolvedQuestion:`${codeAnchor?'Relevant earlier':'Previous'} interviewer request: ${previous.question}\nCurrent follow-up/modifier: ${question}`
+    resolvedQuestion:`Previous interviewer request: ${previous.question}\nPrevious candidate answer/context: ${String(previous.answer||'').slice(0,5000)}\nCurrent follow-up/modifier: ${question}`
   };
 }
 function wantsExpandedAnswer(prompt) {
@@ -816,6 +809,37 @@ function rejectLowConfidenceInput(prompt) {
 function isDiagramQuestion(prompt) {
   return /\b(flow\s*chart|flow\s*diagram|architecture\s*(?:flow|diagram)|sequence\s*diagram|data\s*flow|component\s*diagram|block\s*diagram|draw\s+(?:the|a|an)?\s*(?:flow|architecture|diagram)|diagram\s+(?:for|of|showing)|draw\.io|drawio|notepad\s+diagram)\b/i.test(String(prompt||''));
 }
+function looksLikeJavaScriptCode(prompt) {
+  const q=String(prompt||'');
+  if(!q.trim())return false;
+  const signals=[
+    /\bfetch\s*\(/,
+    /\.then\s*\(/,
+    /\.catch\s*\(/,
+    /\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=/,
+    /=>/,
+    /\basync\s+(?:function\s+)?[A-Za-z_$]?[\w$]*\s*\(?/,
+    /\bawait\s+[A-Za-z_$]/,
+    /\b(?:JSON\.(?:parse|stringify)|console\.(?:log|error|warn))\s*\(/,
+    /\bset[A-Z][A-Za-z0-9_$]*\s*\(/
+  ];
+  const hits=signals.reduce((count,pattern)=>count+(pattern.test(q)?1:0),0);
+  return hits>=2 || (/\bfetch\s*\(/.test(q)&&/\.(?:then|catch)\s*\(/.test(q));
+}
+function detectCodeLanguageHint(prompt, previous=null) {
+  const q=String(prompt||'');
+  const prior=`${previous?.question||''}\n${previous?.answer||''}`;
+  const combined=`${q}\n${prior}`;
+  if(looksLikeJavaScriptCode(q)||/\b(?:javascript|node(?:\.js)?|js)\b/i.test(combined))return 'JavaScript';
+  if(/\btypescript\b|\binterface\s+\w+\s*\{|:\s*(?:string|number|boolean)\b/i.test(combined))return 'TypeScript';
+  if(/\bpython\b|\bdef\s+\w+\s*\(|\bprint\s*\(/i.test(combined))return 'Python';
+  if(/\bjava\b|\bpublic\s+(?:static\s+)?(?:class|void)|System\.out\.println/i.test(combined))return 'Java';
+  if(/\bc#\b|\busing\s+System\b|Console\.WriteLine/i.test(combined))return 'C#';
+  if(/\bc\+\+\b|#include\s*</i.test(combined))return 'C++';
+  if(/\bgo(?:lang)?\b|\bfunc\s+\w+\s*\(/i.test(combined))return 'Go';
+  if(/\bsql\b|\bselect\s+.+\bfrom\b/i.test(combined))return 'SQL';
+  return '';
+}
 function isCodingQuestion(prompt) {
   const q=normalizeText(prompt);
   if(!q)return false;
@@ -825,7 +849,7 @@ function isCodingQuestion(prompt) {
   // Mentioning "code", "coding" or a "module" in an experience question is
   // not a request to manufacture a program.
   if(experienceQuestion&&!explicitRequest&&!snippetRequest)return false;
-  if(explicitRequest||snippetRequest||/```|\b(?:leetcode|hackerrank)\b/i.test(q))return true;
+  if(explicitRequest||snippetRequest||looksLikeJavaScriptCode(prompt)||/```|\b(?:leetcode|hackerrank)\b/i.test(q))return true;
   if(/\b(?:public|private|protected)\s+(?:static\s+)?(?:class|interface|void|int|string)|\bdef\s+\w+\s*\(|\bfunction\s+\w+\s*\(|\b(?:console\.log|system\.out\.println)\s*\(/i.test(q))return true;
   return /\b(?:find|return|print|calculate|check|remove|reverse|sort|search|merge|validate|count|implement|solve)\b.{0,65}\b(?:string|character|char|array|list|linked list|tree|graph|number|integer|duplicate|non[- ]?repeating|unique|palindrome|anagram|substring|subarray)\b/i.test(q)
     || /\bgiven\b.{0,55}\b(?:string|array|list|tree|graph|number|integer)\b.{0,100}\b(?:find|return|print|calculate|remove|reverse|sort|search|merge|count)\b/i.test(q)
@@ -849,20 +873,20 @@ function isVersionQuestion(prompt) {
 function isCodeConstraintFollowup(question) {
   const q=normalizeText(question).toLowerCase();
   if(!q)return false;
-  return /\b(?:without|avoid|do not use|don't use|not using|using only|instead of|alternative|alternate|another way|different way|different approach|other approach|another solution|alternative solution|different solution)\b/.test(q)
+  return /\b(?:without|avoid|do not use|don't use|not using|using only|instead of|another way|different way|different approach)\b/.test(q)
     || /^(?:no[, ]+)?(?:stringbuilder|streams?|hashmap|map|recursion|loop|loops|built[- ]?in|library|libraries|sort|sorting)\b/.test(q);
 }
 function isCodingFollowupQuestion(question) {
   const q=normalizeText(question);
   if(!q)return false;
   if(/\b(?:have you|do you have|experience (?:with|in)|worked (?:with|on)|which project|tell me about your experience)\b/i.test(q))return false;
-  return /\b(?:this|that|above|previous|earlier|same)\s+(?:code|program|function|method|class|algorithm|solution|line|loop|condition)\b/i.test(q)
+  return /\b(?:this|that|above|previous|earlier|same|alternative|another)\s+(?:code|program|function|method|class|algorithm|solution|line|loop|condition)\b/i.test(q)
+    || /\b(?:alternative|another|different|other)\s+(?:solution|implementation|approach|way)\b/i.test(q)
     || /\b(?:explain|change|modify|update|fix|debug|continue|rewrite|convert|optimi[sz]e|dry run)\b.{0,55}\b(?:code|program|function|method|class|algorithm|solution|line|loop|condition|hashmap|map|array|string)\b/i.test(q)
     || /\b(?:why|how)\b.{0,55}\b(?:line|loop|condition|function|method|hashmap|map|array|stack|queue|recursion|time complexity|space complexity)\b/i.test(q)
     || /\b(?:what|which)\b.{0,55}\b(?:line|loop|condition|function|method)\b/i.test(q)
     || /^(?:in|using)\s+(?:java|python|c#|c\+\+|javascript|typescript|go|golang|rust|kotlin|swift)\??$/i.test(q)
     || /\b(?:time|space) complexity\b|\bedge cases?\b/i.test(q)
-    || isCodeAlternativeFollowup(q)
     || isCodeConstraintFollowup(q);
 }
 function classifyResponseType(question,followupInfo=null,inputSource='') {
@@ -888,12 +912,12 @@ function spokenAnswerShape(question) {
   const q=normalizeText(question).toLowerCase();
   if(!q)return 'DIRECT';
   if(isVersionQuestion(q))return 'VERSION';
-  if(/\b(difference|differences|different|differentiate|distinguish|compare|comparison|versus|\bvs\b|same or different)\b/i.test(q))return 'COMPARISON';
+  if(/\b(difference|different|compare|versus|\bvs\b|same or different)\b/i.test(q))return 'COMPARISON';
   if(/\b(advantage|advantages|feature|features|benefit|benefits|types|ways)\b/i.test(q))return 'FEATURES';
   if(/\b(out of memory|oom|production issue|performance issue|debug|troubleshoot|failing|failure|not working|latency issue|slow|incident)\b/i.test(q))return 'TROUBLESHOOTING';
   if(/\b(have you|did you|what did you|what exactly you did|your current|current engagement|recently|experience with|worked on|implemented|used in your project|in your project|tell me about your)\b/i.test(q))return 'EXPERIENCE';
   if(/\b(how do you|how did you|how would you|walk me through|flow|framework|mechanism|architecture|design|end[- ]to[- ]end|bring .* data|ingest|pipeline|implement it)\b/i.test(q))return 'IMPLEMENTATION_FLOW';
-  if(/\b(what is|what are|why|when|where|which|how does|how is|how are|how can|explain|define|describe)\b/i.test(q))return 'CONCEPT';
+  if(/\b(what is|what are|why|when|where|which)\b/i.test(q))return 'CONCEPT';
   return 'DIRECT';
 }
 function exampleGuidance(question, followupInfo=null) {
@@ -917,7 +941,7 @@ function responseMode(question, followupInfo=null, inputSource='') {
   const type=classifyResponseType(question,followupInfo,inputSource);
   const codingFollowup=type==='code'&&!!followupInfo?.previous&&isCodingFollowupQuestion(question);
   if(type==='multi') return 'MULTI_QUESTION_REQUIRED: Cover every detected interviewer question in the same response and in the same order. If the questions are related, combine them naturally into one connected answer while explicitly satisfying both. If they are distinct, answer the first briefly at a useful high level, then transition immediately to the second and answer it directly. Never discard the first question just because the second is newer. If any sub-question asks for code, include the requested working code for that sub-question rather than explanation only.';
-  if (type==='code'&&codingFollowup) return 'CODING_REQUIRED_FOLLOW_UP: Answer the current follow-up directly in 1-3 short sentences. Then write "Logic:" with the simple approach in 1-2 concise lines, followed by "Complete code:" and the entire relevant earlier working solution. If the interviewer asks for an alternative/another way, provide a complete alternative implementation of the same earlier problem rather than explanation only. Preserve the original problem constraints unless the follow-up changes them. Include concise inline comments for every meaningful logical step. When a complete runnable program is printed, finish with one small "Sample input:" and matching "Sample output:" example.';
+  if (type==='code'&&codingFollowup) return 'CODING_REQUIRED_FOLLOW_UP: Answer the current follow-up directly in 1-3 short sentences. Then write "Logic:" with the simple approach in 1-2 concise lines, followed by "Complete code:" and the entire previous working solution, updated only when the follow-up requests a change. Include concise inline comments for every meaningful logical step so coding can continue without losing context. When a complete runnable program is printed, finish with one small "Sample input:" and matching "Sample output:" example.';
   if (type==='code') return 'CODING_REQUIRED: Start with "Logic:" and explain the simple approach in 1-2 concise lines. Then write "Complete code:" and provide one complete working solution in the requested or context-supported language. Include concise inline comments for every meaningful logical step. When a complete runnable program is printed, finish with one small "Sample input:" and matching "Sample output:" example.';
   if (type==='snippet') return 'EXPLANATION_WITH_CODE_SNIPPET: Answer the question directly in 2-4 concise sentences, then write "Code snippet:" and give the smallest practical snippet that demonstrates how to implement it in the requested or context-supported language/framework. Do not force a full standalone program or sample input/output unless the interviewer asks for it.';
   if (type==='diagram') return 'DRAWABLE_DIAGRAM_REQUIRED: Give a one-line overview, then a detailed monospaced Unicode box-drawing flow that can be copied into Notepad or redrawn in draw.io. Use boxes made with ┌ ─ ┐ │ └ ┘, directional arrows, branch labels, data/control direction, external systems and failure/return paths where relevant. Follow the diagram with only the essential explanation.';
@@ -928,8 +952,8 @@ function answerTokenBudget(question, hasImage=false,responseType='') {
   // max_output_tokens is a ceiling, not a target. A slightly larger ceiling prevents
   // Responses API reasoning tokens from crowding out the visible interview answer.
   // The prompt still keeps normal answers concise, so this does not force extra verbosity.
-  if (responseType==='code'||isCodingQuestion(q)) return 3600;
-  if (responseType==='multi') return /\b(?:code|program|function|method|implement|write)\b/i.test(q)?3000:1800;
+  if (responseType==='code'||isCodingQuestion(q)) return null;
+  if (responseType==='multi') return /\b(?:code|program|function|method|implement|write)\b/i.test(q)?null:1800;
   if (responseType==='snippet'||isImplementationSnippetQuestion(q)) return 1600;
   if (responseType==='diagram'||isDiagramQuestion(q)) return 3000;
   if (hasImage || /\b(design|architecture|system design)\b/i.test(q)) return 1800;
@@ -949,6 +973,8 @@ function multiQuestionGuidance(intentQuestion) {
 function buildPrompt(session, question, retrieved, followupInfo=null, correctedQuestion=question, inputSource='',intentQuestion=correctedQuestion, regenerate=false) {
   const profile = session.profile || {};
   const info = followupInfo || resolveFollowupIntent(session, question);
+  const userInstructions=normalizeStructuredText(session.userInstructions||'').slice(0,5000);
+  const codeLanguage=detectCodeLanguageHint(intentQuestion,info.previous);
   const history = info.isFollowup
     ? session.turns.slice(-MAX_HISTORY_TURNS).map((t,i) => `Turn ${i+1}\nInterviewer: ${t.question}\nCandidate: ${t.answer}`).join('\n\n')
     : '';
@@ -969,7 +995,7 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
 ${priorAnswersForRegenerate.map((turn,index)=>`Earlier answer ${index+1}:
 ${String(turn?.answer||'').slice(0,3500)}`).join('\n\n')}`
     : 'NO';
-  return `CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
+  return `CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nUSER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n${userInstructions || 'No additional user instructions.'}\nApply these instructions to every answer in this prepared session when they are compatible with factual grounding and the mandatory coding/diagram contracts. Treat requests such as STAR format, very short answers, explanatory style, behavioral-answer style, or experience-first wording as persistent presentation preferences.\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nCODE LANGUAGE HINT\n${codeLanguage || 'No explicit language detected; preserve the language requested or inherited from the referenced coding turn.'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
 }
 const COPILOT_INSTRUCTIONS = `You are the candidate in a live senior/lead engineer interview. Return one directly usable answer. Normal answers must be immediately speakable; coding and diagram questions must use the exact practical formats below. Never mention AI, ChatGPT, copilot, prompts, retrieval, transcription correction, evidence matching, or how you inferred the question. Never say "based on my CV/JD", "the resume confirms", "not listed", or similar meta commentary.
 
@@ -1024,9 +1050,9 @@ ANSWER PRIORITY AND SHAPE:
 5. Match length to the question. Narrow factual/correction/follow-up: 1-3 sentences. Normal experience/concept/implementation: roughly 30-50 seconds of speech, enough to explain the mechanism and practical meaning without becoming bookish. End-to-end or explicitly detailed flow: roughly 45-75 seconds. Do not fill the token budget merely because it is available.
 6. Strictly answer the boundary asked. Do not volunteer adjacent technologies, security controls, observability, framework variants, or architecture patterns unless they directly answer the current question.
 7. Preserve concrete values/examples from the interviewer. If the interviewer gives a number, SLA, source system, failure point, or requested count, use that exact constraint in the answer.
-8. Use common technical-interview wording and ordinary engineering verbs while preserving the RESPONSE MODE structure. Prefer simple phrases such as "I used", "I worked on", "I implemented", "we handled", "the main reason was", "we needed to", and "this helped us" when they fit the facts. Avoid inflated or AI-sounding wording such as "leveraged", "utilized", "facilitated", "delve", or sales-style language when a simpler technical phrase works.
-   Keep the existing headers, labelled bullets, short paragraphs, code labels, and comparison structure exactly as defined for the current response mode; do not force every answer into one continuous conversational paragraph.
-   Keep technical terms that matter, but explain their role in complete sentences so the answer is easy to read and deliver in an interview.
+8. Sound like a senior engineer speaking naturally: clear, practical, first-person where factual, and immediately speakable. Use complete sentences, not keyword chains. Avoid bookish definitions and sales-style wording.
+   Natural explanation rule: prefer a small connected explanation over a compressed checklist. For a concept, normally state the idea, explain the runtime/working behavior, then add one practical usage or implication when it improves understanding. For an experience answer, connect actions with cause/effect ("we did X so Y happened") instead of stacking product names.
+   Keep technical terms that matter, but explain their role in the sentence. The answer should be easy to read once and say back naturally without the candidate having to mentally expand shorthand.
 9. Do not repeat a stock answer across questions. Adapt to the current intent, actual Resume evidence, JD priorities, years of experience, target role and recent interview context without exposing those sources.
 10. Prefer current production approaches; use legacy approaches only when asked or when the supplied experience specifically requires them.
 
@@ -1056,7 +1082,7 @@ FLOW / ARCHITECTURE DIAGRAM QUESTIONS:
 When RESPONSE MODE says DRAWABLE_DIAGRAM_REQUIRED, a diagram is mandatory. Give one short overview line, then provide a detailed monospaced Unicode box-drawing diagram designed to be copied into Notepad or redrawn in draw.io. Build real boxes with ┌ ─ ┐ │ └ ┘, use a vertical layout where possible, and include arrows with direction, numbered steps, labelled decision branches, request/data paths, external dependencies, storage and error/return paths relevant to the question. Do not use a one-line arrow sentence or bracket-only placeholders such as [Component]. Do not substitute a prose-only architecture explanation. After the diagram, add only the concise explanation needed to present the flow.
 
 FORMAT:
-The first generated wording is the final visible wording for the turn because the live UI streams it immutably. Produce the requested structure correctly in the first pass; do not rely on a later rewrite, shortening pass, or replacement.
+LIVE OUTPUT IS IMMUTABLE: decide the final answer structure and wording before emitting the first token. Never stream a draft and then restate, shorten, rewrite, or reformat it later; the first visible answer must already satisfy the requested response contract.
 Return plain text only. Do not use Markdown bold/italic markers, decorative emphasis or colour-oriented formatting. Make the answer visually readable in the existing plain-text overlay: one direct opening sentence/paragraph, then a blank line before bullets when bullets are useful. Use hyphen bullets only; keep them short and normally limit them to 3-5. For comparison/difference questions, prefer paired bullets such as "- OAuth 2.0: ..." and "- JWT: ...", followed by one short practical conclusion when useful. For a narrow fact or yes/no follow-up, stay with 1-3 sentences and no bullets. For small coding questions, do not create a page of explanation: give Logic in 1-2 lines, Complete code with the smallest complete runnable solution, and at most 1-2 lines after it for complexity/edge cases. The minimal labels "Logic:", "Complete code:" and "Flow diagram:" are required only for their matching response modes. In the live overlay, never emit Markdown triple-backtick code fences or language fence labels for Java, Python, JavaScript, TypeScript, C#, C++, Go, SQL, shell, or any other language. Output the code directly after "Complete code:"; preserve indentation and inline comments. Do not give competing solutions unless explicitly asked. Avoid generic transitions such as 'First', 'Second', 'Finally' unless sequence itself matters. Prefer concrete production nouns, exact roles/operations and the reason they were used. If the request is unclear, corrupted, unrelated to an interview, or cannot be answered reliably from the question and supplied context, say that briefly and ask for a clearer interview question; never invent missing facts. The final output must be accurate, question-specific and sufficiently explained for the candidate to speak without mentally expanding keywords. Before returning, remove only content that is repetitive, generic, or outside the exact question; do not remove the short implementation explanation that makes the answer interview-ready.
 
 INTERVIEW ANSWER SHAPE CALIBRATION:
@@ -1208,7 +1234,7 @@ ${typeof prompt==='string'?prompt:JSON.stringify(prompt)}
 
 INCOMPLETE OUTPUT TO REPLACE:
 ${clean}`,
-      effort,maxTokens:1800
+      effort,maxTokens:responseType==='code'?null:1800
     });
     clean=removeExactRepeatedOutput(providerOutputText(provider,correction));
     if(responseType==='diagram')clean=makeDrawableDiagram(clean);
@@ -1223,22 +1249,36 @@ function selectAnswerRoute(_question, prepared=null, _options={}) {
   // No automatic routing/classifier is introduced, so latency and answer flow remain deterministic.
   const selected=String(prepared?.session?.answerProvider||'openai');
   if(selected==='cerebras') return {provider:'cerebras',model:CEREBRAS_MODEL,effort:CEREBRAS_REASONING_EFFORT,tier:'cerebras',reason:'user-selected-cerebras-gpt-oss-120b'};
-  if(selected==='gemini') return {provider:'gemini',model:GEMINI_MODEL,effort:'low',tier:GEMINI_MODEL,reason:'user-selected-gemini'};
   if(selected==='terra') return {provider:'openai',model:OPENAI_TERRA_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-terra-fast',reason:'user-selected-openai-terra-fast'};
   if(selected==='luna') return {provider:'openai',model:OPENAI_LUNA_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-luna-fast',reason:'user-selected-openai-luna-fast'};
-  if(selected==='gpt4o') return {provider:'openai',model:OPENAI_4O_MODEL,effort:'none',tier:'openai-gpt-4o',reason:'user-selected-openai-gpt-4o'};
-  if(selected==='gpt4omini') return {provider:'openai',model:OPENAI_4O_MINI_MODEL,effort:'none',tier:'openai-gpt-4o-mini',reason:'user-selected-openai-gpt-4o-mini'};
   return {provider:'openai',model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-sol-fast',reason:'user-selected-openai-sol-fast'};
 }
 function addTurn(session, question, answer, retrieved=[],responseType='spoken') {
   session.turns.push({ question:normalizeStructuredText(question).slice(0,4000), answer:normalizeStructuredText(answer).slice(0,14000), responseType, retrieved:retrieved.slice(0, TOP_K).map(c => ({source:c.source, section:c.section, text:c.text, score:c.score})), at:Date.now() });
   if (session.turns.length > MAX_HISTORY_TURNS) session.turns = session.turns.slice(-MAX_HISTORY_TURNS);
 }
+function stripRepeatedPriorPrompt(session, question) {
+  const current=normalizeStructuredText(question);
+  const previous=normalizeStructuredText(session?.turns?.[session.turns.length-1]?.question||'');
+  if(!current||!previous)return current;
+  const normalizeComparable=value=>String(value||'').toLowerCase().replace(/[^a-z0-9+#.]+/g,' ').replace(/\s+/g,' ').trim();
+  const cur=normalizeComparable(current), prev=normalizeComparable(previous);
+  if(prev.length>=20&&cur.startsWith(prev)){
+    // Locate the same prefix in the original text by word count and keep only the newly
+    // appended interviewer words. This is local string work and adds no model latency.
+    const prevWords=prev.split(' ').filter(Boolean).length;
+    const tokens=current.trim().split(/\s+/);
+    const remainder=tokens.slice(prevWords).join(' ').trim();
+    if(remainder.split(/\s+/).filter(Boolean).length>=2)return remainder;
+  }
+  return current;
+}
 async function prepareQuestion(email, question, {inputSource='', requestId='', clientSentAt=0, regenerate=false}={}) {
   const startedAt = Date.now();
   const perf = { requestId:String(requestId||''), clientToBackendMs:Number(clientSentAt)>0?Math.max(0,startedAt-Number(clientSentAt)):null };
   const intentStartedAt = Date.now();
   const session = interviewSessions.get(email);
+  question=stripRepeatedPriorPrompt(session,question);
   let retrieved = [];
   let embeddingMs = 0, retrievalMs = 0;
   let retrievalMode = 'none';
@@ -1297,8 +1337,8 @@ async function prepareQuestion(email, question, {inputSource='', requestId='', c
   perf.promptTokenEstimate = Math.ceil(perf.promptChars / 4);
   return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, intentQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt, ...perf } };
 }
-app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, terraModel:OPENAI_TERRA_MODEL, lunaModel:OPENAI_LUNA_MODEL, gpt4oModel:OPENAI_4O_MODEL, gpt4oMiniModel:OPENAI_4O_MINI_MODEL, geminiModel:GEMINI_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',options:['openai','terra','luna','gpt4o','gpt4omini','gemini','cerebras']}, embeddingModel:EMBEDDING_MODEL }));
-app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, openaiConfigured:!!OPENAI_API_KEY, cerebrasConfigured:!!CEREBRAS_API_KEY, geminiConfigured:!!GEMINI_API_KEY, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT }));
+app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, terraModel:OPENAI_TERRA_MODEL, lunaModel:OPENAI_LUNA_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',options:['openai','terra','luna','cerebras']}, embeddingModel:EMBEDDING_MODEL }));
+app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, openaiConfigured:!!OPENAI_API_KEY, cerebrasConfigured:!!CEREBRAS_API_KEY, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT }));
 
 app.post('/validate-license', (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
@@ -1315,16 +1355,17 @@ app.post('/prepare-context', async (req, res) => {
   const yearsExperience=(rawYears===null||rawYears===undefined||String(rawYears).trim()==='')?null:Number(rawYears);
   const role = normalizeText(req.body.role || '').slice(0,160);
   const requestedProvider=String(req.body.answerProvider || 'openai').trim().toLowerCase();
-  const answerProvider=['openai','terra','luna','gpt4o','gpt4omini','gemini','cerebras'].includes(requestedProvider)?requestedProvider:'openai';
+  const answerProvider=['openai','terra','luna','cerebras'].includes(requestedProvider)?requestedProvider:'openai';
   if(answerProvider==='cerebras'&&!CEREBRAS_API_KEY)return res.status(500).json({ok:false,error:'CEREBRAS_API_KEY missing on backend for selected model'});
-  if(answerProvider==='gemini'&&!GEMINI_API_KEY)return res.status(500).json({ok:false,error:'GEMINI_API_KEY missing on backend for selected model'});
-  if((answerProvider==='openai'||answerProvider==='terra'||answerProvider==='luna'||answerProvider==='gpt4o'||answerProvider==='gpt4omini')&&!OPENAI_API_KEY)return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for selected model'});
+  if((answerProvider==='openai'||answerProvider==='terra'||answerProvider==='luna')&&!OPENAI_API_KEY)return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for selected model'});
   if (yearsExperience!==null && (!Number.isFinite(yearsExperience) || yearsExperience < 0 || yearsExperience > 60)) return res.status(400).json({ ok:false, error:'yearsExperience must be between 0 and 60 when provided' });
   if (!req.body.resume) return res.status(400).json({ ok:false, error:'Resume is required' });
   const t0 = Date.now();
   try {
     const [resumeText, jdFileText] = await Promise.all([extractDocumentText(req.body.resume), extractDocumentText(req.body.jd)]);
+    // Current setup uses JD upload only. jdText remains accepted solely for backward compatibility.
     const jdText = normalizeText(`${jdFileText}\n${String(req.body.jdText || '')}`).slice(0, MAX_DOCUMENT_CHARS);
+    const userInstructions=normalizeStructuredText(req.body.userInstructions||'').slice(0,5000);
     const parseMs = Date.now() - t0;
 
     const summaryStart = Date.now();
@@ -1341,11 +1382,11 @@ app.post('/prepare-context', async (req, res) => {
     const embeddingMs = Date.now() - embeddingStart;
 
     interviewSessions.set(email, {
-      email, yearsExperience:resolvedYears, role:resolvedRole, answerProvider, profile:{...profile,yearsExperience:resolvedYears,targetRole:resolvedRole}, chunks, turns:[], preparedAt:Date.now(),
+      email, yearsExperience:resolvedYears, role:resolvedRole, answerProvider, userInstructions, profile:{...profile,yearsExperience:resolvedYears,targetRole:resolvedRole}, chunks, turns:[], preparedAt:Date.now(),
       stats:{ resumeChars:resumeText.length, jdChars:jdText.length, chunkCount:chunks.length, parseMs, summaryMs, embeddingMs }
     });
     console.log(`[RAG] Prepared ${email}: ${chunks.length} chunks in ${Date.now()-t0}ms`);
-    return res.json({ ok:true, answerProvider, answerModel:answerProvider==='cerebras'?CEREBRAS_MODEL:(answerProvider==='terra'?OPENAI_TERRA_MODEL:(answerProvider==='luna'?OPENAI_LUNA_MODEL:(answerProvider==='gpt4o'?OPENAI_4O_MODEL:(answerProvider==='gpt4omini'?OPENAI_4O_MINI_MODEL:(answerProvider==='gemini'?GEMINI_MODEL:LLM_DEFAULT_MODEL))))), chunkCount:chunks.length, profile:{ yearsExperience:resolvedYears, targetRole:resolvedRole, primarySkills:(profile.primarySkills || []).slice(0,12), jdProvided:!!jdText }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
+    return res.json({ ok:true, answerProvider, answerModel:answerProvider==='cerebras'?CEREBRAS_MODEL:(answerProvider==='terra'?OPENAI_TERRA_MODEL:(answerProvider==='luna'?OPENAI_LUNA_MODEL:LLM_DEFAULT_MODEL)), chunkCount:chunks.length, profile:{ yearsExperience:resolvedYears, targetRole:resolvedRole, primarySkills:(profile.primarySkills || []).slice(0,12), jdProvided:!!jdText }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
   } catch (err) {
     console.error('[RAG] Prepare error:', err.message);
     return res.status(500).json({ ok:false, error:err.message || 'Context preparation failed' });
@@ -1468,7 +1509,6 @@ app.post('/prefetch-query', async (req, res) => {
 });
 
 app.post('/ask/stream', async (req, res) => {
-  const backendHandlerStartedAt = Date.now();
   const email = String(req.body.email || '').trim().toLowerCase();
   const text = normalizeStructuredText(req.body.text || '');
   const inputSource=normalizeText(req.body.inputSource||'').slice(0,40);
@@ -1476,7 +1516,6 @@ app.post('/ask/stream', async (req, res) => {
   const captureSource = normalizeText(req.body.captureSource || '').slice(0,300);
   const requestId = normalizeText(req.body.requestId || '').slice(0,120);
   const clientSentAt = Number(req.body.clientSentAt || 0);
-  const clientClickedAt = Number(req.body.clientClickedAt || 0);
   const regenerate = req.body.regenerate === true;
   const hasImage = /^data:image\/(?:png|jpeg|jpg|webp);base64,/i.test(imageDataUrl);
   if (!email || (!text && !hasImage)) return res.status(400).json({ ok:false, error:'email and text or image are required' });
@@ -1511,9 +1550,9 @@ app.post('/ask/stream', async (req, res) => {
     if (!OPENAI_API_KEY) return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for vision'});
     try {
       const visionStart=Date.now();
-      const data=await openAIJson('https://api.openai.com/v1/responses',{model:LLM_VISION_EXTRACT_MODEL,service_tier:OPENAI_SERVICE_TIER,instructions:`${COPILOT_INSTRUCTIONS}
+      const data=await openAIJson('https://api.openai.com/v1/responses',openAIResponseBody({model:LLM_VISION_EXTRACT_MODEL,instructions:`${COPILOT_INSTRUCTIONS}
 
-${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasoning:{effort:'none'},text:{verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium'},max_output_tokens:answerTokenBudget(text,true,prepared.responseType)});
+${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,effort:'none',verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',maxTokens:answerTokenBudget(text,true,prepared.responseType),stream:false}));
       let visionAnswer=outputText(data);
       visionAnswer=(await ensureModeConformance({answer:visionAnswer,responseType:prepared.responseType,prompt:prepared.prompt,model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT})).answer;
       if(prepared.session&&visionAnswer)addTurn(prepared.session,`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`,visionAnswer,prepared.retrieved,prepared.responseType);
@@ -1617,18 +1656,19 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasonin
           finalAnswer=normalizeStructuredText(cerebrasDone||provisional||'');
         }
       }
+      if(finalAnswer && !solError && solResult!=='__HYBRID_TIMEOUT__'){
+        const conformance=await ensureModeConformance({answer:finalAnswer,responseType:prepared.responseType,prompt:prepared.prompt,model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,provider:'openai'});
+        finalAnswer=conformance.answer;
+      }
+      if(finalAnswer && finalAnswer!==normalizeStructuredText(provisional)) emit('replace',{text:finalAnswer});
       if(!finalAnswer)throw (solError||cerebrasError||new Error('Both hybrid providers returned no answer'));
-      // Immutable streaming: if provisional text is already visible, keep exactly that wording.
-      const immutableFinal=normalizeStructuredText(provisional)||finalAnswer;
-      if(firstTokenMs===null){firstTokenMs=Date.now()-prepared.latency.startedAt;emit('delta',{delta:immutableFinal})}
-      if(!clientClosed&&prepared.session)addTurn(prepared.session,prepared.intentQuestion||text,immutableFinal,prepared.retrieved,prepared.responseType);
-      const usedSol=!provisional&&!solError&&solResult!=='__HYBRID_TIMEOUT__'&&!!String(solResult||'').trim();
-      const visibleModel=provisional?CEREBRAS_MODEL:(usedSol?LLM_DEFAULT_MODEL:CEREBRAS_MODEL);
-      const visibleTier=provisional?CEREBRAS_SERVICE_TIER:(usedSol?solServiceTier:CEREBRAS_SERVICE_TIER);
+      if(firstTokenMs===null){firstTokenMs=Date.now()-prepared.latency.startedAt;emit('delta',{delta:finalAnswer})}
+      if(!clientClosed&&prepared.session)addTurn(prepared.session,prepared.intentQuestion||text,finalAnswer,prepared.retrieved,prepared.responseType);
+      const usedSol=!solError&&solResult!=='__HYBRID_TIMEOUT__'&&!!String(solResult||'').trim();
       const latency={embeddingMs:prepared.latency.embeddingMs,retrievalMs:prepared.latency.retrievalMs,retrievalMode:prepared.latency.retrievalMode,promptReadyMs:prepared.latency.promptReadyMs,firstTokenMs,llmMs:Date.now()-llmStart,totalMs:Date.now()-prepared.latency.startedAt,attempts:1};
-      console.log(`[LLM hybrid] ${email} visible=${visibleModel} first=${firstTokenMs??'-'}ms total=${latency.totalMs}ms`);
-      emit('meta',{model:visibleModel,modelTier:route.tier,serviceTier:visibleTier,phase:'complete',latency,retrieved:prepared.retrieved.map(c=>({source:c.source,section:c.section,score:Number(c.score.toFixed(3))}))});
-      emit('done',{answer:immutableFinal,model:visibleModel,modelTier:route.tier,serviceTier:visibleTier,latency});
+      console.log(`[LLM hybrid] ${email} provisional=${CEREBRAS_MODEL} final=${usedSol?LLM_DEFAULT_MODEL:CEREBRAS_MODEL} first=${firstTokenMs??'-'}ms total=${latency.totalMs}ms`);
+      emit('meta',{model:usedSol?LLM_DEFAULT_MODEL:CEREBRAS_MODEL,modelTier:route.tier,serviceTier:usedSol?solServiceTier:CEREBRAS_SERVICE_TIER,phase:'complete',latency,retrieved:prepared.retrieved.map(c=>({source:c.source,section:c.section,score:Number(c.score.toFixed(3))}))});
+      emit('done',{answer:finalAnswer,model:usedSol?LLM_DEFAULT_MODEL:CEREBRAS_MODEL,modelTier:route.tier,serviceTier:usedSol?solServiceTier:CEREBRAS_SERVICE_TIER,latency});
     } catch(err) {
       console.error('[LLM hybrid] Error:',err.message);
       emit('error',{error:err.message||'Hybrid LLM stream failed'});
@@ -1646,8 +1686,6 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,reasonin
   let providerRequestAtMs = null;
   let providerHeadersMs = null;
   let firstProviderDeltaAfterRequestMs = null;
-  let providerStreamCompleteAfterRequestMs = null;
-  let firstBackendDeltaWriteMs = null;
   try {
     // Retry once when the provider accepts a request but stalls before producing any text.
     // Normal fast responses are untouched; this only caps the rare 30-60s first-token stalls.
@@ -1674,26 +1712,22 @@ ${strictModeInstructions(prepared.responseType)}`;
         const maxTokens=answerTokenBudget(text,false,prepared.responseType);
         const streamBody=route.provider==='cerebras'
           ? cerebrasChatBody({instructions,input:prepared.prompt,maxTokens,stream:true,effort:route.effort})
-          : route.provider==='gemini'
-            ? geminiInteractionBody({instructions,input:prepared.prompt,maxTokens,stream:true})
-            : openAIResponseBody({model:route.model,instructions,input:prepared.prompt,effort:route.effort,maxTokens,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',stream:true});
-        const upstreamUrl=route.provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:route.provider==='gemini'?`${GEMINI_API_BASE}/interactions`:'https://api.openai.com/v1/responses';
-        const upstreamKey=route.provider==='cerebras'?CEREBRAS_API_KEY:route.provider==='gemini'?GEMINI_API_KEY:OPENAI_API_KEY;
-        if(!upstreamKey)throw new Error(route.provider==='cerebras'?'CEREBRAS_API_KEY missing on backend':route.provider==='gemini'?'GEMINI_API_KEY missing on backend':'OPENAI_API_KEY missing on backend');
+          : openAIResponseBody({model:route.model,instructions,input:prepared.prompt,effort:route.effort,maxTokens,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',stream:true});
+        const upstreamUrl=route.provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:'https://api.openai.com/v1/responses';
+        const upstreamKey=route.provider==='cerebras'?CEREBRAS_API_KEY:OPENAI_API_KEY;
+        if(!upstreamKey)throw new Error(route.provider==='cerebras'?'CEREBRAS_API_KEY missing on backend':'OPENAI_API_KEY missing on backend');
         providerRequestAtMs = Date.now() - prepared.latency.startedAt;
         const providerFetchStartedAt = Date.now();
         upstream = await fetch(upstreamUrl, {
           method:'POST', signal:upstreamController.signal,
-          headers:route.provider==='gemini'?{'content-type':'application/json','x-goog-api-key':upstreamKey}:{'content-type':'application/json', authorization:`Bearer ${upstreamKey}`},
+          headers:{'content-type':'application/json', authorization:`Bearer ${upstreamKey}`},
           body:JSON.stringify(streamBody)
         });
         providerHeadersMs = Date.now() - providerFetchStartedAt;
         if (!upstream.ok) {
           clearTimeout(firstTokenTimer);
           const data = await upstream.json().catch(() => ({}));
-          const upstreamError = new Error(data?.error?.message || `${route.provider==='cerebras'?'Cerebras':route.provider==='gemini'?'Gemini':'OpenAI'} request failed (${upstream.status})`);
-          upstreamError.retryable = route.provider==='gemini' && [429,503].includes(upstream.status);
-          throw upstreamError;
+          throw new Error(data?.error?.message || `${route.provider==='cerebras'?'Cerebras':'OpenAI'} request failed (${upstream.status})`);
         }
         const reader = upstream.body.getReader();
         const decoder = new TextDecoder();
@@ -1713,58 +1747,42 @@ ${strictModeInstructions(prepared.responseType)}`;
             const eventType=String(evt?.type||'');
             const delta=route.provider==='cerebras'
               ? String(evt?.choices?.[0]?.delta?.content||'')
-              : route.provider==='gemini'
-                ? (String(evt?.event_type||'')==='step.delta' && evt?.delta?.type==='text' ? String(evt?.delta?.text||'') : '')
-                : (eventType==='response.output_text.delta' ? String(evt?.delta||'') : '');
+              : (eventType==='response.output_text.delta' ? String(evt?.delta||'') : '');
             if (delta) {
-              const deltaNow = Date.now();
               if (firstTokenMs === null) {
-                firstTokenMs = deltaNow - prepared.latency.startedAt;
-                firstProviderDeltaAfterRequestMs = deltaNow - providerFetchStartedAt;
+                firstTokenMs = Date.now() - prepared.latency.startedAt;
+                firstProviderDeltaAfterRequestMs = Date.now() - providerFetchStartedAt;
                 clearTimeout(firstTokenTimer);
               }
               answer += delta;
-              if (firstBackendDeltaWriteMs === null) firstBackendDeltaWriteMs = Date.now() - prepared.latency.startedAt;
               emit('delta', { delta });
             }
-            if (eventType==='error' || evt?.error) throw new Error(evt?.error?.message || evt?.message || `${route.provider==='cerebras'?'Cerebras':route.provider==='gemini'?'Gemini':'OpenAI'} stream error`);
+            if (eventType==='error' || evt?.error) throw new Error(evt?.error?.message || evt?.message || `${route.provider==='cerebras'?'Cerebras':'OpenAI'} stream error`);
             if (route.provider==='openai' && eventType==='response.completed' && evt?.response?.service_tier) providerServiceTier=String(evt.response.service_tier);
             if (route.provider==='openai' && eventType==='response.failed') throw new Error(evt?.response?.error?.message || 'OpenAI response failed');
           }
         }
-        providerStreamCompleteAfterRequestMs = Date.now() - providerFetchStartedAt;
         clearTimeout(firstTokenTimer);
         break;
       } catch (attemptErr) {
         clearTimeout(firstTokenTimer);
         const timedOut = upstreamController.signal.aborted && firstTokenMs === null;
-        if ((timedOut || attemptErr?.retryable) && streamAttempt < 2) {
-          if(attemptErr?.retryable) await new Promise(resolve=>setTimeout(resolve,750));
-          console.warn(timedOut ? `[LLM stream] first-token timeout after ${firstTokenTimeoutMs}ms; retrying once` : '[LLM stream] Gemini temporary capacity/rate-limit response; retrying once');
-          emit('meta', { model:route.model, modelTier:route.tier, phase:'retry', reason:timedOut?'provider first-token timeout':'Gemini temporary capacity/rate limit' });
+        if (timedOut && streamAttempt < 2) {
+          console.warn(`[LLM stream] first-token timeout after ${firstTokenTimeoutMs}ms; retrying once`);
+          emit('meta', { model:route.model, modelTier:route.tier, phase:'retry', reason:'provider first-token timeout' });
           continue;
         }
         throw attemptErr;
       }
     }
-    // Immutable streaming: keep exactly the provider wording that was already displayed.
-    // No second-pass repair/rewrite and no replace event after text becomes visible.
-    answer=String(answer||'');
-    const postProcessStartedAt = Date.now();
+    // The streamed provider text is immutable once emitted. Do not run any post-stream
+    // rewrite/reformat pass that can flash a second, shorter answer over what the user read.
+    // Required format is enforced in the initial prompt/strict mode before generation.
+    answer=normalizeStructuredText(answer);
+    if(!answer)throw new Error('Provider returned no answer');
     if (!clientClosed && prepared.session && answer) addTurn(prepared.session,hasImage?`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`:prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
-    const backendPostProcessMs = Date.now() - postProcessStartedAt;
-    const latency = {
-      ...prepared.latency,
-      clientClickedAt: clientClickedAt || null,
-      backendHandlerToPrepareStartMs: Math.max(0, prepared.latency.startedAt - backendHandlerStartedAt),
-      providerRequestAtMs, providerHeadersMs, firstProviderDeltaAfterRequestMs,
-      providerStreamCompleteAfterRequestMs,
-      providerGenerationAfterFirstDeltaMs: Number.isFinite(providerStreamCompleteAfterRequestMs) && Number.isFinite(firstProviderDeltaAfterRequestMs) ? Math.max(0, providerStreamCompleteAfterRequestMs - firstProviderDeltaAfterRequestMs) : null,
-      firstBackendDeltaWriteMs, backendPostProcessMs, firstTokenMs,
-      llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt, attempts:streamAttempt
-    };
-    providerServiceTier=providerServiceTier||(route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:route.provider==='gemini'?'standard':OPENAI_SERVICE_TIER);
-    console.log(`[TOPPER LATENCY][backend] request=${requestId||'-'} provider=${route.provider}/${route.model} prep=${latency.promptReadyMs}ms embed=${latency.embeddingMs}ms retrieval=${latency.retrievalMs}ms providerHeaders=${latency.providerHeadersMs??'-'}ms providerFirstDelta=${latency.firstProviderDeltaAfterRequestMs??'-'}ms providerGeneration=${latency.providerGenerationAfterFirstDeltaMs??'-'}ms post=${latency.backendPostProcessMs}ms total=${latency.totalMs}ms`);
+    const latency = { ...prepared.latency, providerRequestAtMs, providerHeadersMs, firstProviderDeltaAfterRequestMs, firstTokenMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt, attempts:streamAttempt };
+    providerServiceTier=providerServiceTier||(route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER);
     emit('meta', { model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, phase:'complete', latency, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})) });
     emit('done', { answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, latency });
   } catch (err) {

@@ -177,51 +177,25 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
       .normalize('NFKD').replace(/[\u0300-\u036f]/g,'')
       .replace(/[^\x09\x0A\x0D\x20-\x7E]/g,'?');
   }
-  function wrapPdfLine(text,width=86,{preserveWhitespace=false}={}){
+  function wrapPdfLine(text,width=78){
     const source=pdfSafe(text).replace(/\t/g,'  ');
-    const out=[];
-    for(const rawParagraph of source.split('\n')){
-      if(rawParagraph===''){out.push('');continue;}
-      if(preserveWhitespace){
-        const indent=(rawParagraph.match(/^\s*/)||[''])[0];
-        const body=rawParagraph.slice(indent.length);
-        if(!body){out.push(rawParagraph);continue;}
-        const available=Math.max(16,width-indent.length);
-        for(let i=0;i<body.length;i+=available)out.push(`${indent}${body.slice(i,i+available)}`);
-        continue;
+    const lines=[];
+    for(const raw of source.split('\n')){
+      if(raw===''){lines.push('');continue;}
+      let remaining=raw.replace(/[ \t]+$/,'');
+      if(!remaining){lines.push('');continue;}
+      const baseIndent=(remaining.match(/^\s*/)||[''])[0].slice(0,12);
+      while(remaining.length>width){
+        let cut=remaining.lastIndexOf(' ',width);
+        if(cut<Math.max(12,Math.floor(width*0.45)))cut=width;
+        const piece=remaining.slice(0,cut).replace(/[ \t]+$/,'');
+        lines.push(piece||remaining.slice(0,width));
+        remaining=remaining.slice(cut).replace(/^ /,'');
+        if(baseIndent&&remaining&&!remaining.startsWith(baseIndent))remaining=`${baseIndent}${remaining}`;
       }
-      const words=rawParagraph.trim().split(/\s+/).filter(Boolean);
-      if(!words.length){out.push('');continue;}
-      let line='';
-      for(const word of words){
-        if(word.length>width){
-          if(line){out.push(line);line='';}
-          for(let i=0;i<word.length;i+=width)out.push(word.slice(i,i+width));
-          continue;
-        }
-        const candidate=line?`${line} ${word}`:word;
-        if(candidate.length>width){if(line)out.push(line);line=word;}else line=candidate;
-      }
-      if(line)out.push(line);
+      lines.push(remaining);
     }
-    return out;
-  }
-  function transcriptAnswerPdfLines(answer){
-    const records=[];
-    let inCode=false;
-    let language='';
-    for(const rawLine of String(answer||'').replace(/\r/g,'').split('\n')){
-      const fence=rawLine.match(/^\s*```\s*([A-Za-z0-9_+#.-]*)\s*$/);
-      if(fence){
-        inCode=!inCode;
-        language=inCode?String(fence[1]||'code'):'';
-        if(inCode&&language)records.push({text:`[${language}]`,font:'F3',size:8.2,leading:10.5});
-        continue;
-      }
-      const wrapped=wrapPdfLine(rawLine,inCode?82:86,{preserveWhitespace:inCode});
-      for(const line of wrapped)records.push({text:line,font:inCode?'F3':'F1',size:inCode?8.2:9,leading:inCode?10.5:12});
-    }
-    return records;
+    return lines;
   }
   function buildTranscriptPdf(session,user){
     const meta=session.metadata||{};
@@ -231,63 +205,52 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
     const totalSec=Math.round(durationMs/1000), mins=Math.floor(totalSec/60), secs=totalSec%60;
     const duration=`${mins}m ${String(secs).padStart(2,'0')}s`;
     const years=(meta.yearsExperience===0||meta.yearsExperience)?String(meta.yearsExperience):'Not provided';
+    const rows=[];
+    const pushLines=(text,{bold=false}={})=>wrapPdfLine(text).forEach(line=>rows.push({text:line,bold}));
 
-    const records=[];
-    const addWrapped=(text,font='F1',size=9,leading=12,width=86)=>{
-      for(const line of wrapPdfLine(text,width))records.push({text:line,font,size,leading});
-    };
-    records.push({text:'TOPPER INTERVIEW TRANSCRIPT',font:'F2',size:11,leading:15});
-    addWrapped(`CV/Resume: ${pdfSafe(meta.resumeFileName||'Not available')}`);
-    addWrapped(`Target Role: ${pdfSafe(meta.targetRole||'Not provided')}    Experience: ${pdfSafe(years)} years`);
-    addWrapped(`Start time: ${fmtDateTime(session.startedAt)}    End time: ${fmtDateTime(session.endedAt)}    Duration: ${duration}`);
-    addWrapped(`Number of questions: ${session.turnCount}`);
-    addWrapped(`Summary: ${pdfSafe(session.summary?.overview||'Completed interview session.')}`);
-    records.push({text:'',font:'F1',size:9,leading:10});
+    pushLines('TOPPER INTERVIEW TRANSCRIPT',{bold:true});
+    pushLines(`CV/Resume: ${pdfSafe(meta.resumeFileName||'Not available')}`);
+    pushLines(`Target Role: ${pdfSafe(meta.targetRole||'Not provided')}    Experience: ${pdfSafe(years)} years`);
+    pushLines(`Start time: ${fmtDateTime(session.startedAt)}    End time: ${fmtDateTime(session.endedAt)}    Duration: ${duration}`);
+    pushLines(`Number of questions: ${session.turnCount}`);
+    pushLines(`Summary: ${pdfSafe(session.summary?.overview||'Completed interview session.')}`);
+    rows.push({text:'',bold:false});
 
     session.turns.forEach((turn,index)=>{
-      // Interviewer prompt/context is bold. Long prompts are wrapped inside the page width.
-      const question=`Q${index+1} - ${turn.question}    [${fmtTime(turn.askedAt)}]`;
-      for(const line of wrapPdfLine(question,84))records.push({text:line,font:'F2',size:9,leading:12});
-      records.push({text:'',font:'F1',size:9,leading:8});
-      records.push(...transcriptAnswerPdfLines(turn.answer));
-      records.push({text:'',font:'F1',size:9,leading:8});
-      records.push({text:'......................................................................................',font:'F1',size:8.5,leading:10});
-      records.push({text:'',font:'F1',size:9,leading:8});
+      // Interviewer prompt/context is bold; response text keeps its original line/paragraph shape.
+      pushLines(`Q${index+1} - ${turn.question}    [${fmtTime(turn.askedAt)}]`,{bold:true});
+      rows.push({text:'',bold:false});
+      pushLines(turn.answer,{bold:false});
+      rows.push({text:'',bold:false});
+      pushLines('..............................................................................');
+      rows.push({text:'',bold:false});
     });
 
-    const pageWidth=595,pageHeight=842,left=44,right=44,top=796,bottom=44;
-    const pages=[];
-    let current=[],y=top;
-    const pushPage=()=>{pages.push(current);current=[];y=top;};
-    for(const record of records){
-      const leading=Math.max(8,Number(record.leading)||12);
-      if(y-leading<bottom && current.length)pushPage();
-      current.push({...record,y});
-      y-=leading;
-    }
-    if(current.length)pages.push(current);
-    if(!pages.length)pages.push([{text:'TOPPER INTERVIEW TRANSCRIPT',font:'F2',size:11,leading:15,y:top},{text:'No transcript content.',font:'F1',size:9,leading:12,y:top-15}]);
-
+    // 54 x 12pt lines from y=800 stays comfortably inside A4 top/bottom margins.
+    // Horizontal wrapping is capped at 78 characters to keep long prompts/code inside the page.
+    const perPage=54,pages=[];
+    for(let i=0;i<rows.length;i+=perPage)pages.push(rows.slice(i,i+perPage));
+    if(!pages.length)pages.push([{text:'TOPPER INTERVIEW TRANSCRIPT',bold:true},{text:'No transcript content.',bold:false}]);
     const objects=[];
     const add=body=>{objects.push(body);return objects.length;};
     const catalogId=add('');
     const pagesId=add('');
     const regularFontId=add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
     const boldFontId=add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>');
-    const monoFontId=add('<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>');
-    const escPdf=t=>pdfSafe(t).replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)');
     const pageIds=[];
-    for(const pageRecords of pages){
-      const stream=[];
-      for(const record of pageRecords){
-        const font=['F1','F2','F3'].includes(record.font)?record.font:'F1';
-        const size=Math.max(7,Math.min(12,Number(record.size)||9));
-        const yPos=Math.max(bottom,Math.min(top,Number(record.y)||top));
-        stream.push('BT',`/${font} ${size} Tf`,`1 0 0 1 ${left} ${yPos.toFixed(1)} Tm`,`(${escPdf(record.text)}) Tj`,'ET');
+    const escPdf=t=>pdfSafe(t).replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)');
+    for(const pageRows of pages){
+      const stream=['BT','48 800 Td','12 TL'];
+      let currentFont='';
+      for(const row of pageRows){
+        const wanted=row.bold?'F2':'F1';
+        if(wanted!==currentFont){stream.push(`/${wanted} 9 Tf`);currentFont=wanted;}
+        stream.push(`(${escPdf(row.text)}) Tj`,'T*');
       }
+      stream.push('ET');
       const content=stream.join('\n');
       const contentId=add(`<< /Length ${Buffer.byteLength(content,'latin1')} >>\nstream\n${content}\nendstream`);
-      const pageId=add(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${regularFontId} 0 R /F2 ${boldFontId} 0 R /F3 ${monoFontId} 0 R >> >> /Contents ${contentId} 0 R >>`);
+      const pageId=add(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${regularFontId} 0 R /F2 ${boldFontId} 0 R >> >> /Contents ${contentId} 0 R >>`);
       pageIds.push(pageId);
     }
     objects[catalogId-1]=`<< /Type /Catalog /Pages ${pagesId} 0 R >>`;
@@ -300,6 +263,7 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
     pdf+=`trailer\n<< /Size ${objects.length+1} /Root ${catalogId} 0 R >>\nstartxref\n${xref}\n%%EOF`;
     return Buffer.from(pdf,'latin1');
   }
+
 
   const adminEmail = emailOf(process.env.ADMIN_EMAIL);
 const adminPassword = String(process.env.ADMIN_PASSWORD || '');
@@ -327,30 +291,6 @@ if (adminEmail && adminPassword) {
 }
 
   const express=require('express');
-
-  // Public merchant identity used by the website/policy pages. These values are
-  // intentionally limited to customer-facing business information and never
-  // expose payment credentials or KYC documents.
-  const publicBusinessProfile = () => {
-    const legalName=String(process.env.BUSINESS_LEGAL_NAME || '').trim();
-    const brandName=String(process.env.BUSINESS_BRAND_NAME || 'Topper').trim() || 'Topper';
-    const businessType=String(process.env.BUSINESS_TYPE || '').trim();
-    const supportEmail=String(process.env.BUSINESS_SUPPORT_EMAIL || 'support.topper@gmail.com').trim();
-    const supportPhone=String(process.env.BUSINESS_SUPPORT_PHONE || '').trim();
-    const addressLine1=String(process.env.BUSINESS_ADDRESS_LINE1 || '').trim();
-    const addressLine2=String(process.env.BUSINESS_ADDRESS_LINE2 || '').trim();
-    const city=String(process.env.BUSINESS_CITY || '').trim();
-    const state=String(process.env.BUSINESS_STATE || '').trim();
-    const postalCode=String(process.env.BUSINESS_POSTAL_CODE || '').trim();
-    const country=String(process.env.BUSINESS_COUNTRY || 'India').trim() || 'India';
-    const gstin=String(process.env.BUSINESS_GSTIN || '').trim();
-    const udyam=String(process.env.BUSINESS_UDYAM || '').trim();
-    const address=[addressLine1,addressLine2,city,state,postalCode,country].filter(Boolean).join(', ');
-    const profileComplete=Boolean(legalName && businessType && supportEmail && supportPhone && addressLine1 && city && state && postalCode);
-    return {brandName,legalName,businessType,supportEmail,supportPhone,address,addressLine1,addressLine2,city,state,postalCode,country,gstin,udyam,profileComplete};
-  };
-  app.get('/api/public/business-profile',(req,res)=>res.set('Cache-Control','public, max-age=300').json({ok:true,business:publicBusinessProfile()}));
-
   app.use('/portal',express.static(publicDir,{extensions:['html']}));
   app.use('/',express.static(publicDir,{extensions:['html']}));
   app.post('/api/auth/register',(req,res)=>{ try { const email=emailOf(req.body.email), password=String(req.body.password||''); if(!/^\S+@\S+\.\S+$/.test(email)||password.length<8)return res.status(400).json({ok:false,error:'Use a valid email and an 8+ character password'}); const info=db.prepare('INSERT INTO users(email,password_hash,name) VALUES(?,?,?)').run(email,bcrypt.hashSync(password,12),String(req.body.name||'').trim().slice(0,80)); const u=db.prepare('SELECT * FROM users WHERE id=?').get(info.lastInsertRowid); res.json({ok:true,token:sign(u),user:publicUser(u)}); }catch(e){res.status(409).json({ok:false,error:'Email is already registered'});} });

@@ -62,243 +62,29 @@ let streamHasText = false;
 let streamedAnswerText = '';
 let pendingRenderDelta = '';
 let renderFramePending = false;
-let streamRenderState = null;
 let lastSubmittedPrompt = null; // {text,inputSource} for explicit Re-answer
-let pendingUserSendStartedAt = 0;
-let activeLatencyTrace = null;
-let lastLatencyTraceText = '';
 
-function fmtMs(value) {
-  return Number.isFinite(value) ? `${Math.round(value)}ms` : '-';
-}
-function fmtSec(value) {
-  return Number.isFinite(value) ? `${(value/1000).toFixed(value >= 10000 ? 1 : 2)}s` : '-';
-}
-function buildLatencyTraceText(trace, msg={}) {
-  const t = msg.transportTiming || trace?.transportTiming || {};
-  const b = msg.latency || trace?.backendLatency || {};
-  const clickAt = Number(trace?.clickAt || 0);
-  const sentAt = Number(trace?.ipcSentAt || 0);
-  const firstDeltaAt = Number(trace?.firstRendererDeltaAt || 0);
-  const firstPaintAt = Number(trace?.firstPaintAt || 0);
-  const doneAt = Number(trace?.doneAt || 0);
-  const clickToSend = clickAt && sentAt ? sentAt - clickAt : null;
-  const clickToDelta = clickAt && firstDeltaAt ? firstDeltaAt - clickAt : null;
-  const clickToPaint = clickAt && firstPaintAt ? firstPaintAt - clickAt : null;
-  const clickToDone = clickAt && doneAt ? doneAt - clickAt : null;
-  const paintToDone = firstPaintAt && doneAt ? doneAt - firstPaintAt : null;
-  return [
-    'TOPPER LATENCY TRACE',
-    `requestId: ${trace?.requestId || '-'}`,
-    `provider/model: ${msg.model || trace?.model || '-'}`,
-    `inputSource: ${trace?.inputSource || '-'}`,
-    '',
-    `01 user action -> IPC send: ${fmtMs(clickToSend)}`,
-    `02 IPC send -> Electron main receive: ${fmtMs(t.mainIpcAfterClientSendMs)}`,
-    `03 Electron main -> backend fetch start: ${fmtMs(t.mainFetchStartAfterIpcMs)}`,
-    `04 backend fetch -> SSE headers: ${fmtMs(t.backendHeadersAfterFetchMs)}`,
-    `05 backend fetch -> first SSE byte: ${fmtMs(t.firstBackendByteAfterFetchMs)}`,
-    `06 client send -> backend prepare start (clock-based): ${fmtMs(b.clientToBackendMs)}`,
-    `07 backend handler -> prepare start: ${fmtMs(b.backendHandlerToPrepareStartMs)}`,
-    `08 backend prompt ready: ${fmtMs(b.promptReadyMs)}`,
-    `   intent: ${fmtMs(b.intentMs)} | retrieval decision: ${fmtMs(b.retrievalDecisionMs)} | embedding: ${fmtMs(b.embeddingMs)} | retrieval: ${fmtMs(b.retrievalMs)} | prompt build: ${fmtMs(b.promptBuildMs)}`,
-    `   retrieval mode: ${b.retrievalMode || '-'} | embedding cache: ${b.embeddingCacheHit === true ? 'hit' : b.embeddingCacheHit === false ? 'miss' : '-'} | retrieval cache: ${b.retrievalCacheHit === true ? 'hit' : b.retrievalCacheHit === false ? 'miss' : '-'}`,
-    `   prompt size: ${Number.isFinite(b.promptChars) ? b.promptChars : '-'} chars / ~${Number.isFinite(b.promptTokenEstimate) ? b.promptTokenEstimate : '-'} tokens`,
-    `09 backend prepare start -> provider request: ${fmtMs(b.providerRequestAtMs)}`,
-    `10 provider request -> response headers: ${fmtMs(b.providerHeadersMs)}`,
-    `11 provider request -> first text delta: ${fmtMs(b.firstProviderDeltaAfterRequestMs)}`,
-    `12 provider generation after first delta: ${fmtMs(b.providerGenerationAfterFirstDeltaMs)}`,
-    `13 backend first delta write from prepare start: ${fmtMs(b.firstBackendDeltaWriteMs)}`,
-    `14 backend post-processing after provider stream: ${fmtMs(b.backendPostProcessMs)}`,
-    `15 backend fetch -> first delta seen by Electron: ${fmtMs(t.firstBackendDeltaAfterFetchMs)}`,
-    `16 user action -> first renderer delta: ${fmtMs(clickToDelta)}`,
-    `17 user action -> first painted answer: ${fmtMs(clickToPaint)}`,
-    `18 first painted answer -> completed answer: ${fmtMs(paintToDone)}`,
-    `19 user action -> completed answer: ${fmtMs(clickToDone)}`,
-    `20 backend LLM section total: ${fmtMs(b.llmMs)}`,
-    `21 backend internal total: ${fmtMs(b.totalMs)}`,
-    `22 Electron backend fetch -> done event: ${fmtMs(t.backendDoneAfterFetchMs)}`,
-    `attempts: ${Number.isFinite(b.attempts) ? b.attempts : '-'}`
-  ].join('\n');
-}
-function updateLatencyLabel(trace, msg={}) {
-  if (!trace) return;
-  if (msg.transportTiming) trace.transportTiming = msg.transportTiming;
-  if (msg.latency) trace.backendLatency = msg.latency;
-  if (msg.model) trace.model = msg.model;
-  const b = trace.backendLatency || {};
-  const clickAt = Number(trace.clickAt || 0);
-  const paintMs = clickAt && trace.firstPaintAt ? trace.firstPaintAt - clickAt : null;
-  const doneMs = clickAt && trace.doneAt ? trace.doneAt - clickAt : null;
-  const parts = [trace.model || 'LLM'];
-  if (Number.isFinite(paintMs)) parts.push(`click→paint ${fmtSec(paintMs)}`);
-  if (Number.isFinite(b.promptReadyMs)) parts.push(`prep ${fmtSec(b.promptReadyMs)}`);
-  if (Number.isFinite(b.firstProviderDeltaAfterRequestMs)) parts.push(`provider→1st ${fmtSec(b.firstProviderDeltaAfterRequestMs)}`);
-  if (Number.isFinite(b.providerGenerationAfterFirstDeltaMs)) parts.push(`gen ${fmtSec(b.providerGenerationAfterFirstDeltaMs)}`);
-  if (Number.isFinite(doneMs)) parts.push(`total ${fmtSec(doneMs)}`);
-  modelLabel.textContent = parts.join(' · ');
-  modelLabel.style.cursor = 'copy';
-  modelLabel.style.userSelect = 'text';
-  lastLatencyTraceText = buildLatencyTraceText(trace, msg);
-}
-modelLabel.addEventListener('click', async () => {
-  if (!lastLatencyTraceText) return;
-  const copied = await window.electronAPI.copyToClipboard(lastLatencyTraceText).catch(()=>({success:false}));
-  feedback(copied?.success ? 'Latency trace copied.' : 'Could not copy latency trace.', !copied?.success);
-});
-
-function normalizedCodeLanguage(value) {
-  const raw=String(value||'').trim().toLowerCase().replace(/[^a-z0-9+#.-]/g,'');
-  const aliases={js:'javascript',javascript:'javascript',node:'javascript',nodejs:'javascript',jsx:'javascript',ts:'typescript',typescript:'typescript',tsx:'typescript',py:'python',python:'python',java:'java',golang:'go',go:'go',sql:'sql',postgres:'sql',postgresql:'sql',mysql:'sql',sh:'bash',shell:'bash',bash:'bash',cs:'csharp','c#':'csharp',cpp:'cpp','c++':'cpp',json:'json',yaml:'yaml',yml:'yaml',html:'html',css:'css'};
-  return aliases[raw]||raw||'code';
-}
-function codeLanguageLabel(language) {
-  const labels={javascript:'JavaScript',typescript:'TypeScript',python:'Python',java:'Java',go:'Go',sql:'SQL',bash:'Bash',csharp:'C#',cpp:'C++',json:'JSON',yaml:'YAML',html:'HTML',css:'CSS',code:'Code'};
-  return labels[language]||language.toUpperCase();
-}
-function codeTokenClass(token, language) {
-  if(/^\s*(?:\/\/|#)/.test(token)||/^\/\*/.test(token))return 'codeComment';
-  if(/^(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)$/.test(token))return 'codeString';
-  if(/^\d/.test(token))return 'codeNumber';
-  const keywordSets={
-    javascript:new Set('const let var function return if else for while do switch case break continue class extends new async await try catch finally throw import from export default true false null undefined typeof instanceof this'.split(' ')),
-    typescript:new Set('const let var function return if else for while do switch case break continue class extends implements interface type enum new async await try catch finally throw import from export default true false null undefined public private protected readonly abstract this'.split(' ')),
-    java:new Set('public private protected class interface extends implements static final void int long double float boolean char byte short new return if else for while do switch case break continue try catch finally throw throws true false null this super package import'.split(' ')),
-    go:new Set('package import func return if else for range switch case break continue go defer select chan map struct interface var const type true false nil'.split(' ')),
-    python:new Set('def return if elif else for while in is not and or class import from as try except finally raise with lambda True False None async await yield pass break continue'.split(' ')),
-    sql:new Set('select from where join inner left right full on group by order having insert update delete into values create alter drop table view index and or not null as distinct union all case when then else end limit offset'.split(' '))
-  };
-  const set=keywordSets[language];
-  if(set&&set.has(token.toLowerCase()))return 'codeKeyword';
-  return '';
-}
-function appendHighlightedCodeLine(codeEl, line, language) {
-  const tokenRe=/(\/\/.*$|#.*$|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*\b)/gm;
-  let last=0;
-  for(const match of line.matchAll(tokenRe)){
-    const index=match.index||0;
-    if(index>last)codeEl.appendChild(document.createTextNode(line.slice(last,index)));
-    const token=match[0];
-    const cls=codeTokenClass(token,language);
-    if(cls){const span=document.createElement('span');span.className=cls;span.textContent=token;codeEl.appendChild(span);}
-    else codeEl.appendChild(document.createTextNode(token));
-    last=index+token.length;
-  }
-  if(last<line.length)codeEl.appendChild(document.createTextNode(line.slice(last)));
-}
-function resetStreamingRenderer(target) {
-  streamRenderState={target,inCode:false,lineStart:true,lineProbe:'',codeLineBuffer:'',codeEl:null,language:'code'};
-}
-function openStreamingCodeBlock(state, languageRaw) {
-  const language=normalizedCodeLanguage(languageRaw);
-  const pre=document.createElement('pre');
-  pre.className='answerCodeBlock';
-  pre.dataset.language=codeLanguageLabel(language);
-  const code=document.createElement('code');
-  code.className=`answerCode language-${language}`;
-  pre.appendChild(code);
-  state.target.appendChild(pre);
-  state.inCode=true;
-  state.codeEl=code;
-  state.language=language;
-  state.codeLineBuffer='';
-  state.lineStart=true;
-  state.lineProbe='';
-}
-function appendProseNode(state, text) {
-  if(!text)return;
-  // Spoken answers are requested as plain text. Remove only Markdown emphasis markers;
-  // the actual words are appended once and are never rebuilt later.
-  state.target.appendChild(document.createTextNode(String(text).replace(/\*\*/g,'')));
-}
-function consumeStreamingAnswerChunk(chunk) {
-  const state=streamRenderState;
-  if(!state?.target)return;
-  const text=String(chunk||'');
-  let i=0;
-  while(i<text.length){
-    if(state.inCode){
-      const nl=text.indexOf('\n',i);
-      if(nl<0){state.codeLineBuffer+=text.slice(i);break;}
-      state.codeLineBuffer+=text.slice(i,nl);
-      if(/^\s*```\s*$/.test(state.codeLineBuffer)){
-        state.inCode=false;state.codeEl=null;state.language='code';state.codeLineBuffer='';state.lineStart=true;state.lineProbe='';
-      }else{
-        appendHighlightedCodeLine(state.codeEl,state.codeLineBuffer,state.language);
-        state.codeEl.appendChild(document.createTextNode('\n'));
-        state.codeLineBuffer='';
-      }
-      i=nl+1;
-      continue;
-    }
-
-    if(state.lineStart){
-      const ch=text[i++];
-      state.lineProbe+=ch;
-      if(ch==='\n'){
-        const probe=state.lineProbe.slice(0,-1);
-        const fence=probe.match(/^\s*```\s*([A-Za-z0-9_+#.-]*)\s*$/);
-        if(fence)openStreamingCodeBlock(state,fence[1]||'code');
-        else appendProseNode(state,state.lineProbe);
-        state.lineProbe='';
-        state.lineStart=true;
-        continue;
-      }
-      const trimmed=state.lineProbe.trimStart();
-      if(trimmed.length<=3 && /^`{1,3}$/.test(trimmed))continue;
-      if(/^```/.test(trimmed))continue; // hold the fence/lang line until its newline
-      appendProseNode(state,state.lineProbe);
-      state.lineProbe='';
-      state.lineStart=false;
-      continue;
-    }
-
-    const nl=text.indexOf('\n',i);
-    if(nl<0){appendProseNode(state,text.slice(i));break;}
-    appendProseNode(state,text.slice(i,nl+1));
-    i=nl+1;
-    state.lineStart=true;
-    state.lineProbe='';
-  }
-}
-function finalizeStreamingRenderer() {
-  const state=streamRenderState;
-  if(!state?.target)return;
-  if(state.inCode&&state.codeLineBuffer){
-    if(!/^\s*```\s*$/.test(state.codeLineBuffer))appendHighlightedCodeLine(state.codeEl,state.codeLineBuffer,state.language);
-    state.codeLineBuffer='';
-  }else if(!state.inCode&&state.lineProbe){
-    const fence=state.lineProbe.match(/^\s*```\s*([A-Za-z0-9_+#.-]*)\s*$/);
-    if(!fence)appendProseNode(state,state.lineProbe);
-    state.lineProbe='';
-  }
-}
 function flushPendingAnswerDelta() {
   renderFramePending = false;
   if (!pendingRenderDelta) return;
-  const delta = pendingRenderDelta;
+  const clean = pendingRenderDelta;
   pendingRenderDelta = '';
-  streamedAnswerText += delta;
-  if (!streamRenderState?.target) resetStreamingRenderer(activeAnswerTurn?.responseElement || answerEl);
-  consumeStreamingAnswerChunk(delta);
-  if (activeAnswerTurn) {
-    activeAnswerTurn.answer = cleanStoredAnswer(streamedAnswerText);
-    ensureCurrentTurnReadingSlot(activeAnswerTurn);
+  streamedAnswerText += clean;
+  if (!activeAnswerTurn) {
+    answerEl.appendChild(document.createTextNode(clean));
+    return;
   }
-  if (activeLatencyTrace && !activeLatencyTrace.firstPaintAt && !activeLatencyTrace.paintProbePending) {
-    activeLatencyTrace.paintProbePending = true;
-    requestAnimationFrame(() => {
-      if (!activeLatencyTrace || activeLatencyTrace.firstPaintAt) return;
-      activeLatencyTrace.firstPaintAt = Date.now();
-      activeLatencyTrace.paintProbePending = false;
-      updateLatencyLabel(activeLatencyTrace);
-    });
-  }
+  activeAnswerTurn.answer = streamedAnswerText;
+  activeAnswerTurn.responseElement.appendChild(document.createTextNode(clean));
+  ensureCurrentTurnReadingSlot(activeAnswerTurn);
 }
+
 function queuePlainAnswerDelta(delta) {
-  const text = String(delta || '');
-  if (!text) return;
-  pendingRenderDelta += text;
+  const clean = String(delta || '').replace(/\*\*/g, '');
+  if (!clean) return;
+  pendingRenderDelta += clean;
+  // Coalesce token-sized provider events into one browser paint. This does not
+  // delay network/model streaming; first visible paint is the next animation frame.
   if (!renderFramePending) {
     renderFramePending = true;
     requestAnimationFrame(flushPendingAnswerDelta);
@@ -421,23 +207,34 @@ function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=f
   return turn;
 }
 
-function cleanStoredAnswer(text) {
+function cleanVisibleAnswer(text) {
   return String(text || '')
-    // Grounding tags are internal metadata and are never part of the candidate answer.
+    .replace(/\*\*/g, '')
+    // Grounding stays internal. Never expose resume/JD source metadata.
     .replace(/⟦(?:Resume|JD)\s*·\s*[^⟧]+⟧/g, '')
+    // The live overlay is intentionally plain-text. Strip Markdown code-fence
+    // wrappers for every language (```java, ```python, ```js, ...), while
+    // preserving the code itself exactly as readable text.
+    .replace(/^\s*```[^\r\n`]*\s*$/gm, '')
+    .replace(/^\s*```\s*$/gm, '')
     .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{4,}/g, '\n\n\n')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
+function renderAnswerWithSourceTags(target, text) {
+  if (!target) return;
+  target.textContent = cleanVisibleAnswer(text);
+}
+
 function renderPlainAnswer(text) {
-  streamedAnswerText = String(text || '');
-  const target=activeAnswerTurn?.responseElement || answerEl;
-  target.textContent='';
-  resetStreamingRenderer(target);
-  consumeStreamingAnswerChunk(streamedAnswerText);
-  finalizeStreamingRenderer();
-  if (activeAnswerTurn) activeAnswerTurn.answer = cleanStoredAnswer(streamedAnswerText);
+  streamedAnswerText = String(text || '').replace(/\*\*/g, '');
+  if (!activeAnswerTurn) {
+    renderAnswerWithSourceTags(answerEl, streamedAnswerText);
+    return;
+  }
+  activeAnswerTurn.answer = cleanVisibleAnswer(streamedAnswerText);
+  renderAnswerWithSourceTags(activeAnswerTurn.responseElement, streamedAnswerText);
 }
 
 function appendPlainAnswerDelta(delta) {
@@ -724,6 +521,10 @@ function isLikelyContinuation(fragment) {
   return /^(and|also|but|or|then|so|because|which|where|when|with|without|using|for|from|in|on|to|if|while|plus|along with)\b/.test(q);
 }
 
+function hasVisibleActiveAnswer() {
+  return !!(streamHasText || pendingRenderDelta || String(activeAnswerTurn?.answer || '').trim() || String(streamedAnswerText || '').trim());
+}
+
 function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = '', inputSource = '', regenerate = false } = {}) {
   clearTimeout(llmTimer);
   clearTimeout(manualSendTimer);
@@ -736,7 +537,6 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   const source=inputSource||(typed?(manualPromptContainsCapture?`screen-capture-${manualPromptTaskType}`:'typed'):'system-audio');
 
   if (!text || text.length < 2) {
-    pendingUserSendStartedAt = 0;
     feedback('Nothing to send.', true);
     return false;
   }
@@ -744,7 +544,7 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   if (!typed&&!auto) manualCommitGuard={text,at:Date.now()};
   // Auto-send continuations regenerate the same logical question. Reuse the existing
   // visible turn instead of leaving a stale partial answer in history.
-  const reuseAutoTurn = !!(auto && lastSendWasAuto && activeAnswerTurn?.auto && activeAutoLineIndex >= 0 && !streamHasText);
+  const reuseAutoTurn = !!(auto && lastSendWasAuto && activeAnswerTurn?.auto && activeAutoLineIndex >= 0 && !hasVisibleActiveAnswer());
 
   // A manually submitted prompt is authoritative for this turn. When it contains staged
   // screen captures, sendManualOrPending first appends the current unsent spoken question.
@@ -801,17 +601,11 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
 
   if (activeStreamRequestId) window.electronAPI.cancelLLMStream(activeStreamRequestId);
   const requestId = `q-${Date.now()}-${++llmRequestId}`;
-  const ipcSentAt = Date.now();
-  const clickAt = pendingUserSendStartedAt || ipcSentAt;
-  pendingUserSendStartedAt = 0;
   activeStreamRequestId = requestId;
-  activeLatencyTrace = { requestId, clickAt, ipcSentAt, inputSource:source, firstRendererDeltaAt:null, firstPaintAt:null, doneAt:null, transportTiming:null, backendLatency:null, model:'' };
-  lastLatencyTraceText = '';
   streamHasText = false;
   streamedAnswerText = '';
   pendingRenderDelta = '';
   renderFramePending = false;
-  streamRenderState = null;
   // Re-answer is intentionally a NEW chronological turn. The prior answer stays intact
   // and the regenerated answer streams below it exactly like a newly asked question.
   startOrRefreshAnswerTurn({ requestId, question:text, auto, reuseAuto:reuseAutoTurn });
@@ -822,7 +616,7 @@ function sendUtteranceToLLM({ auto = false, replacementText = '', typedText = ''
   // local 'Thinking' state; the first provider delta is rendered immediately.
   modelLabel.textContent = '';
   feedback(regenerate ? 'Re-answering…' : (auto ? 'Auto sent' : 'Sent'));
-  window.electronAPI.startLLMStream({ requestId, text, inputSource:source, licenseEmail:effectiveEmail(), clientSentAt:ipcSentAt, clientClickedAt:clickAt, regenerate });
+  window.electronAPI.startLLMStream({ requestId, text, inputSource:source, licenseEmail:effectiveEmail(), clientSentAt:Date.now(), regenerate });
   return true;
 }
 
@@ -845,6 +639,12 @@ function scheduleLLM() {
   llmTimer = setTimeout(() => {
     const remaining = AUTO_SEND_QUIET_MS - (Date.now() - lastTranscriptAt);
     if (remaining > 0) return scheduleLLM();
+    // Never cancel a visible answer just because the interviewer resumed speaking.
+    // Keep the new speech queued and submit it after the current stream finishes.
+    if (activeStreamRequestId && hasVisibleActiveAnswer()) {
+      llmTimer = setTimeout(scheduleLLM, 120);
+      return;
+    }
     sendUtteranceToLLM({ auto:true });
   }, wait);
 }
@@ -891,7 +691,7 @@ function sendManualOrPending() {
     manualSendStartedAt=0;
     const recent=getCompleteUnsentTranscript();
     if (recent) sendUtteranceToLLM({auto:false,replacementText:recent,inputSource:'system-audio'});
-    else { pendingUserSendStartedAt = 0; feedback('Nothing to send.',true); }
+    else feedback('Nothing to send.',true);
   };
   run();
   return true;
@@ -915,7 +715,7 @@ async function copyRecentAndSend() {
     }
     manualSendStartedAt=0;
     const recent=getCompleteUnsentTranscript();
-    if (!recent) { pendingUserSendStartedAt = 0; feedback('Nothing to send.',true);return; }
+    if (!recent) { feedback('Nothing to send.',true);return; }
     // Copy and send the same complete snapshot after the short transcript flush.
     const copied=await window.electronAPI.copyToClipboard(recent).catch(()=>({success:false}));
     if (!copied?.success) feedback('Could not copy prompt to clipboard.',true);
@@ -979,7 +779,6 @@ async function captureWindowAndSolve() {
 captureWindowBtn.onclick = captureWindowAndSolve;
 if (reanswerBtn) reanswerBtn.onclick = () => {
   if (!lastSubmittedPrompt?.text) return feedback('No previous question to re-answer.', true);
-  pendingUserSendStartedAt = Date.now();
   sendUtteranceToLLM({
     auto:false,
     typedText:lastSubmittedPrompt.text,
@@ -990,7 +789,7 @@ if (reanswerBtn) reanswerBtn.onclick = () => {
 manualPrompt.addEventListener('input',()=>{if(!manualPrompt.value.trim()){manualPromptContainsCapture=false;manualPromptTaskType='other';capturedScreenCount=0}});
 manualPrompt.addEventListener('input',()=>{ if(!autoSend) prefetchQuestionEvidence(manualPrompt.value, 320); });
 
-sendBtn.onclick = () => { pendingUserSendStartedAt = Date.now(); sendManualOrPending(); };
+sendBtn.onclick = sendManualOrPending;
 
 // Keyboard shortcuts work at overlay level, not only when the text box already has focus.
 document.addEventListener('keydown', e => {
@@ -998,7 +797,6 @@ document.addEventListener('keydown', e => {
   if (e.ctrlKey) {
     e.preventDefault();
     e.stopPropagation();
-    pendingUserSendStartedAt = Date.now();
     copyRecentAndSend();
     return;
   }
@@ -1006,7 +804,6 @@ document.addEventListener('keydown', e => {
   if (!autoSend || manualPrompt.value.trim()) {
     e.preventDefault();
     e.stopPropagation();
-    pendingUserSendStartedAt = Date.now();
     sendManualOrPending();
   }
 }, true);
@@ -1014,22 +811,11 @@ renderAutoSend();
 
 window.electronAPI.onLLMStream(msg => {
   if (!msg || msg.requestId !== activeStreamRequestId) return;
-  if (msg.type === 'start') {
-    if (activeLatencyTrace) {
-      activeLatencyTrace.transportTiming = msg.transportTiming || activeLatencyTrace.transportTiming;
-      updateLatencyLabel(activeLatencyTrace, msg);
-    }
-  } else if (msg.type === 'delta') {
-    if (activeLatencyTrace) {
-      if (!activeLatencyTrace.firstRendererDeltaAt) activeLatencyTrace.firstRendererDeltaAt = Date.now();
-      if (msg.transportTiming) activeLatencyTrace.transportTiming = msg.transportTiming;
-      updateLatencyLabel(activeLatencyTrace, msg);
-    }
+  if (msg.type === 'delta') {
     if (!streamHasText) {
       streamedAnswerText = '';
       streamHasText = true;
-      if (activeAnswerTurn?.responseElement && !activeAnswerTurn.answer) activeAnswerTurn.responseElement.textContent = '';
-      resetStreamingRenderer(activeAnswerTurn?.responseElement || answerEl);
+      if (activeAnswerTurn?.responseElement) activeAnswerTurn.responseElement.textContent = '';
       // Re-anchor on first provider output as a second guard against layout changes
       // between Send and first-token arrival. The user can start reading immediately.
       scrollTurnToTop(activeAnswerTurn);
@@ -1037,19 +823,14 @@ window.electronAPI.onLLMStream(msg => {
     // Append each provider delta immediately. Avoid rebuilding the whole answer on every token.
     appendPlainAnswerDelta(msg.delta || '');
   } else if (msg.type === 'replace') {
-    // Backward-compatibility safety: never replace wording that has already appeared.
-    // Older backends may still emit a repair/upgrade event; accept it only before any text.
-    if (!streamHasText && !streamedAnswerText) {
+    flushPendingAnswerDelta();
+    // Once provider text is visible it is immutable. Keep replace only as a legacy
+    // fallback for requests that produced no visible delta at all.
+    if (!hasVisibleActiveAnswer()) {
       streamHasText=true;
       renderPlainAnswer(msg.text||'No answer returned.');
     }
   } else if (msg.type === 'meta') {
-    if (activeLatencyTrace) {
-      if (msg.transportTiming) activeLatencyTrace.transportTiming = msg.transportTiming;
-      if (msg.latency) activeLatencyTrace.backendLatency = msg.latency;
-      if (msg.model) activeLatencyTrace.model = msg.model;
-      updateLatencyLabel(activeLatencyTrace, msg);
-    }
     if (msg.phase === 'retrieval') {
       const bits = [];
       if (msg.retrievalMode) bits.push(msg.retrievalMode);
@@ -1067,31 +848,15 @@ window.electronAPI.onLLMStream(msg => {
       modelLabel.textContent = `${msg.model || ''}${Number.isFinite(first) ? ` · first ${first}ms` : ''}`.trim();
     }
   } else if (msg.type === 'done') {
-    if (activeLatencyTrace) {
-      activeLatencyTrace.doneAt = Date.now();
-      if (msg.transportTiming) activeLatencyTrace.transportTiming = msg.transportTiming;
-      if (msg.latency) activeLatencyTrace.backendLatency = msg.latency;
-      if (msg.model) activeLatencyTrace.model = msg.model;
-    }
     flushPendingAnswerDelta();
-    finalizeStreamingRenderer();
-    // Do not rebuild a response that the user has already been reading. Replacing the
-    // streamed DOM at completion can reflow long answers and make the text appear to
-    // resize/jump even when the wording is effectively the same. Keep the exact live
-    // rendering in place; only use the completed payload when no text was streamed.
-    if (!streamHasText && !streamedAnswerText) {
+    // Do not rebuild or reformat an answer at completion. The exact text already
+    // printed by the provider remains on screen and in this turn's transcript.
+    if (!streamedAnswerText && !String(activeAnswerTurn?.answer || '').trim()) {
       renderPlainAnswer(msg.answer || 'No answer returned.');
     } else if (activeAnswerTurn) {
-      // Store a clean copy for transcript/PDF persistence without touching the pixels
-      // already on screen. Any explicit backend format-repair has already arrived as
-      // a `replace` event and is therefore already reflected in streamedAnswerText.
-      activeAnswerTurn.answer = cleanStoredAnswer(streamedAnswerText);
+      activeAnswerTurn.answer = streamedAnswerText || activeAnswerTurn.answer;
     }
-    if (activeLatencyTrace) {
-      updateLatencyLabel(activeLatencyTrace, msg);
-      console.log(lastLatencyTraceText);
-      feedback('Latency trace ready — click the timing line to copy it.');
-    } else if (msg.model) {
+    if (msg.model) {
       const first = msg.latency?.firstTokenMs;
       modelLabel.textContent = `${msg.model}${Number.isFinite(first) ? ` · first ${first}ms` : ''}`;
     }
@@ -1100,19 +865,14 @@ window.electronAPI.onLLMStream(msg => {
     activeStreamRequestId = null;
     if (reanswerBtn) reanswerBtn.disabled=!lastSubmittedPrompt?.text;
   } else if (msg.type === 'error') {
-    flushPendingAnswerDelta();
-    finalizeStreamingRenderer();
     const errorText = `LLM error: ${msg.error || 'Request failed'}`;
-    if (!streamHasText && !streamedAnswerText) {
-      streamedAnswerText = errorText;
-      renderPlainAnswer(errorText);
-      if (activeAnswerTurn) activeAnswerTurn.answer = errorText;
-    } else if (activeAnswerTurn) {
-      // Preserve every word already shown. Surface the failure only in the status label.
-      activeAnswerTurn.answer = cleanStoredAnswer(streamedAnswerText);
-    }
-    if (activeAnswerTurn) activeAnswerTurn.answeredAt = Date.now();
-    modelLabel.textContent = streamHasText ? 'stream interrupted' : '';
+    streamedAnswerText = errorText;
+    if (activeAnswerTurn?.responseElement) {
+      activeAnswerTurn.answer = errorText;
+      activeAnswerTurn.answeredAt = Date.now();
+      activeAnswerTurn.responseElement.textContent = errorText;
+    } else answerEl.textContent = errorText;
+    modelLabel.textContent = '';
     ensureCurrentTurnReadingSlot(activeAnswerTurn);
     activeStreamRequestId = null;
     if (reanswerBtn) reanswerBtn.disabled=!lastSubmittedPrompt?.text;
@@ -1134,7 +894,7 @@ window.electronAPI.onTranscript(({text,isFinal}) => {
   if (isFinal) {
     const now = Date.now();
     const withinMergeWindow = lastSendWasAuto && lastAutoSentText && (now - lastAutoSentAt) <= AUTO_MERGE_WINDOW_MS;
-    const shouldMerge = autoSend && withinMergeWindow && !streamHasText;
+    const shouldMerge = autoSend && withinMergeWindow && !hasVisibleActiveAnswer();
 
     if (shouldMerge) {
       // Any speech that resumes during the continuation window belongs to the same auto question.

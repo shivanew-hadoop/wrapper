@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
 const accountEmail=$('accountEmail'),accountCredits=$('accountCredits'),licenseStatus=$('licenseStatus'),portalBtn=$('portalBtn');
-const resumeInput=$('resume'),jdInput=$('jd'),jdText=$('jdText'),years=$('years'),role=$('role'),answerProvider=$('answerProvider'),prepareBtn=$('prepareBtn');
+const resumeInput=$('resume'),jdInput=$('jd'),userInstructions=$('userInstructions'),years=$('years'),role=$('role'),answerProvider=$('answerProvider'),prepareBtn=$('prepareBtn');
 const removeResume=$('removeResume'),removeJd=$('removeJd');
 const progress=$('progress'),progressTitle=$('progressTitle'),progressText=$('progressText'),errorEl=$('error');
 const MAX_FILE_BYTES=6*1024*1024;let currentAccount=null,previousSetup=null;
@@ -10,8 +10,8 @@ async function loadPreviousSetup(){
   const result=await window.electronAPI.getSetupDefaults?.().catch(()=>null);previousSetup=result?.defaults||null;if(!previousSetup)return;
   if(previousSetup.yearsExperience!==undefined&&previousSetup.yearsExperience!==null)years.value=String(previousSetup.yearsExperience);
   if(previousSetup.role!==undefined)role.value=String(previousSetup.role||'');
-  if(previousSetup.answerProvider){const saved=String(previousSetup.answerProvider);answerProvider.value=['openai','terra','luna','gpt4o','gpt4omini','gemini','cerebras'].includes(saved)?saved:'openai';}
-  if(previousSetup.jdText)jdText.value=String(previousSetup.jdText);
+  if(previousSetup.answerProvider){const saved=String(previousSetup.answerProvider);answerProvider.value=['openai','terra','luna','cerebras'].includes(saved)?saved:'openai';}
+  if(previousSetup.userInstructions)userInstructions.value=String(previousSetup.userInstructions);
   if(previousSetup.resume?.name){$('resumeMeta').textContent=`Previous resume ready · ${previousSetup.resume.name} · choose a file only to replace it`;removeResume.classList.remove('hidden');}
   if(previousSetup.jd?.name){$('jdMeta').textContent=`Previous JD ready · ${previousSetup.jd.name} · choose a file only to replace it`;removeJd.classList.remove('hidden');}
 }
@@ -25,12 +25,12 @@ portalBtn.onclick=()=>window.electronAPI.openCustomerPortal();loadAccount();
 
 function fileMeta(input,target,removeButton,emptyText){const f=input.files?.[0];if(f){target.textContent=`${f.name} · ${(f.size/1024).toFixed(0)} KB`;removeButton.classList.remove('hidden');}else if(!removeButton.dataset.saved){target.textContent=emptyText;removeButton.classList.add('hidden');}}
 resumeInput.addEventListener('change',()=>fileMeta(resumeInput,$('resumeMeta'),removeResume,'Required · max 6 MB'));
-jdInput.addEventListener('change',()=>fileMeta(jdInput,$('jdMeta'),removeJd,'Optional · upload a JD or paste it below.'));
+jdInput.addEventListener('change',()=>fileMeta(jdInput,$('jdMeta'),removeJd,'Optional · upload a JD file.'));
 async function removeFile(kind){
   const isResume=kind==='resume',input=isResume?resumeInput:jdInput,meta=$(isResume?'resumeMeta':'jdMeta'),button=isResume?removeResume:removeJd;
   input.value='';
   if(previousSetup)previousSetup[kind]=null;
-  meta.textContent=isResume?'Required · max 6 MB':'Optional · upload a JD or paste it below.';
+  meta.textContent=isResume?'Required · max 6 MB':'Optional · upload a JD file.';
   button.classList.add('hidden');
   await window.electronAPI.clearSetupDefaultField?.(kind).catch(()=>null);
   showError('');
@@ -39,7 +39,7 @@ removeResume.onclick=()=>removeFile('resume');
 removeJd.onclick=()=>removeFile('jd');
 async function fileToPayload(file){if(!file)return null;if(file.size>MAX_FILE_BYTES)throw new Error(`${file.name} is larger than 6 MB.`);const bytes=new Uint8Array(await file.arrayBuffer());let binary='';const block=0x8000;for(let i=0;i<bytes.length;i+=block)binary+=String.fromCharCode(...bytes.subarray(i,i+block));return{name:file.name,type:file.type||'application/octet-stream',base64:btoa(binary)}}
 
-prepareBtn.onclick=async()=>{showError('');const resumeFile=resumeInput.files?.[0],jdFile=jdInput.files?.[0],pastedJd=jdText.value.trim();
+prepareBtn.onclick=async()=>{showError('');const resumeFile=resumeInput.files?.[0],jdFile=jdInput.files?.[0],instructions=userInstructions.value.trim();
   if(!currentAccount)return showError('Launch Topper from the customer portal first.');
   if(!resumeFile&&!previousSetup?.resume)return showError('Upload your resume. Common formats including PDF, DOC, DOCX, RTF and text-based files are supported.');
   prepareBtn.disabled=true;progress.classList.remove('hidden');progressTitle.textContent='Preparing interview context…';progressText.textContent='Reading resume and optional job description…';
@@ -47,7 +47,7 @@ prepareBtn.onclick=async()=>{showError('');const resumeFile=resumeInput.files?.[
     const[newResume,newJd]=await Promise.all([fileToPayload(resumeFile),fileToPayload(jdFile)]);
     const resume=newResume||previousSetup?.resume||null,jd=newJd||previousSetup?.jd||null;
     progressText.textContent='Parsing, auto-detecting experience/role, summarizing and creating vectors…';
-    const result=await window.electronAPI.prepareContext({licenseEmail:currentAccount.email,resume,jd,jdText:pastedJd,yearsExperience:null,role:'',answerProvider:answerProvider.value});
+    const result=await window.electronAPI.prepareContext({licenseEmail:currentAccount.email,resume,jd,userInstructions:instructions,yearsExperience:null,role:'',answerProvider:answerProvider.value});
     if(!result.success)throw new Error(result.error||'Context preparation failed.');
     const inferredYears=result.profile?.yearsExperience;
     const inferredRole=String(result.profile?.targetRole||'');
