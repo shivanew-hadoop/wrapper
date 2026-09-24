@@ -422,23 +422,32 @@ function retrieveChunks(session, queryEmbedding, query) {
 }
 function inferYearsExperienceFromResume(resumeText) {
   const text=normalizeText(resumeText);
-  // Prefer an explicit total when the candidate states it directly.
-  const explicit=[...text.matchAll(/\b(\d{1,2}(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:overall\s+|total\s+|professional\s+|industry\s+)?experience\b/gi)]
-    .map(match=>Number(match[1])).filter(value=>Number.isFinite(value)&&value>=0&&value<=60);
+  if(!text)return null;
+
+  const explicitPatterns=[
+    /\b(\d{1,2}(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:overall\s+|total\s+|professional\s+|industry\s+)?experience\b/gi,
+    /\b(?:total|overall|professional|industry)\s+experience\s*[:\-–—]?\s*(\d{1,2}(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)\b/gi,
+    /^(?:total\s+)?experience\s*[:\-–—]?\s*(\d{1,2}(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)\s*$/gim
+  ];
+  const explicit=[];
+  for(const pattern of explicitPatterns){
+    for(const match of text.matchAll(pattern)){
+      const value=Number(match[1]);
+      if(Number.isFinite(value)&&value>=0&&value<=60)explicit.push(value);
+    }
+  }
   if(explicit.length)return Math.max(...explicit);
 
-  // Otherwise calculate the span from the earliest employment/project start to
-  // the latest end/current date. Education date ranges are deliberately ignored.
-  const monthNames='Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?';
+  const monthNames='Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Sept(?:ember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?';
   const dateToken=`(?:(?:${monthNames})[\\s,./-]*\\d{4}|(?:0?[1-9]|1[0-2])[/-]\\d{4}|(?:19|20)\\d{2})`;
-  const endToken=`(?:${dateToken}|Present|Current|Till\\s+Date|To\\s+Date|Now)`;
+  const endToken=`(?:${dateToken}|Present|Current|Till\\s+Date|To\\s+Date|Now|Ongoing)`;
   const rangeRe=new RegExp(`(${dateToken})\\s*(?:-|–|—|to|through|till|until)\\s*(${endToken})`,'gi');
   const monthMap={jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
   const current=new Date();
   const currentMonth=(current.getUTCFullYear()*12)+current.getUTCMonth();
   const parsePoint=(value,isEnd=false)=>{
     const raw=String(value||'').trim();
-    if(/^(?:present|current|till\s+date|to\s+date|now)$/i.test(raw))return currentMonth;
+    if(/^(?:present|current|till\s+date|to\s+date|now|ongoing)$/i.test(raw))return currentMonth;
     let m=raw.match(/^(0?[1-9]|1[0-2])[/-]((?:19|20)\d{2})$/);
     if(m)return (Number(m[2])*12)+(Number(m[1])-1);
     m=raw.match(new RegExp(`^(${monthNames})[\\s,./-]*((?:19|20)\\d{2})$`,'i'));
@@ -448,37 +457,40 @@ function inferYearsExperienceFromResume(resumeText) {
     return null;
   };
 
-  let earliest=null,latest=null;
-  for(const match of text.matchAll(rangeRe)){
-    // Classify the date range using its own line plus the immediately preceding line.
-    // This avoids counting education/certification ranges while still accepting the
-    // first work range that appears directly after an Education section.
-    const idx=match.index||0;
-    const lineStart=text.lastIndexOf('\n',Math.max(0,idx-1))+1;
-    const lineEnd=text.indexOf('\n',idx);
-    const currentLine=text.slice(lineStart,lineEnd<0?text.length:lineEnd);
-    const prevEnd=Math.max(0,lineStart-1);
-    const prevStart=text.lastIndexOf('\n',Math.max(0,prevEnd-1))+1;
-    const previousLine=text.slice(prevStart,prevEnd);
-    const localContext=`${previousLine} ${currentLine}`;
-    const workHint=/\b(?:experience|employment|work|professional|project|client|company|engineer|developer|architect|consultant|analyst|tester|sdet|lead|manager|specialist|administrator|intern|associate|role|position)\b/i.test(localContext);
-    const nonWorkHint=/\b(?:education|university|college|school|bachelor|master(?:'s)?|degree|gpa|academic|certification|certificate|course|training)\b/i.test(localContext);
-    if(nonWorkHint&&!workHint)continue;
-    const startMonth=parsePoint(match[1],false),endMonth=parsePoint(match[2],true);
-    if(!Number.isFinite(startMonth)||!Number.isFinite(endMonth)||endMonth<startMonth)continue;
-    const duration=endMonth-startMonth+1;
-    if(duration>60*12)continue;
-    earliest=earliest===null?startMonth:Math.min(earliest,startMonth);
-    latest=latest===null?endMonth:Math.max(latest,endMonth);
-  }
-  if(earliest!==null&&latest!==null&&latest>=earliest){
-    const years=(latest-earliest+1)/12;
-    if(years>=0&&years<=60){
-      const rounded=Math.round(years*10)/10;
-      return Math.abs(rounded-Math.round(rounded))<0.05?Math.round(rounded):rounded;
+  const lines=text.split('\n');
+  const workRanges=[];
+  const fallbackRanges=[];
+  let section='';
+  for(let lineIndex=0;lineIndex<lines.length;lineIndex++){
+    const line=lines[lineIndex].trim();
+    if(!line)continue;
+    const heading=line.toLowerCase().replace(/[:\-–—]+$/,'').trim();
+    if(/^(?:education|academic|academics|certifications?|training|courses?|qualifications?)$/.test(heading))section='nonwork';
+    else if(/^(?:professional\s+)?(?:experience|work\s+experience|employment|career\s+history|project\s+experience|projects?|client\s+projects?)$/.test(heading))section='work';
+
+    rangeRe.lastIndex=0;
+    for(const match of line.matchAll(rangeRe)){
+      const startMonth=parsePoint(match[1],false),endMonth=parsePoint(match[2],true);
+      if(!Number.isFinite(startMonth)||!Number.isFinite(endMonth)||endMonth<startMonth)continue;
+      if(endMonth-startMonth>60*12)continue;
+      const around=lines.slice(Math.max(0,lineIndex-2),Math.min(lines.length,lineIndex+2)).join(' ');
+      const workHint=/\b(?:project|client|company|employer|experience|employment|work|engineer|developer|architect|consultant|analyst|tester|sdet|lead|manager|specialist|administrator|intern|associate|role|position)\b/i.test(around);
+      const nonWorkHint=/\b(?:education|university|college|school|bachelor|master(?:'s)?|degree|gpa|academic|certification|certificate|course|training)\b/i.test(around);
+      const item={start:startMonth,end:endMonth};
+      if(section==='nonwork')continue;
+      if(section==='work'||workHint)workRanges.push(item);
+      else if(!nonWorkHint)fallbackRanges.push(item);
     }
   }
-  return null;
+  const ranges=workRanges.length?workRanges:fallbackRanges;
+  if(!ranges.length)return null;
+  const earliest=Math.min(...ranges.map(item=>item.start));
+  const latest=Math.max(...ranges.map(item=>item.end));
+  if(!Number.isFinite(earliest)||!Number.isFinite(latest)||latest<earliest)return null;
+  const years=(latest-earliest+1)/12;
+  if(years<0||years>60)return null;
+  const rounded=Math.round(years*10)/10;
+  return Math.abs(rounded-Math.round(rounded))<0.05?Math.round(rounded):rounded;
 }
 function normalizeRoleTitle(value) {
   let text=String(value||'')
@@ -515,16 +527,22 @@ function extractExplicitRoleFromResume(documentText) {
   if(!text)return '';
   const lines=text.split('\n').map(line=>line.trim()).filter(Boolean);
   const labelled=/\b(?:current\s+)?(?:role|job\s+title|title|designation|position)\s*[:\-–—]\s*(.+)$/i;
-  for(const line of lines.slice(0,180)){
+  for(const line of lines.slice(0,220)){
     const label=line.match(labelled);
     if(!label)continue;
     const candidate=compactRoleCandidate(label[1]);
     if(candidate)return candidate;
   }
-  // Resume titles are normally near the header or first/current employment entry.
-  for(const line of lines.slice(0,90)){
-    const candidate=compactRoleCandidate(line);
-    if(candidate)return candidate;
+  for(const line of lines.slice(0,35)){
+    if(/\b(?:summary|profile|objective|responsibilit|skills?|technolog|expertise|experience\s+in|worked\s+with|proficient|knowledge)\b/i.test(line))continue;
+    const stripped=line.replace(/\s+[|•·]\s+.*$/,'').trim();
+    const words=stripped.split(/\s+/).filter(Boolean);
+    if(words.length<1||words.length>9||/[.!?;]/.test(stripped))continue;
+    const candidate=compactRoleCandidate(stripped);
+    if(!candidate)continue;
+    const comparable=value=>normalizeText(value).toLowerCase().replace(/[^a-z0-9+#.]+/g,' ').trim();
+    const rawComparable=comparable(stripped),candidateComparable=comparable(candidate);
+    if(rawComparable===candidateComparable||rawComparable.startsWith(`${candidateComparable} `)||rawComparable.endsWith(` ${candidateComparable}`))return candidate;
   }
   return '';
 }
@@ -538,7 +556,7 @@ function extractExplicitRoleFromJD(documentText) {
     /\b(?:opening|opportunity)\s+for\s+(?:an?\s+)?(.+)$/i,
     /\b(?:we\s+are\s+(?:looking|hiring|seeking)\s+for|looking\s+for|seeking)\s+(?:an?\s+)?(.+?)\s*(?:to\s+join|with\s+|who\s+|$)/i
   ];
-  for(const line of lines.slice(0,160)){
+  for(const line of lines.slice(0,180)){
     for(const pattern of labelled){
       const match=line.match(pattern);
       if(!match)continue;
@@ -546,10 +564,18 @@ function extractExplicitRoleFromJD(documentText) {
       if(candidate)return candidate;
     }
   }
-  // Many JDs start with a bare title line before "About the role"/responsibilities.
+  // Bare JD titles are accepted only when the line itself looks like a heading/title.
+  // Do not extract "developer" from a responsibility sentence such as "work with developers".
   for(const line of lines.slice(0,45)){
-    const candidate=compactRoleCandidate(line);
-    if(candidate)return candidate;
+    if(/\b(?:responsibilit|requirement|qualification|experience|must|should|will|work with|collaborat|develop|design|implement|build|maintain|skills?)\b/i.test(line))continue;
+    const stripped=line.replace(/\s+[|•·]\s+.*$/,'').trim();
+    const words=stripped.split(/\s+/).filter(Boolean);
+    if(words.length<1||words.length>9||/[.!?;]/.test(stripped))continue;
+    const candidate=compactRoleCandidate(stripped);
+    if(!candidate)continue;
+    const comparable=value=>normalizeText(value).toLowerCase().replace(/[^a-z0-9+#.]+/g,' ').trim();
+    const rawComparable=comparable(stripped),candidateComparable=comparable(candidate);
+    if(rawComparable===candidateComparable||rawComparable.startsWith(`${candidateComparable} `)||rawComparable.endsWith(` ${candidateComparable}`))return candidate;
   }
   return '';
 }
@@ -585,15 +611,99 @@ function inferRoleFromSkills(resumeText,jdText) {
   if(frontend>=2&&backend>=2)return 'Full Stack Developer';
   return bestScore>=2?best:'';
 }
+function inferRoleFromJDEvidence(jdText) {
+  const text=normalizeText(jdText);
+  if(!text)return '';
+  const q=text.toLowerCase();
+  const count=pattern=>(q.match(pattern)||[]).length;
+  const exact=[
+    ['AI/ML Architect', /\b(?:ai\s*[/&-]?\s*ml|artificial intelligence(?:\s+and\s+machine learning)?)\s+architect\b/g],
+    ['Machine Learning Architect', /\bmachine learning architect\b/g],
+    ['Azure Solution Architect', /\b(?:azure\s+(?:solution|solutions|cloud)\s+architect|solution\s+architect\s+[-–—:,]?\s*azure)\b/g],
+    ['AWS Solution Architect', /\b(?:aws\s+(?:solution|solutions|cloud)\s+architect|solution\s+architect\s+[-–—:,]?\s*aws)\b/g],
+    ['Solution Architect', /\bsolutions? architect\b/g],
+    ['Data Architect', /\bdata architect\b/g],
+    ['Data Analyst', /\bdata analyst\b/g],
+    ['Business Analyst', /\bbusiness analyst\b/g],
+    ['Data Engineer', /\bdata engineer\b/g],
+    ['Data Scientist', /\bdata scientist\b/g],
+    ['Machine Learning Engineer', /\bmachine learning engineer\b/g],
+    ['AI/ML Engineer', /\b(?:ai\s*[/&-]?\s*ml|ai|artificial intelligence)\s+engineer\b/g],
+    ['Full Stack Developer', /\bfull[- ]?stack (?:developer|engineer)\b/g],
+    ['Backend Developer', /\bback[- ]?end (?:developer|engineer)\b/g],
+    ['Frontend Developer', /\bfront[- ]?end (?:developer|engineer)\b/g],
+    ['Java Developer', /\bjava developer\b/g],
+    ['.NET Developer', /\b(?:\.net|dotnet) developer\b/g],
+    ['Python Developer', /\bpython developer\b/g],
+    ['Power BI Developer', /\bpower\s*bi developer\b/g],
+    ['DevOps Engineer', /\bdevops engineer\b/g],
+    ['QA Automation Engineer', /\b(?:qa automation|automation test|test automation) engineer\b/g],
+    ['Software Engineer', /\bsoftware engineer\b/g],
+    ['Software Developer', /\bsoftware developer\b/g]
+  ];
+  let exactBest='',exactScore=0;
+  for(const [title,pattern] of exact){
+    const score=count(pattern);
+    if(score>exactScore){exactScore=score;exactBest=title;}
+  }
+  if(exactScore>0)return exactBest;
+
+  const roleCounts={architect:count(/\barchitect\b/g),analyst:count(/\banalyst\b/g),developer:count(/\bdeveloper\b/g),engineer:count(/\bengineer\b/g),scientist:count(/\bscientist\b/g),tester:count(/\btester\b/g),consultant:count(/\bconsultant\b/g),administrator:count(/\badministrator\b/g)};
+  const family=Object.entries(roleCounts).sort((a,b)=>b[1]-a[1])[0];
+  const familyName=family&&family[1]>0?family[0]:'';
+  const ai=count(/\b(?:artificial intelligence|machine learning|generative ai|genai|llm|large language model|deep learning|mlops|ai|ml)\b/g);
+  const data=count(/\b(?:data|analytics?|sql|warehouse|lakehouse|etl|databricks|snowflake|spark)\b/g);
+  const azure=count(/\b(?:azure|microsoft azure|azure data factory|adf)\b/g);
+  const aws=count(/\b(?:aws|amazon web services)\b/g);
+  const devops=count(/\b(?:devops|kubernetes|terraform|jenkins|ansible|ci\/?cd|helm)\b/g);
+  const qa=count(/\b(?:selenium|playwright|cypress|testng|cucumber|automation testing|test automation|qa)\b/g);
+  const java=count(/\b(?:java|spring boot|spring|hibernate)\b/g);
+  const dotnet=count(/\b(?:\.net|dotnet|asp\.net|c#|entity framework)\b/g);
+  const python=count(/\b(?:python|django|fastapi|flask)\b/g);
+  const powerbi=count(/\b(?:power\s*bi|dax|power query)\b/g);
+  const frontend=count(/\b(?:react|angular|vue|frontend|front-end)\b/g);
+  const backend=count(/\b(?:spring boot|node\.js|nodejs|express|django|fastapi|asp\.net|backend|back-end)\b/g);
+
+  if(familyName==='architect'){
+    if(ai>=2)return 'AI/ML Architect';
+    if(data>=3)return 'Data Architect';
+    if(azure>=1)return 'Azure Solution Architect';
+    if(aws>=1)return 'AWS Solution Architect';
+    return 'Solution Architect';
+  }
+  if(familyName==='analyst')return (data>=2||powerbi>=1)?'Data Analyst':'Business Analyst';
+  if(familyName==='scientist')return 'Data Scientist';
+  if(familyName==='tester')return qa>=1?'QA Automation Engineer':'QA Engineer';
+  if(familyName==='administrator')return azure>=1?'Azure Administrator':(aws>=1?'Cloud Administrator':'System Administrator');
+  if(familyName==='developer'){
+    if(ai>=3)return 'AI/ML Developer';
+    if(powerbi>=2)return 'Power BI Developer';
+    if(frontend>=2&&backend>=2)return 'Full Stack Developer';
+    if(java>=2)return 'Java Developer';
+    if(dotnet>=2)return '.NET Developer';
+    if(python>=2)return 'Python Developer';
+    if(frontend>=2)return 'Frontend Developer';
+    if(backend>=2)return 'Backend Developer';
+    return 'Software Developer';
+  }
+  if(familyName==='engineer'){
+    if(ai>=3)return 'AI/ML Engineer';
+    if(devops>=2)return 'DevOps Engineer';
+    if(qa>=2)return 'QA Automation Engineer';
+    if(data>=4)return 'Data Engineer';
+    if(azure>=2||aws>=2)return 'Cloud Engineer';
+    return 'Software Engineer';
+  }
+  if(familyName==='consultant')return azure>=1?'Azure Consultant':(data>=2?'Data Consultant':'Technical Consultant');
+  return inferRoleFromSkills('',text);
+}
+
 function inferTargetRoleFromDocuments(resumeText,jdText) {
-  // Exact priority requested by the setup flow:
-  // 1) explicit role/title in resume; 2) explicit title/role in JD;
-  // 3) infer a concise role from JD; 4) only if no useful JD exists, infer from resume.
   const resumeRole=extractExplicitRoleFromResume(resumeText);
   if(resumeRole)return resumeRole;
   const jdRole=extractExplicitRoleFromJD(jdText);
   if(jdRole)return jdRole;
-  if(normalizeText(jdText))return inferRoleFromSkills('',jdText);
+  if(normalizeText(jdText))return inferRoleFromJDEvidence(jdText)||inferRoleFromSkills('',jdText);
   return inferRoleFromSkills(resumeText,'');
 }
 function fallbackProfile(resumeText, jdText, yearsExperience, role) {
@@ -614,7 +724,7 @@ async function generateStructuredProfile(resumeText, jdText, yearsExperience, ro
   const deterministicYears=suppliedYears===null?inferYearsExperienceFromResume(resumeText):suppliedYears;
   const explicitResumeRole=role?'':extractExplicitRoleFromResume(resumeText);
   const explicitJdRole=(role||explicitResumeRole)?'':extractExplicitRoleFromJD(jdText);
-  const inferredJdRole=(!role&&!explicitResumeRole&&!explicitJdRole&&normalizeText(jdText))?inferRoleFromSkills('',jdText):'';
+  const inferredJdRole=(!role&&!explicitResumeRole&&!explicitJdRole&&normalizeText(jdText))?(inferRoleFromJDEvidence(jdText)||inferRoleFromSkills('',jdText)):'';
   const inferredResumeRole=(!role&&!explicitResumeRole&&!explicitJdRole&&!normalizeText(jdText))?inferRoleFromSkills(resumeText,''):'';
   const deterministicRole=role||explicitResumeRole||explicitJdRole||inferredJdRole||inferredResumeRole;
   try {
@@ -645,7 +755,7 @@ Return JSON with keys candidateSummary (max 1800 chars), jdSummary (max 1200 cha
     const parsedYears=(rawParsedYears===null||rawParsedYears===undefined||String(rawParsedYears).trim()==='')?NaN:Number(rawParsedYears);
     const resolvedYears=Number.isFinite(suppliedYears)?suppliedYears:(Number.isFinite(deterministicYears)?deterministicYears:(Number.isFinite(parsedYears)&&parsedYears>=0&&parsedYears<=60?parsedYears:fallback.yearsExperience));
     const parsedRole=compactRoleCandidate(parsed.targetRole || '') || normalizeRoleTitle(parsed.targetRole || '');
-    const resolvedRole=normalizeRoleTitle(role||explicitResumeRole||explicitJdRole||parsedRole||inferredJdRole||inferredResumeRole||fallback.targetRole||'Software Engineer');
+    const resolvedRole=normalizeRoleTitle(deterministicRole||parsedRole||fallback.targetRole||'Software Engineer');
     return {
       candidateSummary:normalizeText(parsed.candidateSummary || fallback.candidateSummary).slice(0, 2200),
       jdSummary:normalizeText(parsed.jdSummary || fallback.jdSummary).slice(0, 1600),
@@ -678,9 +788,37 @@ function isContextualFollowup(question) {
   // Very short fragments such as "why?", "how?", "example?" normally depend on the previous turn.
   return words.length <= 3;
 }
+function isInterviewLogisticsQuestion(value) {
+  const q=normalizeText(value).toLowerCase().replace(/[?.!,;:]+/g,' ').replace(/\s+/g,' ').trim();
+  if(!q)return true;
+  const patterns=[
+    /\byou(?:'re| are)\b.{0,25}\b(?:able to )?(?:hear|see) (?:me|us)\b/,
+    /\b(?:for (?:the )?sake of clarification|just for clarification)\b/,
+    /^\s*(?:can|could|would) you just(?: okay)?\s*$/,
+    /\b(?:can|could|would|will|do|are) you\b.{0,35}\b(?:hear|see) me\b/,
+    /\b(?:are|can|could) you\b.{0,25}\b(?:able to )?(?:hear|see) (?:me|us)\b/,
+    /\b(?:turn|switch) (?:on|off)\b.{0,20}\b(?:camera|video|mic|microphone)\b/,
+    /\b(?:camera|video|mic|microphone)\b.{0,20}\b(?:on|off|working)\b/,
+    /\b(?:show|display|hold up)\b.{0,25}\b(?:id|identity card|identification|passport|license)\b/,
+    /\b(?:blurred|blurry|not clear|camera clarity|video clarity)\b/,
+    /\b(?:take|move|go|come)\b.{0,18}\b(?:back|closer|forward)\b.{0,12}\b(?:step|little|bit)?\b/,
+    /\b(?:hold on|wait a moment|one moment|just a moment)\b/,
+    /\b(?:can|could|shall|should) (?:you|we)\b.{0,18}\bstart (?:now|the interview|the call)\b/,
+    /\b(?:ready to start|shall we start|can we start)\b/,
+    /\b(?:mute|unmute|share (?:your )?screen|screen share|join the call|rejoin|connection|network issue)\b/
+  ];
+  return patterns.some(pattern=>pattern.test(q));
+}
+function collapseQuestionSpeechNoise(value) {
+  return normalizeText(value)
+    .replace(/\b(what|why|how|can|could|would|do|did|are|is|okay|yeah|so)\s+\1\b/gi,'$1')
+    .replace(/^(?:(?:hi|hello|thanks?|thank you|okay|alright|right|yeah|yes|fine)[,.:;]?\s+)+/i,'')
+    .trim();
+}
+
 function cleanIntentLead(value) {
-  let text=normalizeText(value)
-    .replace(/^(?:(?:okay|alright|right|well|so|and|then|now|you know|basically|actually)[,.:;]?\s+)+/i,'')
+  let text=collapseQuestionSpeechNoise(value)
+    .replace(/^(?:(?:okay|alright|right|well|so|and|then|now|you know|basically|actually|yeah|yes)[,.:;]?\s+)+/i,'')
     .replace(/\s+([?.!,;:])/g,'$1')
     .trim();
   if(text&&!/[?.!]$/.test(text))text+='?';
@@ -690,22 +828,22 @@ function extractMultipleQuestionIntents(rawQuestion) {
   const raw=normalizeText(rawQuestion);
   if(!raw)return [];
   const normalized=raw.replace(/\s+/g,' ').trim();
-  const starter=/^(?:have you|do you|did you|can you|could you|would you|will you|are you|were you|what|why|how|when|where|which|who|describe|explain|define|compare|tell me|walk me through|write|implement|find|solve|design|draw|create|show|debug|fix|calculate|return|print)\b/i;
-  const candidates=normalized
-    .split(/(?<=[?!])\s+|(?<=\.)\s+(?=(?:and\s+|also\s+|then\s+|next\s+|second(?:ly)?\s+)?(?:have you|do you|did you|can you|could you|would you|will you|are you|were you|what|why|how|when|where|which|who|describe|explain|define|compare|tell me|walk me through|write|implement|find|solve|design|draw|create|show|debug|fix|calculate|return|print)\b)/i)
-    .map(part=>cleanIntentLead(part))
-    .filter(Boolean);
+  const starter=/\b(?:have you|do you|did you|can you|could you|would you|will you|are you|were you|what|why|how|when|where|which|who|describe|explain|define|compare|tell me|walk me through|brief(?: me)?(?: about)?|write|implement|find|solve|design|draw|create|show|debug|fix|calculate|return|print)\b/i;
+  const pieces=normalized.split(/(?<=[.?!])\s+/);
   const requests=[];
-  for(const candidate of candidates){
-    const clean=candidate.replace(/^(?:and|also|then|next|second(?:ly)?|one more thing)[,.:;]?\s+/i,'').trim();
-    if(starter.test(clean)||/[?]$/.test(clean))requests.push(clean);
+  for(const piece of pieces){
+    let clean=collapseQuestionSpeechNoise(piece).replace(/^(?:and|also|then|next|second(?:ly)?|one more thing)[,.:;]?\s+/i,'').trim();
+    if(!clean)continue;
+    const match=clean.match(starter);
+    if(match&&Number.isFinite(match.index))clean=clean.slice(match.index);
+    else if(!/[?]$/.test(clean))continue;
+    clean=cleanIntentLead(clean);
+    if(!clean||isInterviewLogisticsQuestion(clean))continue;
+    const key=clean.toLowerCase().replace(/[^a-z0-9+#.]+/g,' ').trim();
+    if(requests.some(item=>item.key===key))continue;
+    requests.push({text:clean,key});
   }
-  if(requests.length<=1){
-    const pieces=normalized.split(/\s+(?:and\s+then|and\s+also|and|also|then|next|second(?:ly)?|plus)\s+(?=(?:what|why|how|when|where|which|who|have you|do you|did you|can you|could you|would you|will you|are you|were you|describe|explain|define|compare|tell me|walk me through|write|implement|find|solve|design|draw|create|show|debug|fix)\b)/i)
-      .map(part=>cleanIntentLead(part)).filter(Boolean);
-    if(pieces.length>=2)return pieces.slice(0,3);
-  }
-  return requests.length>=2?requests.slice(0,3):[];
+  return requests.map(item=>item.text).slice(0,4);
 }
 function questionTerms(value) {
   const stop=new Set(['what','which','why','how','when','where','who','is','are','was','were','do','does','did','can','could','would','should','will','you','your','we','our','i','a','an','the','and','or','to','of','in','on','for','with','this','that','it','these','those','have','has','had','tell','me','explain','describe','please','then','also']);
@@ -715,6 +853,7 @@ function multiQuestionsRelated(parts) {
   if(!Array.isArray(parts)||parts.length<2)return false;
   for(let i=1;i<parts.length;i++){
     if(/^\s*(?:and\s+)?(?:how|why|where|when|what)\b.*\b(?:it|that|this|same|those|these)\b/i.test(parts[i]))return true;
+    if(/^\s*(?:and\s+)?(?:why|how|example|where|when)\??\s*$/i.test(parts[i]))return true;
   }
   const base=questionTerms(parts[0]);
   return parts.slice(1).some(part=>[...questionTerms(part)].some(term=>base.has(term)));
@@ -729,42 +868,21 @@ function parseMultiQuestionIntent(value) {
 function reframeQuestionIntent(rawQuestion) {
   const raw=normalizeText(rawQuestion);
   if(!raw)return '';
-
-  const multi=extractMultipleQuestionIntents(raw);
-  if(multi.length>=2){
-    const relation=multiQuestionsRelated(multi)?'RELATED':'DISTINCT';
-    return `MULTI_QUESTION: ${relation}\n${multi.map((item,index)=>`Question ${index+1}: ${item}`).join('\n')}`.slice(0,3000);
+  const requests=extractMultipleQuestionIntents(raw);
+  if(requests.length>=2){
+    const relation=multiQuestionsRelated(requests)?'RELATED':'DISTINCT';
+    return `MULTI_QUESTION: ${relation}\n${requests.map((item,index)=>`Question ${index+1}: ${item}`).join('\n')}`.slice(0,3000);
   }
-
-  // For a single request, select the last complete interviewer request locally. Multi-question
-  // prompts were already preserved above. This avoids a second LLM/classifier request.
-  const starter=/\b(?:have you|do you|did you|can you|could you|would you|will you|are you|were you|what|why|how|when|where|which|who|describe|explain|define|compare|tell me|walk me through|write|implement|find|solve|design|draw|create|show|debug|fix|calculate|return|print)\b/gi;
-  let candidate='';
-  const lastQuestionMark=raw.lastIndexOf('?');
-  if(lastQuestionMark>=0){
-    const priorBoundary=Math.max(raw.lastIndexOf('?',lastQuestionMark-1),raw.lastIndexOf('.',lastQuestionMark-1),raw.lastIndexOf('!',lastQuestionMark-1));
-    const segment=raw.slice(priorBoundary+1,lastQuestionMark+1);
-    const first=segment.match(starter);
-    candidate=first?segment.slice(segment.toLowerCase().indexOf(first[0].toLowerCase())):segment;
-  } else {
-    const pieces=raw.split(/(?<=[.!])\s+/).map(part=>part.trim()).filter(Boolean);
-    const lastRequest=[...pieces].reverse().find(part=>{starter.lastIndex=0;return starter.test(part);})||raw;
-    starter.lastIndex=0;
-    const matches=Array.from(lastRequest.matchAll(starter)).filter((match,index,all)=>{
-      if(!/^(?:have|do|did|can|could|would|will|are|were) you$/i.test(match[0]))return true;
-      const prior=all.filter(item=>(item.index||0)<(match.index||0)).at(-1);
-      return !prior||!/^(?:what|why|how|when|where|which|who)$/i.test(prior[0]);
-    });
-    const chosen=matches[matches.length-1];
-    candidate=chosen?lastRequest.slice(chosen.index):lastRequest;
+  let candidate=requests[0]||'';
+  if(!candidate){
+    const cleaned=cleanIntentLead(raw);
+    candidate=isInterviewLogisticsQuestion(cleaned)?'':cleaned;
   }
-  candidate=cleanIntentLead(candidate);
-
-  // Resolve a common final-question pronoun from the same utterance. The raw
-  // transcript is still supplied to the answer model as context, never as the
-  // response-format signal.
+  if(!candidate)return '';
   if(/\b(?:that|it)\b/i.test(candidate)){
-    const before=raw.slice(0,Math.max(0,raw.toLowerCase().lastIndexOf(candidate.toLowerCase())));
+    const plainCandidate=candidate.replace(/[?!.]+$/,'');
+    const candidatePos=raw.toLowerCase().lastIndexOf(plainCandidate.toLowerCase());
+    const before=candidatePos>0?raw.slice(0,candidatePos):raw;
     const references=[
       ...before.matchAll(/\b((?:agile|scrum|waterfall)\s+methodolog(?:y|ies))\b/gi),
       ...before.matchAll(/\b([A-Za-z0-9+#./-]+(?:\s+(?:and\s+)?[A-Za-z0-9+#./-]+){0,4}\s+(?:integration|framework|platform|technology|module|process|approach))\b/gi)
@@ -782,17 +900,15 @@ function resolveFollowupIntent(session, question) {
   const turns=session?.turns||[];
   const immediate=turns[turns.length-1];
   if(!immediate||!isContextualFollowup(question))return {isFollowup:false,resolvedQuestion:question,previous:null};
-
-  // Code references such as "alternative code", "same code in Python" or a new
-  // constraint should bind to the nearest recent coding turn, even when one short
-  // conceptual question occurred after it. Normal pronouns ("those", "that", "it")
-  // continue to bind to the immediately previous turn.
   const codeReference=isCodingFollowupQuestion(question)||/\b(?:alternative|same|previous|earlier|above)\s+(?:code|solution|implementation)|\b(?:convert|rewrite)\s+(?:it|that)\b/i.test(normalizeText(question));
   const previous=codeReference?[...turns].reverse().find(isCodeTurn)||immediate:immediate;
+  const referenceRule=codeReference
+    ? 'Use the nearest recent coding turn as the inherited task. Return the requested code/alternative, not explanation alone.'
+    : 'Resolve pronouns and references such as those, them, these, that, this and it from the immediately previous interviewer request/answer. If that context supplies the antecedent, do not ask the interviewer to name it again.';
   return {
     isFollowup:true,
     previous,
-    resolvedQuestion:`Previous interviewer request: ${previous.question}\nPrevious candidate answer/context: ${String(previous.answer||'').slice(0,5000)}\nCurrent follow-up/modifier: ${question}`
+    resolvedQuestion:`${referenceRule}\nPrevious interviewer request: ${previous.question}\nPrevious candidate answer/context: ${String(previous.answer||'').slice(0,5000)}\nCurrent follow-up/modifier: ${question}`
   };
 }
 function wantsExpandedAnswer(prompt) {
