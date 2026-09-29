@@ -64,27 +64,87 @@ let pendingRenderDelta = '';
 let renderFramePending = false;
 let lastSubmittedPrompt = null; // {text,inputSource} for explicit Re-answer
 
+function escapeAnswerHtml(value) {
+  return String(value || '').replace(/[&<>]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]));
+}
+
+function cleanAnswerForHistory(text) {
+  return String(text || '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/^\s*```[^\r\n`]*\s*$/gm, '')
+    .replace(/^\s*```\s*$/gm, '')
+    .replace(/⟦(?:Resume|JD)\s*·\s*[^⟧]+⟧/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function inlineAnswerMarkup(value) {
+  return escapeAnswerHtml(value).replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+}
+
+function richAnswerHtml(text) {
+  const clean = String(text || '')
+    .replace(/⟦(?:Resume|JD)\s*·\s*[^⟧]+⟧/g, '')
+    .replace(/^\s*```[^\r\n`]*\s*$/gm, '')
+    .replace(/^\s*```\s*$/gm, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n');
+  const lines = clean.split('\n');
+  const out = [];
+  let code = [];
+  let inCode = false;
+  const flushCode = () => {
+    if (!code.length) return;
+    out.push(`<pre class="answerCodeEditor"><code>${escapeAnswerHtml(code.join('\n').replace(/^\n+|\n+$/g,''))}</code></pre>`);
+    code = [];
+  };
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^(Complete code|Code snippet):\s*$/i.test(trimmed)) {
+      flushCode();
+      inCode = true;
+      out.push(`<div class="answerCodeLabel">${inlineAnswerMarkup(trimmed)}</div>`);
+      continue;
+    }
+    if (inCode && /^(Sample input|Sample output|Complexity|Time complexity|Space complexity|Explanation|How it works):/i.test(trimmed)) {
+      flushCode();
+      inCode = false;
+    }
+    if (inCode) { code.push(line); continue; }
+    if (!trimmed) { out.push('<div class="answerParagraphGap"></div>'); continue; }
+    if (/^[-•]\s+/.test(trimmed)) out.push(`<div class="answerBullet">${inlineAnswerMarkup(trimmed.replace(/^[-•]\s+/,''))}</div>`);
+    else out.push(`<div class="answerLine">${inlineAnswerMarkup(line)}</div>`);
+  }
+  flushCode();
+  return out.join('');
+}
+
+function renderRichAnswer(target, text) {
+  if (!target) return;
+  target.innerHTML = richAnswerHtml(text);
+}
+
 function flushPendingAnswerDelta() {
   renderFramePending = false;
   if (!pendingRenderDelta) return;
-  const clean = pendingRenderDelta;
+  streamedAnswerText += pendingRenderDelta;
   pendingRenderDelta = '';
-  streamedAnswerText += clean;
   if (!activeAnswerTurn) {
-    answerEl.appendChild(document.createTextNode(clean));
+    renderRichAnswer(answerEl, streamedAnswerText);
     return;
   }
-  activeAnswerTurn.answer = streamedAnswerText;
-  activeAnswerTurn.responseElement.appendChild(document.createTextNode(clean));
+  activeAnswerTurn.answer = cleanAnswerForHistory(streamedAnswerText);
+  renderRichAnswer(activeAnswerTurn.responseElement, streamedAnswerText);
   ensureCurrentTurnReadingSlot(activeAnswerTurn);
 }
 
 function queuePlainAnswerDelta(delta) {
-  const clean = String(delta || '').replace(/\*\*/g, '');
+  const clean = String(delta || '');
   if (!clean) return;
   pendingRenderDelta += clean;
-  // Coalesce token-sized provider events into one browser paint. This does not
-  // delay network/model streaming; first visible paint is the next animation frame.
+  // Formatting is local renderer work only. Provider/network streaming is unchanged;
+  // token events are still coalesced to the next animation frame.
   if (!renderFramePending) {
     renderFramePending = true;
     requestAnimationFrame(flushPendingAnswerDelta);
@@ -208,33 +268,21 @@ function startOrRefreshAnswerTurn({ requestId, question, auto=false, reuseAuto=f
 }
 
 function cleanVisibleAnswer(text) {
-  return String(text || '')
-    .replace(/\*\*/g, '')
-    // Grounding stays internal. Never expose resume/JD source metadata.
-    .replace(/⟦(?:Resume|JD)\s*·\s*[^⟧]+⟧/g, '')
-    // The live overlay is intentionally plain-text. Strip Markdown code-fence
-    // wrappers for every language (```java, ```python, ```js, ...), while
-    // preserving the code itself exactly as readable text.
-    .replace(/^\s*```[^\r\n`]*\s*$/gm, '')
-    .replace(/^\s*```\s*$/gm, '')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  return cleanAnswerForHistory(text);
 }
 
 function renderAnswerWithSourceTags(target, text) {
-  if (!target) return;
-  target.textContent = cleanVisibleAnswer(text);
+  renderRichAnswer(target, text);
 }
 
 function renderPlainAnswer(text) {
-  streamedAnswerText = String(text || '').replace(/\*\*/g, '');
+  streamedAnswerText = String(text || '');
   if (!activeAnswerTurn) {
-    renderAnswerWithSourceTags(answerEl, streamedAnswerText);
+    renderRichAnswer(answerEl, streamedAnswerText);
     return;
   }
-  activeAnswerTurn.answer = cleanVisibleAnswer(streamedAnswerText);
-  renderAnswerWithSourceTags(activeAnswerTurn.responseElement, streamedAnswerText);
+  activeAnswerTurn.answer = cleanAnswerForHistory(streamedAnswerText);
+  renderRichAnswer(activeAnswerTurn.responseElement, streamedAnswerText);
 }
 
 function appendPlainAnswerDelta(delta) {

@@ -1120,3 +1120,26 @@ body { font-family: Arial, "Segoe UI", sans-serif; }
    while it is current, so short and long responses both begin at the same top
    reading position. The reservation collapses when the next turn is created. */
 .currentReadingTurn { box-sizing: border-box; }
+
+/* v14.7.3 interview-readable answer formatting. Visual-only; no network/model latency path changes. */
+.qaResponse { line-height: 1.55; }
+.qaResponse .answerLine { min-height: 1.55em; }
+.qaResponse .answerParagraphGap { height: .72em; }
+.qaResponse strong { font-weight: 750; color: #ffffff; }
+.qaResponse .answerBullet { position: relative; padding-left: 1.15em; margin: .18em 0; }
+.qaResponse .answerBullet::before { content: "•"; position: absolute; left: .15em; color: rgba(255,255,255,.72); }
+.qaResponse .answerCodeLabel { margin: .55em 0 .35em; font-weight: 700; color: rgba(255,255,255,.92); }
+.qaResponse .answerCodeEditor {
+  margin: .2em 0 .75em;
+  padding: .85em 1em;
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 6px;
+  background: rgba(8,10,8,.82);
+  color: #f3f4ee;
+  font-family: Consolas, "Cascadia Code", "Courier New", monospace;
+  font-size: .90em;
+  line-height: 1.55;
+  white-space: pre;
+  overflow-x: auto;
+  tab-size: 4;
+}
