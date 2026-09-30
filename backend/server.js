@@ -805,9 +805,49 @@ function isInterviewLogisticsQuestion(value) {
     /\b(?:hold on|wait a moment|one moment|just a moment)\b/,
     /\b(?:can|could|shall|should) (?:you|we)\b.{0,18}\bstart (?:now|the interview|the call)\b/,
     /\b(?:ready to start|shall we start|can we start)\b/,
-    /\b(?:mute|unmute|share (?:your )?screen|screen share|join the call|rejoin|connection|network issue)\b/
+    /\b(?:mute|unmute|share (?:your )?screen|screen share|join the call|rejoin|connection|network issue)\b/,
+    /\b(?:are|were) you (?:still )?(?:typing|done typing|done)\b/,
+    /\b(?:can|could|would|will) you\b.{0,30}\b(?:maximize|minimize|resize)\b.{0,20}\b(?:window|screen)\b/,
+    /\b(?:maximize|minimize|resize) (?:the |your )?(?:window|screen)\b/,
+    /\b(?:can|could|do) you (?:please )?(?:see|view) (?:my|the) screen\b/,
+    /\b(?:do|can) you see (?:my|the) screen\b/,
+    /\b(?:i(?:'m| am)|we(?:'re| are)) (?:sharing|stopping|starting) (?:my |the )?screen\b/,
+    /\b(?:done|finished) (?:with )?(?:sharing|typing)\b/,
+    /\b(?:had|have|ate) (?:my |the )?(?:breakfast|lunch|dinner)\b/
   ];
   return patterns.some(pattern=>pattern.test(q));
+}
+function isInterviewerHandoff(value) {
+  const q=normalizeText(value).toLowerCase();
+  return /\b(?:do you have|any|have any) questions? (?:for me|for us|about (?:the )?(?:team|role|position|company|project))\b/.test(q)
+    || /\b(?:ask|questions?)\b.{0,35}\b(?:me|interviewer)\b/.test(q)&&/\b(?:before we|wrap|end|stop|move ahead)\b/.test(q);
+}
+function isWeakConversationFragment(value) {
+  const q=normalizeText(value).toLowerCase().replace(/[?.!,;:]+/g,' ').replace(/\s+/g,' ').trim();
+  if(!q)return true;
+  if(isInterviewLogisticsQuestion(q))return true;
+  return /^(?:okay|ok|yes|yeah|right|correct|fine|good|great|awesome|got it|thank you|thanks|mhmm|hmm|hello|sorry)(?:\s+.*)?$/.test(q)
+    || /^(?:can you )?(?:please )?(?:come again|repeat that|say that again)$/.test(q)
+    || /^(?:are we|are you|do you|can you|could you|would you)\s+(?:used|using|done|okay|fine|ready)(?:\s+here)?$/.test(q);
+}
+function technicalIntentScore(value) {
+  const q=normalizeText(value).toLowerCase();
+  if(!q||isWeakConversationFragment(q))return -100;
+  let score=0;
+  if(/\b(?:code|script|function|method|class|loop|set|list|array|data ?frame|csv|xls|xlsx|source|target|rows?|shape|duplicate|unique|records?|sql|api|database|table|file|return code|error code|status code|insert|update|etl|test|automation|java|python|c#|javascript|typescript|snowflake|azure|aws|react|angular|ims|idms)\b/.test(q))score+=5;
+  if(/\b(?:what|why|how|which|find|print|read|count|explain|describe|compare|implement|write|show|use|approach)\b/.test(q))score+=2;
+  if(q.split(/\s+/).length>=5)score+=1;
+  return score;
+}
+function latestSubstantiveIntent(requests) {
+  if(!Array.isArray(requests)||!requests.length)return '';
+  for(let i=requests.length-1;i>=0;i--){
+    if(technicalIntentScore(requests[i])>=5)return requests[i];
+  }
+  for(let i=requests.length-1;i>=0;i--){
+    if(!isWeakConversationFragment(requests[i]))return requests[i];
+  }
+  return '';
 }
 function collapseQuestionSpeechNoise(value) {
   return normalizeText(value)
@@ -868,12 +908,16 @@ function parseMultiQuestionIntent(value) {
 function reframeQuestionIntent(rawQuestion) {
   const raw=normalizeText(rawQuestion);
   if(!raw)return '';
-  const requests=extractMultipleQuestionIntents(raw);
-  if(requests.length>=2){
+  if(isInterviewerHandoff(raw))return 'INTERVIEWER_HANDOFF: The interviewer is asking whether I have questions for them.';
+  const requests=extractMultipleQuestionIntents(raw).filter(item=>!isWeakConversationFragment(item));
+  const conversationalTranscript=raw.length>650 || requests.length>4;
+  if(requests.length>=2&&!conversationalTranscript){
     const relation=multiQuestionsRelated(requests)?'RELATED':'DISTINCT';
     return `MULTI_QUESTION: ${relation}\n${requests.map((item,index)=>`Question ${index+1}: ${item}`).join('\n')}`.slice(0,3000);
   }
-  let candidate=requests[0]||'';
+  // Long live transcripts often contain old questions plus call/screen chatter. For those,
+  // answer the latest substantive technical request instead of replaying the whole transcript.
+  let candidate=conversationalTranscript?latestSubstantiveIntent(requests):(requests[0]||'');
   if(!candidate){
     const cleaned=cleanIntentLead(raw);
     candidate=isInterviewLogisticsQuestion(cleaned)?'':cleaned;
@@ -1027,6 +1071,7 @@ function spokenAnswerShape(question) {
   if(parseMultiQuestionIntent(question))return 'MULTI';
   const q=normalizeText(question).toLowerCase();
   if(!q)return 'DIRECT';
+  if(q.startsWith('interviewer_handoff:'))return 'INTERVIEWER_HANDOFF';
   if(isVersionQuestion(q))return 'VERSION';
   if(/\b(difference|different|compare|versus|\bvs\b|same or different)\b/i.test(q))return 'COMPARISON';
   if(/\b(advantage|advantages|feature|features|benefit|benefits|types|ways)\b/i.test(q))return 'FEATURES';
@@ -1161,11 +1206,14 @@ INTERVIEW DELIVERY CALIBRATION:
 - For yes/no questions, start with "Yes." or "No." when the answer is genuinely binary, then explain the distinction in 2-4 short paragraphs/sentences. For "How" questions, start with the implementation/action. For "What" questions, define the requested item directly, then explain its practical meaning. For difference/comparison questions, state the core distinction first.
 - Use blank lines between logical paragraphs so the live answer is easy to scan while speaking. Avoid dense walls of text.
 - Visual emphasis is allowed only through **double-asterisk emphasis** around a small number of important technologies, responsibilities, controls or decision words. Emphasize selectively (normally 1-3 short phrases per paragraph), never entire sentences and never every keyword. The overlay renders these markers as bold text.
-- Keep the answer substantive: do not shorten away implementation detail merely to reduce tokens. Remove repetition, generic filler and unrelated adjacent technologies instead. This improves token efficiency without reducing answer quality.
+- Keep the answer substantive but prioritized. Lead with the 3-5 points that most directly answer the question, strongest first. Stop once the interviewer has the complete story; do not append low-value adjacent technologies or generic lifecycle detail merely because it is available.
+- Use plain human interview language. Prefer short, natural sentences over polished essay language. A normal answer should fit comfortably inside 90 seconds; only an explicit deep dive may run longer, with a hard ceiling of about two minutes.
 
 ANSWER PRIORITY AND SHAPE:
-1. Answer exactly the authoritative current intent. For MULTI_QUESTION input, cover every detected question in order; otherwise answer the single current question. The first sentence must contain something I can say immediately. Do not start with acknowledgement, restatement, a dictionary definition, or generic background.
+1. Answer exactly the authoritative current intent. For MULTI_QUESTION input, cover every detected question in order; otherwise answer the single current question. The first sentence must contain the answer itself — the requested value, return/status code, decision, action, or core distinction — whenever one exists. This is a gunshot opening: no acknowledgement, no 'Logic:' label, no restatement, no setup, and no generic background before the answer.
+   RECENCY RULE: when a live transcript contains older discussion plus a newer substantive request, answer the newest substantive request. Older content is context only and must not be re-answered unless the newest request explicitly refers to it. Ignore screen-sharing, typing, window-control, audio/video, greetings, meals, confirmations, and other interview logistics; never claim I performed those physical/UI actions.
 2. SPOKEN ANSWER SHAPE is authoritative for normal spoken answers:
+   - INTERVIEWER_HANDOFF: Do not introduce myself or continue the previous technical answer. Give 2-3 concise, natural questions I can ask the interviewer about the role, team, priorities, delivery expectations, or current challenges. Prefer questions that use any concrete team/role context already present.
    - VERSION: Put the requested version in the first short sentence immediately. If an exact project version is explicitly supported by evidence, use it. If the technology is present in the Resume/JD/current technical context but the exact project version is not documented, never lead with 'not in the resume/CV', 'I cannot determine it', or 'I haven't used it'; give a clearly conservative production-era stable version estimate, normally one stable major/minor behind the newest stable line you know, then add at most one short sentence noting the newer line when useful. Do not claim the estimate is resume-verified or fabricate an exact patch/build number.
    - DIRECT / CONCEPT: Start with 1 direct sentence, then add a short 2-4 sentence explanation that connects what it is -> how it works -> why/when it matters. Do not stop at keywords when one more sentence would make the concept speakable.
    - FEATURES: 1 direct sentence, blank line, then 3-5 short hyphen bullets. Each bullet must be a complete mini-explanation: name the feature, explain the mechanism or behavior, and state the practical reason it matters when useful. Never output keyword-only bullets.
@@ -1175,7 +1223,7 @@ ANSWER PRIORITY AND SHAPE:
    - TROUBLESHOOTING: immediate production action first, blank line, then 3-5 ordered hyphen bullets covering evidence collection, isolation, fix, and validation. Each step should say what I inspect/do and what that tells me. Do not guess one root cause without evidence.
 3. Readability is mandatory. Never emit one dense wall of text for a multi-point answer. Put each bullet on its own line and put one blank line before a bullet block. For non-bulleted answers longer than three sentences, use short paragraphs of 1-2 sentences each.
 4. Prefer implementation reality over textbook theory. Explain what runs, where it runs, what data moves, what control is applied, and why the choice is made. Avoid generic phrases such as "it improves scalability", "it is robust", or "it provides seamless integration" unless you name the concrete mechanism that makes that true.
-5. Match length to the question. Narrow factual/correction/follow-up: 1-3 sentences. Normal experience/concept/implementation: roughly 30-50 seconds of speech, enough to explain the mechanism and practical meaning without becoming bookish. End-to-end or explicitly detailed flow: roughly 45-75 seconds. Do not fill the token budget merely because it is available.
+5. Match length to the question. Narrow factual/correction/follow-up: 1-3 sentences. Normal experience/concept/implementation: roughly 35-75 seconds of speech and normally no more than 4-5 important points. Put the highest-value point first so the answer still lands if the interviewer interrupts. End-to-end or explicitly detailed flow: roughly 60-90 seconds. Only an explicit deep-dive request may approach two minutes; never exceed two minutes. Do not fill the token budget merely because it is available.
 6. Strictly answer the boundary asked. Do not volunteer adjacent technologies, security controls, observability, framework variants, or architecture patterns unless they directly answer the current question.
 7. Preserve concrete values/examples from the interviewer. If the interviewer gives a number, SLA, source system, failure point, or requested count, use that exact constraint in the answer.
 8. Sound like a senior engineer speaking naturally: clear, practical, first-person where factual, and immediately speakable. Use complete sentences, not keyword chains. Avoid bookish definitions and sales-style wording.
@@ -1412,8 +1460,10 @@ async function prepareQuestion(email, question, {inputSource='', requestId='', c
   let retrievalMode = 'none';
   const canonical = session ? resolveCanonicalQuestion(session, question) : { corrected:question, replacements:[] };
   const correctedQuestion = canonical.corrected || question;
-  const intentQuestion=reframeQuestionIntent(correctedQuestion)||correctedQuestion;
-  const rejection = rejectLowConfidenceInput(intentQuestion);
+  const reframedIntent=reframeQuestionIntent(correctedQuestion);
+  const logisticsOnly=!reframedIntent&&isInterviewLogisticsQuestion(correctedQuestion);
+  const intentQuestion=reframedIntent||correctedQuestion;
+  const rejection = logisticsOnly ? 'NO_ANSWER_REQUIRED' : rejectLowConfidenceInput(intentQuestion);
   const followupInfo = session ? resolveFollowupIntent(session, intentQuestion) : { isFollowup:false, resolvedQuestion:intentQuestion, previous:null };
   const responseType=classifyResponseType(intentQuestion,followupInfo,inputSource);
   perf.intentMs = Date.now() - intentStartedAt;
@@ -1536,7 +1586,7 @@ app.post('/ask', async (req, res) => {
   if (text.length > 12000) return res.status(400).json({ ok:false, error:'Transcript input too long' });
   try {
     const prepared = await prepareQuestion(email, text);
-    if (prepared.rejection) return res.json({ ok:true, answer:prepared.rejection, model:'local-guard', modelTier:'local', contextPrepared:!!prepared.session, retrieved:[], latency:{...prepared.latency, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt} });
+    if (prepared.rejection) return res.json({ ok:true, answer:prepared.rejection==='NO_ANSWER_REQUIRED'?'':prepared.rejection, model:'local-guard', modelTier:'local', contextPrepared:!!prepared.session, retrieved:[], latency:{...prepared.latency, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt} });
     const route = selectAnswerRoute(text, prepared);
     const llmStart = Date.now();
     const cerebrasQuality = route.provider==='cerebras' ? `
@@ -1618,7 +1668,9 @@ app.post('/prefetch-query', async (req, res) => {
   try {
     const canonical = resolveCanonicalQuestion(session, question);
     const correctedQuestion = canonical.corrected || question;
-    const intentQuestion = reframeQuestionIntent(correctedQuestion) || correctedQuestion;
+    const reframedIntent = reframeQuestionIntent(correctedQuestion);
+    if (!reframedIntent && isInterviewLogisticsQuestion(correctedQuestion)) return res.status(204).end();
+    const intentQuestion = reframedIntent || correctedQuestion;
     if (rejectLowConfidenceInput(intentQuestion)) return res.status(204).end();
     const followupInfo = resolveFollowupIntent(session, intentQuestion);
     // Genuine follow-ups reuse prior evidence and strong lexical matches are already local/instant.
@@ -1707,9 +1759,10 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,effort:'
 
   if (prepared.rejection) {
     const latency = { ...prepared.latency, firstTokenMs:Date.now()-prepared.latency.startedAt, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt, attempts:0 };
-    emit('delta', { delta:prepared.rejection });
+    const guardedAnswer=prepared.rejection==='NO_ANSWER_REQUIRED'?'':prepared.rejection;
+    if(guardedAnswer)emit('delta', { delta:guardedAnswer });
     emit('meta', { model:'local-guard', modelTier:'local', phase:'complete', latency, retrieved:[] });
-    emit('done', { answer:prepared.rejection, model:'local-guard', modelTier:'local', latency });
+    emit('done', { answer:guardedAnswer, model:'local-guard', modelTier:'local', latency });
     return res.end();
   }
 

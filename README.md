@@ -1,4 +1,4 @@
-# Topper v14.7.3
+# Topper v14.7.4
 
 Replacement package based strictly on the attached v14.7.2 baseline. No new Railway environment variables are required.
 
@@ -15,3 +15,13 @@ Replacement package based strictly on the attached v14.7.2 baseline. No new Rail
 
 Changed JavaScript is validated with `node --check`; the replacement ZIP is validated with `unzip -t`.
 
+
+
+## v14.7.4 — live-intent precision
+
+- Filters typing/screen/window/audio/video and other interview logistics from answer intent.
+- Long conversational transcripts now prefer the latest substantive technical request instead of replaying older questions.
+- Factual questions use answer-first/gunshot openings; no setup before the requested value/code/status.
+- Interviewer handoff ("any questions for me?") produces concise questions to ask the interviewer instead of a self-introduction.
+- Normal spoken answers prioritize the strongest 3-5 points, target <=90 seconds, and reserve up to two minutes only for explicit deep dives.
+- Retrieval architecture, embeddings, provider/model routing, streaming transport, STT, licensing, payments and screen capture are unchanged.
