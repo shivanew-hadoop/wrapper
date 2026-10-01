@@ -381,12 +381,19 @@ function resolveCanonicalQuestion(session, question) {
   }
 
   const playwrightFixtureContext=/\bplaywright\b/.test(technologyContext) || /\bfixtures?\b/.test(technologyContext);
-  if (playwrightFixtureContext && /\bcustom\s+fixer(?:s)?\b/i.test(working)) {
+  // "custom fixer" is itself a strong automation-testing STT signal for "custom fixture".
+  // Do not require Playwright to have survived profile extraction before repairing it.
+  const explicitCustomFixtureStt=/\bcustom\s+fixer(?:s)?\b/i.test(working);
+  if ((playwrightFixtureContext || explicitCustomFixtureStt) && explicitCustomFixtureStt) {
     working=working.replace(/\bcustom\s+fixer(?:s)?\b/gi, match=>{
       const to=/s\b/i.test(match)?'custom fixtures':'custom fixture';
       replacements.push({from:match,to,distance:0,kind:'context-phrase'});
       return to;
     });
+  }
+  // Live STT commonly renders "use of custom fixture" as "username of custom fixer".
+  // Apply this only to the repaired custom-fixture phrase, not to arbitrary username questions.
+  if (playwrightFixtureContext || explicitCustomFixtureStt) {
     working=working.replace(/\b(?:user\s*name|username)\s+of\s+(custom\s+fixtures?)\b/gi, (match,fixture)=>{
       const to=`use of ${fixture}`;
       replacements.push({from:match,to,distance:0,kind:'context-phrase'});
@@ -875,8 +882,18 @@ function latestSubstantiveIntent(requests) {
   }
   return '';
 }
-function collapseQuestionSpeechNoise(value) {
+function stripNonSemanticSpeechFillers(value) {
+  // Remove standalone vocalizations before intent detection/retrieval so they cannot
+  // influence the question, evidence ranking, or visible answer. Keep ordinary words intact.
   return normalizeText(value)
+    .replace(/\b(?:m+h+m+|h+m+|u+h+|u+m+|a+h+|e+h+|h+a+h+a+(?:h+a+)*|ha(?:ha){1,})\b/gi,' ')
+    .replace(/\s+([?.!,;:])/g,'$1')
+    .replace(/([?.!,;:])(?:\s*[?.!,;:])+/g,'$1')
+    .replace(/\s{2,}/g,' ')
+    .trim();
+}
+function collapseQuestionSpeechNoise(value) {
+  return stripNonSemanticSpeechFillers(value)
     .replace(/\b(what|why|how|can|could|would|do|did|are|is|okay|yeah|so)\s+\1\b/gi,'$1')
     .replace(/^(?:(?:hi|hello|thanks?|thank you|okay|alright|right|yeah|yes|fine)[,.:;]?\s+)+/i,'')
     .trim();
@@ -1225,7 +1242,7 @@ CONCEPT COMPLETENESS:
 - If versions/frameworks differ, state that compactly instead of confidently inventing or mixing APIs.
 
 UNDERSTAND THE INTERVIEWER, NOT THE RAW TRANSCRIPT:
-The input is noisy live speech. Remove repetitions, fillers and false starts such as "okay", "basically", "you know", duplicated words and incomplete lead-ins. Infer the final intended technical question from the complete current utterance plus recent interview turns. Silently repair phonetic technology names from the canonical Resume/JD vocabulary and surrounding topic. Never say "you mean", "not X", "I assume", or ask for confirmation when one interpretation is clearly supported by context.
+The input is noisy live speech. Remove repetitions, fillers and false starts such as "okay", "basically", "you know", "mhmm", "hmm", "aaa", "uh", laughter/vocalizations, duplicated words and incomplete lead-ins. These have zero semantic weight and must never appear in or steer the answer. Infer the final intended technical question from the complete current utterance plus recent interview turns. Silently repair phonetic technology names from the canonical Resume/JD vocabulary and surrounding topic. Never say "you mean", "not X", "I assume", or ask for confirmation when one interpretation is clearly supported by context.
 
 Use REFRAMED CURRENT INTENT as the authoritative current question and RESPONSE MODE as the authoritative output format. RAW CURRENT TRANSCRIPT is context only. The mere presence of words such as code, coding, development, DevOps, program, class, module, Java or Python never makes an experience, behavioral, conceptual or project question a coding task. Do not carry a prior coding format into a new topic. Continue in coding format only when the current intent explicitly requests implementation/code or clearly asks about the immediately previous code.
 
@@ -1243,6 +1260,15 @@ INTERVIEW DELIVERY CALIBRATION:
 - Visual emphasis is allowed only through **double-asterisk emphasis** around a small number of important technologies, responsibilities, controls or decision words. Emphasize selectively (normally 1-3 short phrases per paragraph), never entire sentences and never every keyword. The overlay renders these markers as bold text.
 - Keep the answer substantive but prioritized. Lead with the 3-5 points that most directly answer the question, strongest first. Stop once the interviewer has the complete story; do not append low-value adjacent technologies or generic lifecycle detail merely because it is available.
 - Use plain human interview language. Prefer short, natural sentences over polished essay language. A normal answer should fit comfortably inside 90 seconds; only an explicit deep dive may run longer, with a hard ceiling of about two minutes.
+
+
+NARROW TECHNICAL QUESTION DISCIPLINE:
+- Treat the interviewer’s requested boundary as a hard scope limit. If they ask one mechanism, one example, one API, one SQL construct, or a general "how does X work" question, answer that exact thing first and stop after the minimum useful explanation.
+- Do not turn a narrow question into an options survey. Mention alternatives only when the interviewer asks for alternatives/examples or when one contrast is necessary to avoid a misleading answer. Even then, give the strongest 2-3 relevant choices, not every possible approach.
+- Prefer the mechanism implied by the current architecture and recent interview context. Example: in a Spring MVC multi-page server-side workflow, lead with HTTP session / @SessionAttributes for temporary form state; do not lead with Angular state, NgRx, browser storage and database drafts unless the interviewer is specifically asking about a client-side Angular design or persistence across sessions.
+- For framework plumbing questions such as Spring JDBC, answer the runtime path directly: configured DataSource -> pooled JDBC Connection -> JdbcTemplate/DAO executes SQL -> maps results/translates exceptions -> releases the connection. Do not drift into unrelated UI modernization or architecture unless asked.
+- For a narrow conceptual answer, normally use 2-4 sentences. If the interviewer explicitly asks for examples, give at most 2-3 concise examples unless they request a count or deeper detail.
+- Do not add security, persistence, state-management libraries, cloud services, transactions, monitoring, or other adjacent concerns merely because they are good engineering practices. Include them only when they materially answer the current question.
 
 ANSWER PRIORITY AND SHAPE:
 1. Answer exactly the authoritative current intent. For MULTI_QUESTION input, cover every detected question in order; otherwise answer the single current question. The first sentence must contain the answer itself — the requested value, return/status code, decision, action, or core distinction — whenever one exists. This is a gunshot opening: no acknowledgement, no 'Logic:' label, no restatement, no setup, and no generic background before the answer.
@@ -1491,6 +1517,7 @@ async function prepareQuestion(email, question, {inputSource='', requestId='', c
   const perf = { requestId:String(requestId||''), clientToBackendMs:Number(clientSentAt)>0?Math.max(0,startedAt-Number(clientSentAt)):null };
   const intentStartedAt = Date.now();
   const session = interviewSessions.get(email);
+  question=stripNonSemanticSpeechFillers(question);
   question=stripRepeatedPriorPrompt(session,question);
   let retrieved = [];
   let embeddingMs = 0, retrievalMs = 0;

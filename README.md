@@ -1,4 +1,4 @@
-# Topper v14.7.5
+# Topper v14.7.7
 
 Replacement package based strictly on the attached v14.7.2 baseline. No new Railway environment variables are required.
 
@@ -27,7 +27,18 @@ Changed JavaScript is validated with `node --check`; the replacement ZIP is vali
 - Retrieval architecture, embeddings, provider/model routing, streaming transport, STT, licensing, payments and screen capture are unchanged.
 
 
-## v14.7.5 precision patch
+## v14.7.6 precision patch
 - Narrow SQL example requests now return only the requested query plus tiny sample input/output; no unsolicited table/schema/insert scaffolding.
 - Added deterministic context-supported STT repair for SQL `joints` -> `joins` and Playwright `custom fixer` -> `custom fixture`, including the common `username of custom fixer` -> `use of custom fixture` phrase when session context supports Playwright/fixtures.
 - No provider routing, retrieval architecture, embedding flow, streaming, STT transport, licensing, payment, or screen-capture changes.
+
+- v14.7.6: Fixed custom-fixture STT repair so the explicit phrase itself can trigger correction even when Playwright was not retained in extracted profile vocabulary; also repairs "username of custom fixture" to "use of custom fixture" only in that narrow context.
+
+
+## v14.7.7 narrow-intent quality patch
+- Based strictly on v14.7.6 Fixture STT Fix.
+- Removes non-semantic live-speech vocalizations such as mhmm/hmm/aaa/uh/laughter before intent detection and retrieval.
+- Adds hard narrow-question scope discipline: answer the exact mechanism first, avoid option surveys and adjacent architecture unless asked.
+- Uses current framework/recent interview context to prioritize the most relevant mechanism (for example Spring MVC session state for a server-side multi-page workflow).
+- Keeps Spring JDBC explanations on the direct DataSource -> connection pool -> JdbcTemplate/DAO execution path.
+- No changes to retrieval architecture, embeddings, provider/model routing, streaming, STT transport, screen capture, licensing, payment, or overlay behavior.
