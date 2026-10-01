@@ -1,4 +1,4 @@
-# Topper v14.7.4
+# Topper v14.7.5
 
 Replacement package based strictly on the attached v14.7.2 baseline. No new Railway environment variables are required.
 
@@ -25,3 +25,9 @@ Changed JavaScript is validated with `node --check`; the replacement ZIP is vali
 - Interviewer handoff ("any questions for me?") produces concise questions to ask the interviewer instead of a self-introduction.
 - Normal spoken answers prioritize the strongest 3-5 points, target <=90 seconds, and reserve up to two minutes only for explicit deep dives.
 - Retrieval architecture, embeddings, provider/model routing, streaming transport, STT, licensing, payments and screen capture are unchanged.
+
+
+## v14.7.5 precision patch
+- Narrow SQL example requests now return only the requested query plus tiny sample input/output; no unsolicited table/schema/insert scaffolding.
+- Added deterministic context-supported STT repair for SQL `joints` -> `joins` and Playwright `custom fixer` -> `custom fixture`, including the common `username of custom fixer` -> `use of custom fixture` phrase when session context supports Playwright/fixtures.
+- No provider routing, retrieval architecture, embedding flow, streaming, STT transport, licensing, payment, or screen-capture changes.

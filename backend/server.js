@@ -367,6 +367,32 @@ function resolveCanonicalQuestion(session, question) {
   // Context-aware repair for a high-confidence multi-token STT failure that
   // token-level edit distance cannot recover: "ask and quarks" -> "*args and **kwargs".
   const technologyContext=normalizeText(`${(session?.profile?.primarySkills||[]).join(' ')} ${(session?.profile?.domainVocabulary||[]).join(' ')} ${(session?.turns||[]).slice(-3).map(t=>t.question).join(' ')}`).toLowerCase();
+
+  // Repair common live-STT Playwright terminology only when the prepared CV/JD or
+  // recent interview context supports that interpretation. This is deterministic
+  // and does not add another model call or retrieval round trip.
+  const sqlJoinContext=/\bsql\b/.test(technologyContext) || /\bsql\b/i.test(working);
+  if(sqlJoinContext && /\bjoints?\b/i.test(working)){
+    working=working.replace(/\bjoints?\b/gi, match=>{
+      const to='joins';
+      replacements.push({from:match,to,distance:0,kind:'context-phrase'});
+      return to;
+    });
+  }
+
+  const playwrightFixtureContext=/\bplaywright\b/.test(technologyContext) || /\bfixtures?\b/.test(technologyContext);
+  if (playwrightFixtureContext && /\bcustom\s+fixer(?:s)?\b/i.test(working)) {
+    working=working.replace(/\bcustom\s+fixer(?:s)?\b/gi, match=>{
+      const to=/s\b/i.test(match)?'custom fixtures':'custom fixture';
+      replacements.push({from:match,to,distance:0,kind:'context-phrase'});
+      return to;
+    });
+    working=working.replace(/\b(?:user\s*name|username)\s+of\s+(custom\s+fixtures?)\b/gi, (match,fixture)=>{
+      const to=`use of ${fixture}`;
+      replacements.push({from:match,to,distance:0,kind:'context-phrase'});
+      return to;
+    });
+  }
   if (/\bpython\b/.test(technologyContext) || /\b(?:ask|args?)\s+(?:and|&)\s+(?:quarks|kwargs?|k\s*wargs?)\b/i.test(working)) {
     working=working.replace(/\b(?:ask|arks?|args?)\s+(?:and|&)\s+(?:quarks|kwargs?|k\s*wargs?)\b/gi, match=>{
       replacements.push({from:match,to:'*args and **kwargs',distance:0,kind:'context-phrase'});
@@ -1098,10 +1124,19 @@ function exampleGuidance(question, followupInfo=null) {
   return 'OPTIONAL_NON_REDUNDANT: Use one concise example only when it materially improves the answer. Never add an example merely to fill space, and never invent candidate-specific facts.';
 }
 
+function isNarrowSqlExampleRequest(question) {
+  const q=normalizeText(question).toLowerCase();
+  if(!/\b(?:sql|join|inner join|left join|right join|full join|query|select)\b/.test(q))return false;
+  const asksExample=/\b(?:sample|example|simple|small)\b/.test(q) || /\b(?:write|show|give|provide)\b.{0,35}\b(?:query|sql|join|code)\b/.test(q);
+  const asksScaffolding=/\b(?:create table|schema|ddl|insert (?:sample )?(?:data|rows|records)|stored procedure|procedure|database setup|full script|end[- ]to[- ]end)\b/.test(q);
+  return asksExample&&!asksScaffolding;
+}
+
 function responseMode(question, followupInfo=null, inputSource='') {
   const type=classifyResponseType(question,followupInfo,inputSource);
   const codingFollowup=type==='code'&&!!followupInfo?.previous&&isCodingFollowupQuestion(question);
   if(type==='multi') return 'MULTI_QUESTION_REQUIRED: Cover every detected interviewer question in the same response and in the same order. If the questions are related, combine them naturally into one connected answer while explicitly satisfying both. If they are distinct, answer the first briefly at a useful high level, then transition immediately to the second and answer it directly. Never discard the first question just because the second is newer. If any sub-question asks for code, include the requested working code for that sub-question rather than explanation only.';
+  if(type==='code'&&isNarrowSqlExampleRequest(question)) return 'MINIMAL_SQL_EXAMPLE: Give one direct sentence, then "Complete code:" with only the SQL statement needed to answer the request. Do NOT create tables, insert rows, define schemas/constraints, add setup/cleanup SQL, or build a full script unless explicitly requested. Finish with one tiny "Sample input:" and matching "Sample output:" so the join/query is easy to explain.';
   if (type==='code'&&codingFollowup) return 'CODING_REQUIRED_FOLLOW_UP: Answer the current follow-up directly in 1-3 short sentences. Then write "Logic:" with the simple approach in 1-2 concise lines, followed by "Complete code:" and the entire previous working solution, updated only when the follow-up requests a change. Include concise inline comments for every meaningful logical step so coding can continue without losing context. When a complete runnable program is printed, finish with one small "Sample input:" and matching "Sample output:" example.';
   if (type==='code') return 'CODING_REQUIRED: Start with "Logic:" and explain the simple approach in 1-2 concise lines. Then write "Complete code:" and provide one complete working solution in the requested or context-supported language. Include concise inline comments for every meaningful logical step. When a complete runnable program is printed, finish with one small "Sample input:" and matching "Sample output:" example.';
   if (type==='snippet') return 'EXPLANATION_WITH_CODE_SNIPPET: Answer the question directly in 2-4 concise sentences, then write "Code snippet:" and give the smallest practical snippet that demonstrates how to implement it in the requested or context-supported language/framework. Do not force a full standalone program or sample input/output unless the interviewer asks for it.';
@@ -1248,6 +1283,8 @@ Only when the interviewer gives a TRUE hypothetical scenario/problem that requir
 Answer the boundary actually asked. Trace the real request/token/data flow point-to-point where relevant. If asked for N scenarios, give exactly N. Mention technologies such as MCP, direct API, OBO, managed identity, client credentials, RBAC, Key Vault, queues, caches, etc. only when they directly explain the requested scenario or are supported by context. Give the implementation choice and operational reason, not a textbook definition.
 
 CODING QUESTIONS:
+When RESPONSE MODE says MINIMAL_SQL_EXAMPLE, obey that narrower contract instead of the generic coding contract: output only the requested SQL query plus the smallest useful sample input/output. Never add CREATE TABLE, INSERT, schema, constraints, setup/cleanup statements, stored procedures, or unrelated SQL unless the interviewer explicitly asks for them. A request such as "show a sample INNER JOIN" needs the INNER JOIN query, not database scaffolding.
+
 When RESPONSE MODE says CODING_REQUIRED, code is mandatory even if the question came from screen capture and even if the interviewer did not literally say "code". Also treat an explicit request for a small example/snippet that is best demonstrated in code as a coding answer, but do not turn ordinary conceptual or experience questions into coding merely because a programming language is mentioned. Start with "Logic:" and give the simple approach in 1-2 concise lines. Then write "Complete code:" and provide one complete working end-to-end solution or the smallest complete snippet that directly demonstrates the requested concept. Add concise inline comments to every meaningful logical step so I can explain it line by line. Preserve the requested language, visible method/class signatures, input/output contract and constraints. Never return explanation alone for an algorithmic problem. For a coding follow-up, place the requested explanation/change first and then repeat the complete earlier code, updated when required, so the candidate can continue from the full solution. A language-only follow-up preserves the previous task exactly and rewrites the complete solution in that language. For a visible error/edit, identify the exact failing block and still provide the complete corrected program when enough context is available. When you print a complete runnable program, also provide exactly one concise "Sample input:" and corresponding "Sample output:" after the code so the candidate can explain the program behavior. Do not force sample input/output for a tiny API/configuration snippet that has no meaningful console or function input/output contract. Mention complexity and edge cases briefly after code when useful.
 
 IMPLEMENTATION-SNIPPET QUESTIONS:
@@ -1259,7 +1296,7 @@ When RESPONSE MODE says DRAWABLE_DIAGRAM_REQUIRED, a diagram is mandatory. Give 
 
 FORMAT:
 LIVE OUTPUT IS IMMUTABLE: decide the final answer structure and wording before emitting the first token. Never stream a draft and then restate, shorten, rewrite, or reformat it later; the first visible answer must already satisfy the requested response contract.
-Return lightweight display text only. You may use **double-asterisk bold markers** selectively for important interview keywords; do not use italics, headings, tables or decorative Markdown. Make the answer visually readable in the existing plain-text overlay: one direct opening sentence/paragraph, then a blank line before bullets when bullets are useful. Use hyphen bullets only; keep them short and normally limit them to 3-5. For comparison/difference questions, prefer paired bullets such as "- OAuth 2.0: ..." and "- JWT: ...", followed by one short practical conclusion when useful. For a narrow fact or yes/no follow-up, stay with 1-3 sentences and no bullets. For small coding questions, do not create a page of explanation: give Logic in 1-2 lines, Complete code with the smallest complete runnable solution, and at most 1-2 lines after it for complexity/edge cases. The minimal labels "Logic:", "Complete code:" and "Flow diagram:" are required only for their matching response modes. For coding output, write the code directly after "Complete code:" (or "Code snippet:") and preserve indentation and inline comments. Do not show Markdown fence markers to the user; the overlay automatically presents the code portion in a separate editor-style block. Do not give competing solutions unless explicitly asked. Avoid generic transitions such as 'First', 'Second', 'Finally' unless sequence itself matters. Prefer concrete production nouns, exact roles/operations and the reason they were used. If the request is unclear, corrupted, unrelated to an interview, or cannot be answered reliably from the question and supplied context, say that briefly and ask for a clearer interview question; never invent missing facts. The final output must be accurate, question-specific and sufficiently explained for the candidate to speak without mentally expanding keywords. Before returning, remove only content that is repetitive, generic, or outside the exact question; do not remove the short implementation explanation that makes the answer interview-ready.
+Return lightweight display text only. You may use **double-asterisk bold markers** selectively for important interview keywords; do not use italics, headings, tables or decorative Markdown. Make the answer visually readable in the existing plain-text overlay: one direct opening sentence/paragraph, then a blank line before bullets when bullets are useful. Use hyphen bullets only; keep them short and normally limit them to 3-5. For comparison/difference questions, prefer paired bullets such as "- OAuth 2.0: ..." and "- JWT: ...", followed by one short practical conclusion when useful. For a narrow fact or yes/no follow-up, stay with 1-3 sentences and no bullets. For small coding questions, do not create a page of explanation: give Logic in 1-2 lines, Complete code with the smallest complete runnable solution, and at most 1-2 lines after it for complexity/edge cases. For a narrow SQL example, skip unrelated setup and treat the requested SELECT/JOIN statement itself as the complete code; include only the tiny sample input/output needed to demonstrate the result. The minimal labels "Logic:", "Complete code:" and "Flow diagram:" are required only for their matching response modes. For coding output, write the code directly after "Complete code:" (or "Code snippet:") and preserve indentation and inline comments. Do not show Markdown fence markers to the user; the overlay automatically presents the code portion in a separate editor-style block. Do not give competing solutions unless explicitly asked. Avoid generic transitions such as 'First', 'Second', 'Finally' unless sequence itself matters. Prefer concrete production nouns, exact roles/operations and the reason they were used. If the request is unclear, corrupted, unrelated to an interview, or cannot be answered reliably from the question and supplied context, say that briefly and ask for a clearer interview question; never invent missing facts. The final output must be accurate, question-specific and sufficiently explained for the candidate to speak without mentally expanding keywords. Before returning, remove only content that is repetitive, generic, or outside the exact question; do not remove the short implementation explanation that makes the answer interview-ready.
 
 INTERVIEW ANSWER SHAPE CALIBRATION:
 Interviewer: "How did you secure integrations?" Candidate shape: Start with one direct first-person answer, then explain the 2-4 relevant controls as complete sentences—for example authentication, transport protection, credential storage and authorization—only when supported by context. Do not return a comma-separated technology list.
@@ -1279,7 +1316,7 @@ INTERVIEW PRESENTATION CALIBRATION:
 - Experience/project question: speak in first person only when supported by retrieved resume evidence; give what I used, where/how I used it, and the practical result in 2-4 concise sentences.
 - Troubleshooting/scenario question: give the immediate production action first, then 3-5 ordered hyphen bullets covering diagnosis, evidence, fix, and validation. Do not guess a single root cause without evidence.
 - Small code request: smallest complete working code that answers the request; avoid framework scaffolding unless the interviewer asked for it.
-- If the interviewer mispronounces a technical term, silently infer it from context and answer the intended term without calling out the transcription error.
+- If the interviewer mispronounces or live transcription slightly corrupts a technical term, silently infer the nearest context-supported term from the prepared CV/JD vocabulary, retrieved evidence, and recent technical topic. Prefer a clear domain interpretation over asking for rephrasing when the surrounding context makes it unambiguous; for example, in Playwright automation context, "custom fixer" should be understood as "custom fixture" when fixtures are supported by the session context.
 
 CALIBRATION EXAMPLES:
 Interviewer: "Do you need Contributor at runtime?" Candidate: "No. Runtime only needs the least-privileged data-plane role required for reads. Contributor is needed only for deployment or management operations that change resources."
@@ -1292,7 +1329,7 @@ After a coding turn, interviewer: "Do you have experience with Xpedition and Cap
 Interviewer: "asdf asdf asdf" Candidate: "I’m not sure what you’re asking. Please rephrase the question."`
 function strictModeInstructions(responseType) {
   if(responseType==='multi')return 'NON-NEGOTIABLE OUTPUT CONTRACT: The current prompt contains multiple interviewer questions. Cover every question in the original order. Related questions may be merged into one connected explanation; distinct questions must both be answered, with the first concise and the second immediately after it. Never answer only the last question. If a sub-question requests code, include usable code for that sub-question.';
-  if(responseType==='code')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This is a coding response. Explanation without a complete compilable/runnable solution is invalid. Output Logic:, then Complete code:, then the full code with meaningful inline comments. When a complete runnable program is printed, include one Sample input: and matching Sample output:. For a follow-up, include the entire previous solution again after the explanation.';
+  if(responseType==='code')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This is a coding response. Explanation without usable code is invalid. For a narrow SQL query/join example, the requested SQL statement itself is the complete solution: do not add CREATE TABLE, INSERT, schema/setup/cleanup, or other scaffolding unless explicitly requested; include a tiny Sample input: and matching Sample output:. For other coding tasks, output Logic:, then Complete code:, then the full runnable code with meaningful inline comments. When a complete runnable program is printed, include one Sample input: and matching Sample output:. For a follow-up, include the entire previous solution again after the explanation.';
   if(responseType==='snippet')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This question requires a practical implementation snippet. Give the concise explanation first, then Code snippet: followed by usable code. Explanation-only output is invalid. Keep the snippet small; do not force full program scaffolding or sample input/output unless requested.';
   if(responseType==='diagram')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This is a diagram response. A prose chain on one line is invalid. Output Flow diagram:, then a multi-line Notepad-friendly Unicode diagram containing at least three real boxes made with ┌ ─ ┐ │ └ ┘ and connected by directional arrows. Include relevant labelled branches and supporting components.';
   return '';
