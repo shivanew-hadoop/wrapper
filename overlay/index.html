@@ -9,8 +9,22 @@
 <div id="app" class="card v6Card">
   <div class="header">
     <span class="dot"></span><span class="title">TOPPER · INTERVIEW COPILOT</span>
+    
+    <!-- Speed & Cost Control Selector -->
+    <div class="tierControls">
+      <select id="providerTierSelect" class="tierSelect" title="LLM Provider & Speed Tier">
+        <option value="cerebras-fast" selected>⚡ Cerebras (Ultra-Fast)</option>
+        <option value="openai-fast">⚡ OpenAI Fast Tier</option>
+        <option value="openai-accurate">🎯 OpenAI High Accuracy</option>
+      </select>
+    </div>
+
     <div class="fontControls"><button id="fontDown" class="miniBtn">A−</button><span id="fontSizeLabel" class="fontSizeLabel">16</span><button id="fontUp" class="miniBtn">A+</button></div>
-    <span class="spacer"></span><span id="creditTimer" class="modelLabel">Credits: --:--</span>
+    
+    <!-- Token Budget & Cost Monitor -->
+    <span id="tokenBudgetLabel" class="modelLabel tokenBudget" title="Live Token Allocation">Budget: 800t</span>
+    <span class="spacer"></span>
+    <span id="creditTimer" class="modelLabel">Credits: --:--</span>
     <button id="leaveBtn" class="leave hidden">■ Stop</button>
     <button id="collapseBtn" class="collapseBtn">−</button>
     <button id="closeBtn" class="closeBtn">×</button>
@@ -18,21 +32,47 @@
 
   <section id="joinPanel" class="joinPanel">
     <div class="startBox">
-      <div><span>Windows system audio</span><div class="muted">Your license and interview context were validated on the setup screen. Start when the interview/call is ready.</div></div>
+      <div>
+        <span>Windows system audio</span>
+        <div class="muted">Your license and interview context were validated on the setup screen. Start when the interview/call is ready.</div>
+      </div>
+      
+      <!-- Grounding & Lexical Bypass Indicators -->
+      <div class="contextStatusBox">
+        <span id="sttPhoneticBadge" class="statusBadge active">✔ Phonetic STT Correction</span>
+        <span id="groundingBadge" class="statusBadge active">✔ Resume/JD Regex Extracted</span>
+        <span id="lexicalBypassBadge" class="statusBadge active">✔ Fast Lexical Bypass</span>
+      </div>
+
       <div class="joinActions"><button id="backBtn" class="backBtn">Go Back</button><button id="joinBtn">Start Listening</button></div>
     </div>
   </section>
 
   <section id="livePanel" class="live hidden v6Live">
-    <div id="status" class="status">Idle</div>
+    <div class="statusRow">
+      <div id="status" class="status">Idle</div>
+      <!-- Real-time Latency & Cost Indicators -->
+      <div class="liveStats">
+        <span id="fastPathIndicator" class="badge fastPath hidden">⚡ Fast Lexical Hit</span>
+        <span id="latencyMetric" class="badge metric">0ms</span>
+      </div>
+    </div>
 
     <div class="v6AnswerPane">
-      <div class="paneTitle"><span>LLM ANSWER</span><span id="modelLabel" class="modelLabel"></span></div>
+      <div class="paneTitle">
+        <span>LLM ANSWER</span>
+        <span id="answerModeBadge" class="modeBadge">Logic + Code</span>
+        <span id="modelLabel" class="modelLabel"></span>
+      </div>
       <div id="answer" class="answer v6Answer"><div class="answerPlaceholder">Waiting for a complete question...</div></div>
     </div>
 
     <div id="transcriptPane" class="v7TranscriptPane">
-      <div class="paneTitle transcriptTitle"><span>LIVE QUESTIONS</span><span id="sendFeedback" class="sendFeedback"></span></div>
+      <div class="paneTitle transcriptTitle">
+        <span>LIVE QUESTIONS</span>
+        <span id="sttCorrectionNotice" class="correctionNotice" title="Automatic phonetic STT cleanup applied">STT Cleaned</span>
+        <span id="sendFeedback" class="sendFeedback"></span>
+      </div>
       <div id="transcript" class="transcript v7Transcript"><div class="transcriptEmpty">Waiting for system audio...</div></div>
       <div id="transcriptResize" class="transcriptResize"></div>
     </div>
@@ -40,9 +80,9 @@
     <div class="v6Controls">
       <textarea id="manualPrompt" class="manualPrompt" rows="3" placeholder="Type a question, or capture one or more screens..." autocomplete="off"></textarea>
       <div class="controlToolbar">
-        <button id="captureWindowBtn" class="actionBtn captureBtn">Capture Screen</button>
+        <button id="captureWindowBtn" class="actionBtn captureBtn" title="Compressed capture to optimize latency & vision costs">Capture Screen</button>
         <button id="reanswerBtn" class="actionBtn" disabled>Re-answer</button>
-        <button id="autoSendBtn" class="actionBtn">Auto Send: OFF</button>
+        <button id="autoSendBtn" class="actionBtn" title="Auto-send queries when full prompt complete">Auto Send: OFF</button>
         <button id="sendBtn" class="actionBtn sendBtn">Send</button>
       </div>
     </div>
