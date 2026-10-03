@@ -81,17 +81,11 @@ const app = express();
 const allowedOrigins = new Set(String(process.env.CORS_ORIGIN || '').split(',').map(value => value.trim()).filter(Boolean));
 app.use(cors({ origin:(origin,cb) => cb(null,!origin || allowedOrigins.size===0 || allowedOrigins.has(origin)) }));
 app.use(express.json({ limit: '18mb', verify:(req,_res,buf) => { req.rawBody = Buffer.from(buf); } }));
-
-let commerce = { isLicensed: () => ({ ok: true }) };
-try {
-  commerce = require('./commerce')({ app, dataDir:DATA_DIR, publicDir:path.join(__dirname, 'portal') });
-} catch (_) {
-  console.warn('[BOOT] commerce module not found or failed to load. Defaulting to open access.');
-}
+const commerce = require('./commerce')({ app, dataDir:DATA_DIR, publicDir:path.join(__dirname, 'portal') });
 
 function loadUsers() {
   if (!fs.existsSync(USERS_FILE)) return {};
-  try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } catch (_) { return {}; }
+  return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
 }
 function isLicenseValid(email) {
   const paid = commerce.isLicensed(email);
@@ -109,7 +103,7 @@ function isLicenseValid(email) {
   return { ok:true, user:{ email:normalizedEmail, name:user.name, plan:user.plan, validTill:user.validTill, active:user.active } };
 }
 function requireLicensedRequest(req, res) {
-  const email = String(req.body?.email || req.query?.email || '').trim().toLowerCase();
+  const email = String(req.body?.email || '').trim().toLowerCase();
   if (!email) { res.status(400).json({ ok:false, error:'email is required' }); return null; }
   const license = isLicenseValid(email);
   if (!license.ok) { res.status(401).json({ ok:false, error:license.reason || 'Invalid license' }); return null; }
@@ -147,6 +141,7 @@ async function extractDocumentText(file) {
     const doc = await extractor.extract(decoded.buffer);
     text = doc.getBody() || '';
   } else if (ext === '.rtf' || mime.includes('rtf')) {
+    // Lightweight RTF text extraction suitable for resumes/JDs; strips control words and decodes escaped bytes.
     text = decoded.buffer.toString('latin1')
       .replace(/\\'([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
       .replace(/\\par[d]?\b/g, '\n')
@@ -162,6 +157,7 @@ async function extractDocumentText(file) {
       text = text.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ');
     }
   } else {
+    // Last-resort fallback for unknown text-like files. Binary files are rejected rather than producing garbage context.
     const candidate = decoded.buffer.toString('utf8');
     const printable = (candidate.match(/[\x09\x0A\x0D\x20-\x7E\u00A0-\uFFFF]/g) || []).length;
     if (candidate.length && printable / candidate.length > 0.82) text = candidate;
@@ -228,7 +224,7 @@ function normalizedReasoningEffort(effort) {
   const value=String(effort||'low').trim().toLowerCase();
   return ['none','low','medium','high','xhigh','max'].includes(value) ? value : 'low';
 }
-function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY,stream=false,responseFormat=null}) {
+function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY,stream=false}) {
   const body={
     model,
     service_tier:OPENAI_SERVICE_TIER,
@@ -239,12 +235,11 @@ function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',ef
     stream:!!stream
   };
   if(Number.isFinite(maxTokens)&&maxTokens>0)body.max_output_tokens=maxTokens;
-  if(responseFormat)body.response_format=responseFormat;
   return body;
 }
-async function openAIResponseJson({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY,responseFormat=null}) {
+async function openAIResponseJson({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY}) {
   if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY missing on backend');
-  return openAIJson('https://api.openai.com/v1/responses', openAIResponseBody({model,instructions,input,effort,maxTokens,verbosity,stream:false,responseFormat}));
+  return openAIJson('https://api.openai.com/v1/responses', openAIResponseBody({model,instructions,input,effort,maxTokens,verbosity,stream:false}));
 }
 function cerebrasOutputText(data) {
   return String(data?.choices?.[0]?.message?.content || '').trim();
@@ -254,6 +249,8 @@ function cerebrasReasoningEffort(effort=CEREBRAS_REASONING_EFFORT) {
   return ['low','medium','high'].includes(value) ? value : CEREBRAS_REASONING_EFFORT;
 }
 function cerebrasChatBody({instructions='',input='',maxTokens=420,stream=false,effort=CEREBRAS_REASONING_EFFORT}) {
+  // Cerebras exposes OpenAI GPT-OSS 120B through its OpenAI-compatible Chat Completions API.
+  // Keep this adapter isolated so Sol/Terra, SQL/RAG, STT and the renderer contracts stay untouched.
   const body={
     model:CEREBRAS_MODEL,
     messages:[
@@ -278,9 +275,9 @@ async function cerebrasJson({instructions='',input='',maxTokens=420,effort=CEREB
   if(!response.ok)throw new Error(data?.error?.message||`Cerebras request failed (${response.status})`);
   return data;
 }
-async function providerResponseJson({provider='openai',model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY,responseFormat=null}) {
+async function providerResponseJson({provider='openai',model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY}) {
   if(provider==='cerebras') return cerebrasJson({instructions,input,maxTokens,effort});
-  return openAIResponseJson({model,instructions,input,effort,maxTokens,verbosity,responseFormat});
+  return openAIResponseJson({model,instructions,input,effort,maxTokens,verbosity});
 }
 function providerOutputText(provider,data){ return provider==='cerebras' ? cerebrasOutputText(data) : outputText(data); }
 async function embedTexts(texts) {
@@ -367,8 +364,13 @@ function resolveCanonicalQuestion(session, question) {
   const replacements = [];
   let working = original;
 
+  // Context-aware repair for a high-confidence multi-token STT failure that
+  // token-level edit distance cannot recover: "ask and quarks" -> "*args and **kwargs".
   const technologyContext=normalizeText(`${(session?.profile?.primarySkills||[]).join(' ')} ${(session?.profile?.domainVocabulary||[]).join(' ')} ${(session?.turns||[]).slice(-3).map(t=>t.question).join(' ')}`).toLowerCase();
 
+  // Repair common live-STT Playwright terminology only when the prepared CV/JD or
+  // recent interview context supports that interpretation. This is deterministic
+  // and does not add another model call or retrieval round trip.
   const sqlJoinContext=/\bsql\b/.test(technologyContext) || /\bsql\b/i.test(working);
   if(sqlJoinContext && /\bjoints?\b/i.test(working)){
     working=working.replace(/\bjoints?\b/gi, match=>{
@@ -379,6 +381,8 @@ function resolveCanonicalQuestion(session, question) {
   }
 
   const playwrightFixtureContext=/\bplaywright\b/.test(technologyContext) || /\bfixtures?\b/.test(technologyContext);
+  // "custom fixer" is itself a strong automation-testing STT signal for "custom fixture".
+  // Do not require Playwright to have survived profile extraction before repairing it.
   const explicitCustomFixtureStt=/\bcustom\s+fixer(?:s)?\b/i.test(working);
   if ((playwrightFixtureContext || explicitCustomFixtureStt) && explicitCustomFixtureStt) {
     working=working.replace(/\bcustom\s+fixer(?:s)?\b/gi, match=>{
@@ -387,6 +391,8 @@ function resolveCanonicalQuestion(session, question) {
       return to;
     });
   }
+  // Live STT commonly renders "use of custom fixture" as "username of custom fixer".
+  // Apply this only to the repaired custom-fixture phrase, not to arbitrary username questions.
   if (playwrightFixtureContext || explicitCustomFixtureStt) {
     working=working.replace(/\b(?:user\s*name|username)\s+of\s+(custom\s+fixtures?)\b/gi, (match,fixture)=>{
       const to=`use of ${fixture}`;
@@ -404,6 +410,7 @@ function resolveCanonicalQuestion(session, question) {
   if (!profileVocab.length) return { corrected:working, replacements };
   const corrected = working.replace(/\b[A-Za-z][A-Za-z0-9+#.-]{1,}\b/g, token => {
     const cleanToken = token.toLowerCase().replace(/[^a-z0-9+#]/g, '');
+    // Bias correction toward acronym/technology-looking STT tokens. Ordinary prose is left untouched.
     const techLike = /^[A-Z0-9+#.-]{2,}$/.test(token) || /[+#.]/.test(token) || token.length >= 5;
     if (!techLike) return token;
     let best = null;
@@ -527,12 +534,15 @@ function normalizeRoleTitle(value) {
     .replace(/\s{2,}/g,' ')
     .replace(/^[-–—:,;\s]+|[-–—:,;\s]+$/g,'')
     .trim();
+  // A target role must be a compact job title, never a JD sentence or requirement clause.
   text=text.split(/\s+(?:responsible\s+for|who\s+will|to\s+join|to\s+work|with\s+experience\s+in|having\s+experience\s+in|for\s+our\s+team)\b/i)[0].trim();
   const words=text.split(/\s+/).filter(Boolean);
   if(words.length>9)text=words.slice(0,9).join(' ');
   return text.slice(0,100);
 }
 function explicitRolePattern() {
+  // Keep the match constrained to normal job-title vocabulary so a role field cannot
+  // accidentally become a long sentence from a resume/JD heading or summary line.
   return /\b(?:(?:senior|sr\.?|lead|principal|staff|associate|junior|jr\.?|technical|solution|solutions|cloud|azure|aws|java|python|\.net|dotnet|full[- ]?stack|backend|front[- ]?end|data|analytics|business\s+intelligence|bi|power\s*bi|devops|sre|site\s+reliability|qa|quality\s+assurance|test|automation|machine\s+learning|ml|ai|react|angular|software|application|systems?|platform)\s+){0,5}(?:engineer|developer|architect|tester|analyst|consultant|lead|manager|specialist|administrator)\b|\b(?:sdet|software\s+engineer|software\s+developer|solution\s+architect|solutions\s+architect|data\s+engineer|data\s+scientist|devops\s+engineer|qa\s+engineer|automation\s+engineer|test\s+engineer|technical\s+lead|team\s+lead|business\s+analyst|data\s+analyst)\b/i;
 }
 function compactRoleCandidate(value) {
@@ -587,6 +597,8 @@ function extractExplicitRoleFromJD(documentText) {
       if(candidate)return candidate;
     }
   }
+  // Bare JD titles are accepted only when the line itself looks like a heading/title.
+  // Do not extract "developer" from a responsibility sentence such as "work with developers".
   for(const line of lines.slice(0,45)){
     if(/\b(?:responsibilit|requirement|qualification|experience|must|should|will|work with|collaborat|develop|design|implement|build|maintain|skills?)\b/i.test(line))continue;
     const stripped=line.replace(/\s+[|•·]\s+.*$/,'').trim();
@@ -601,12 +613,14 @@ function extractExplicitRoleFromJD(documentText) {
   return '';
 }
 function extractExplicitRoleFromDocument(documentText) {
+  // Backward-compatible helper used by older call sites; resume-first behavior is
+  // implemented explicitly in inferTargetRoleFromDocuments/generateStructuredProfile.
   return extractExplicitRoleFromResume(documentText);
 }
 function inferRoleFromSkills(resumeText,jdText) {
   const resume=normalizeText(resumeText).toLowerCase();
   const jd=normalizeText(jdText).toLowerCase();
-  const combined=`${resume} ${resume} ${jd}`;
+  const combined=`${resume} ${resume} ${jd}`; // resume evidence receives slightly more weight when both are supplied.
   const rules=[
     ['QA Automation Engineer',[/\bselenium\b/g,/\bplaywright\b/g,/\bcypress\b/g,/\btestng\b/g,/\bjunit\b/g,/\bcucumber\b/g,/\bapi testing\b/g,/\bautomation testing\b/g]],
     ['Data Engineer',[/\bdatabricks\b/g,/\bapache spark\b|\bspark\b/g,/\bdata factory\b|\badf\b/g,/\betl\b/g,/\bdelta lake\b/g,/\bdata pipeline/g,/\bsnowflake\b/g]],
@@ -797,11 +811,14 @@ function isContextualFollowup(question) {
   const q = normalizeText(question).toLowerCase();
   const words = q.split(/\s+/).filter(Boolean);
   if (!q) return false;
+  // Explicit references/modifiers are continuations even when they contain a technology name.
   if (/\b(it|that|this|those|these|them|earlier|previous|above|same|same thing|one example|another example|more detail|what about|how about|show code|give code|alternative code|alternative solution|alternative approach|convert it|rewrite it|same in|do it in|instead|another one|other way|dry run|time complexity|space complexity|edge cases?|optimi[sz]e|without|avoid|do not use|don't use|not using|using only|different way|different approach|another way)\b/.test(q)) return true;
   if (/^(?:in|using)\s+(?:java|python|c#|c\+\+|javascript|typescript|go|golang|rust|kotlin|swift)\??$/.test(q)) return true;
   if (/\b(explain|walk through|why did you|why have you|modify|change|fix)\b.*\b(code|logic|line|function|method|class|solution|algorithm|loop|map|array|string)\b/.test(q)) return true;
+  // A clear standalone topic question should not be attached to the prior turn just because it is short.
   if (/^(what|who|why|when|where|which)\s+(is|are|was|were|do|does|did|can|could|should|would)\b/.test(q)) return false;
   if (/^(explain|define|describe|compare|differentiate|tell me about|difference between)\b/.test(q)) return false;
+  // Very short fragments such as "why?", "how?", "example?" normally depend on the previous turn.
   return words.length <= 3;
 }
 function isInterviewLogisticsQuestion(value) {
@@ -866,6 +883,8 @@ function latestSubstantiveIntent(requests) {
   return '';
 }
 function stripNonSemanticSpeechFillers(value) {
+  // Remove standalone vocalizations before intent detection/retrieval so they cannot
+  // influence the question, evidence ranking, or visible answer. Keep ordinary words intact.
   return normalizeText(value)
     .replace(/\b(?:m+h+m+|h+m+|u+h+|u+m+|a+h+|e+h+|h+a+h+a+(?:h+a+)*|ha(?:ha){1,})\b/gi,' ')
     .replace(/\s+([?.!,;:])/g,'$1')
@@ -939,6 +958,8 @@ function reframeQuestionIntent(rawQuestion) {
     const relation=multiQuestionsRelated(requests)?'RELATED':'DISTINCT';
     return `MULTI_QUESTION: ${relation}\n${requests.map((item,index)=>`Question ${index+1}: ${item}`).join('\n')}`.slice(0,3000);
   }
+  // Long live transcripts often contain old questions plus call/screen chatter. For those,
+  // answer the latest substantive technical request instead of replaying the whole transcript.
   let candidate=conversationalTranscript?latestSubstantiveIntent(requests):(requests[0]||'');
   if(!candidate){
     const cleaned=cleanIntentLead(raw);
@@ -962,19 +983,46 @@ function isCodeTurn(turn) {
   if(!turn)return false;
   return turn.responseType==='code'||turn.responseType==='snippet'||isCodingQuestion(turn.question)||/\b(?:Logic:|Complete code:|Code snippet:)\b|\b(?:class|function|def|public static|return)\b/i.test(turn.answer||'');
 }
+function recentTopicContinuity(session, question) {
+  const turns=session?.turns||[];
+  if(!turns.length)return null;
+  const q=normalizeText(question).toLowerCase();
+  const recent=turns.slice(-3);
+  // If STT produced a malformed/partial technical phrase, inherit a stable topic that was
+  // discussed in the immediately preceding turns instead of guessing a new unrelated topic.
+  const noisy=/\b(?:kind of|something|recently|used|coding|programming|delay|private|resource|situation|changes|implementation)\b/.test(q);
+  const explicitReferent=/\b(?:this|that|these|those|them|same|one|feature|situation)\b/.test(q);
+  const topicPatterns=[
+    /\btry[- ]with[- ]resources?\b/i,
+    /\bidempotenc(?:y|e)|idempotent(?:cy)?(?:[- ]key)?\b/i,
+    /\bjava\s+records?\b|\brecord\s+classes?\b/i,
+    /\b(?:is-a|has-a)\b/i
+  ];
+  for(let i=recent.length-1;i>=0;i--){
+    const combined=`${recent[i].question||''}\n${recent[i].answer||''}`;
+    for(const pattern of topicPatterns){
+      const m=combined.match(pattern);
+      if(m&&(explicitReferent||noisy))return {turn:recent[i],topic:m[0]};
+    }
+  }
+  return null;
+}
 function resolveFollowupIntent(session, question) {
   const turns=session?.turns||[];
   const immediate=turns[turns.length-1];
-  if(!immediate||!isContextualFollowup(question))return {isFollowup:false,resolvedQuestion:question,previous:null};
+  if(!immediate)return {isFollowup:false,resolvedQuestion:question,previous:null};
+  const continuity=recentTopicContinuity(session,question);
+  if(!isContextualFollowup(question)&&!continuity)return {isFollowup:false,resolvedQuestion:question,previous:null};
   const codeReference=isCodingFollowupQuestion(question)||/\b(?:alternative|same|previous|earlier|above)\s+(?:code|solution|implementation)|\b(?:convert|rewrite)\s+(?:it|that)\b/i.test(normalizeText(question));
-  const previous=codeReference?[...turns].reverse().find(isCodeTurn)||immediate:immediate;
+  const previous=codeReference?[...turns].reverse().find(isCodeTurn)||immediate:(continuity?.turn||immediate);
+  const topicHint=continuity?.topic?`\nInherited technical topic: ${continuity.topic}`:'';
   const referenceRule=codeReference
     ? 'Use the nearest recent coding turn as the inherited task. Return the requested code/alternative, not explanation alone.'
     : 'Resolve pronouns and references such as those, them, these, that, this and it from the immediately previous interviewer request/answer. Rewrite the current intent internally as a complete standalone interviewer question using that antecedent before answering. Preserve the newest action word (for example explain, troubleshoot, automate, compare, where, how) so the previous answer supplies context but never replaces the current request. If that context supplies the antecedent, do not ask the interviewer to name it again.';
   return {
     isFollowup:true,
     previous,
-    resolvedQuestion:`${referenceRule}\nPrevious interviewer request: ${previous.question}\nPrevious candidate answer/context: ${String(previous.answer||'').slice(0,5000)}\nCurrent follow-up/modifier: ${question}`
+    resolvedQuestion:`${referenceRule}\nPrevious interviewer request: ${previous.question}\nPrevious candidate answer/context: ${String(previous.answer||'').slice(0,5000)}\nCurrent follow-up/modifier: ${question}${topicHint}`
   };
 }
 function wantsExpandedAnswer(prompt) {
@@ -1028,6 +1076,8 @@ function isCodingQuestion(prompt) {
   const explicitRequest=/\b(?:write|provide|show|give|implement|complete|create|debug|fix|compile|solve)\b.{0,45}\b(?:code|program|function|method|class|algorithm|solution|implementation)\b|\b(?:code|program|function|method|algorithm|solution)\b.{0,35}\b(?:write|implement|debug|fix|complete|create)\b/i.test(q);
   const snippetRequest=/\b(?:show|give|provide|write)?\s*(?:me\s+)?(?:a\s+)?(?:small\s+|simple\s+)?(?:code\s+)?(?:example|snippet)\b.{0,45}\b(?:java|python|c#|c\+\+|javascript|typescript|go|golang|kotlin|sql|shell|bash)\b|\b(?:java|python|c#|c\+\+|javascript|typescript|go|golang|kotlin|sql|shell|bash)\b.{0,45}\b(?:example|snippet)\b/i.test(q);
   const experienceQuestion=/\b(?:have you|do you have|did you|experience (?:with|in)|worked (?:with|on)|used (?:it|that|this|these|those)?\s*(?:in|on)?\s*(?:a|any|past|previous|production)|which project|tell me about your experience)\b/i.test(q);
+  // Mentioning "code", "coding" or a "module" in an experience question is
+  // not a request to manufacture a program.
   if(experienceQuestion&&!explicitRequest&&!snippetRequest)return false;
   if(explicitRequest||snippetRequest||looksLikeJavaScriptCode(prompt)||/```|\b(?:leetcode|hackerrank)\b/i.test(q))return true;
   if(/\b(?:public|private|protected)\s+(?:static\s+)?(?:class|interface|void|int|string)|\bdef\s+\w+\s*\(|\bfunction\s+\w+\s*\(|\b(?:console\.log|system\.out\.println)\s*\(/i.test(q))return true;
@@ -1038,8 +1088,10 @@ function isCodingQuestion(prompt) {
 function isImplementationSnippetQuestion(prompt) {
   const q=normalizeText(prompt).toLowerCase();
   if(!q)return false;
-  return /\b(?:broken|dead)\s+links?\b/.test(q)
-    && /\b(?:how|find|check|identify|validate|verify|detect|handle|test)\b/.test(q);
+  // Some interview questions need explanation plus a tiny API/pattern snippet, not a full program.
+  const brokenLinks=/\b(?:broken|dead)\s+links?\b/.test(q)&&/\b(?:how|find|check|identify|validate|verify|detect|handle|test)\b/.test(q);
+  const resourcePattern=/\b(?:try[- ]with[- ]resources?|autocloseable|custom resource)\b/.test(q)&&/\b(?:how|use|create|implement|example|code|coding|close|resource)\b/.test(q);
+  return brokenLinks||resourcePattern;
 }
 function isVersionQuestion(prompt) {
   const q=normalizeText(prompt).toLowerCase();
@@ -1079,6 +1131,7 @@ function classifyResponseType(question,followupInfo=null,inputSource='') {
   }
   const previousCoding=!!previous&&(previous.responseType==='code'||isCodingQuestion(previous.question)||/```|\b(class|function|def|public static|return)\b/i.test(previous.answer||''));
   if(/screen-capture-diagram/i.test(inputSource))return 'diagram';
+  if(isImplementationSnippetQuestion(question))return 'snippet';
   if(/screen-capture-code/i.test(inputSource))return 'code';
   if (isDiagramQuestion(question)) return 'diagram';
   if (isCodingQuestion(question)||(previousCoding&&(isCodingFollowupQuestion(question)||isCodeConstraintFollowup(question)))) return 'code';
@@ -1104,7 +1157,7 @@ function exampleGuidance(question, followupInfo=null) {
   const shape=spokenAnswerShape(question);
   const explicit=/\b(example|examples|for example|scenario|use case|real[- ]?time|real[- ]?world|where did you use|how did you use|what did you implement|what exactly you did|implemented in your project|used in your project|in your project)\b/i.test(q);
   const projectApplication=/\b(used|implemented|applied|handled|handling|business logic|additional logic|project|production|current engagement|worked on)\b/i.test(q);
-  const narrowCorrection=/^(?:no[,. ]+|correct|right|but|okay|so)?\s*(?:is that|does that|will that|can that|are you saying|do you mean|why\??$\vert{}how\??$)/i.test(q)
+  const narrowCorrection=/^(?:no[,. ]+|correct|right|but|okay|so)?\s*(?:is that|does that|will that|can that|are you saying|do you mean|why\??$|how\??$)/i.test(q)
     || /\b(checkpoint only|insert(?:s)? versus update(?:s)?|identify insert|identify update)\b/i.test(q);
   const alreadyConcreteFlow=shape==='IMPLEMENTATION_FLOW' && /\b(how (?:are|do|did|would)|load(?:ed|ing)?|process(?:ed|ing)?|flow|pipeline|from .{0,30} to)\b/i.test(q);
 
@@ -1112,7 +1165,7 @@ function exampleGuidance(question, followupInfo=null) {
   if(narrowCorrection) return 'OMIT_UNLESS_NEEDED: This is primarily a correction/clarification. Do not add a separate example when the mechanism itself answers the question; add one only if it resolves otherwise-remaining ambiguity.';
   if(projectApplication && ['EXPERIENCE','CONCEPT','DIRECT','FEATURES'].includes(shape)) return 'INCLUDE_IF_GROUNDED_AND_USEFUL: Prefer one short concrete project/production example when it makes the answer easier to explain. Use only RETRIEVED EVIDENCE for personal/project facts. Skip the example if the evidence is insufficient or the preceding sentence is already concrete enough.';
   if(alreadyConcreteFlow) return 'OPTIONAL_NON_REDUNDANT: The answer is already an implementation/process flow. Add one short example only when it demonstrates a decision, transformation, or business outcome not already obvious from the flow; otherwise omit it.';
-  if(shape==='CONCEPT') return 'OPTIONAL_FOR_CLARITY: Add one concise example only when the concept is materially easier to understand through application. Do not force examples for narrow definitions or facts.';
+  if(shape==='CONCEPT') return 'OPTIONAL_FOR_CLARITY: When an example materially helps, prefer one concise professional example using the candidate/JD domain and frameworks supported by RETRIEVED EVIDENCE (for example a service/repository/API/event pattern) rather than toy examples such as Car/Vehicle or Animal/Dog. Do not invent project facts and do not force examples for narrow definitions or facts.';
   return 'OPTIONAL_NON_REDUNDANT: Use one concise example only when it materially improves the answer. Never add an example merely to fill space, and never invent candidate-specific facts.';
 }
 
@@ -1137,6 +1190,9 @@ function responseMode(question, followupInfo=null, inputSource='') {
 }
 function answerTokenBudget(question, hasImage=false,responseType='') {
   const q = String(question || '');
+  // max_output_tokens is a ceiling, not a target. A slightly larger ceiling prevents
+  // Responses API reasoning tokens from crowding out the visible interview answer.
+  // The prompt still keeps normal answers concise, so this does not force extra verbosity.
   if (responseType==='code'||isCodingQuestion(q)) return null;
   if (responseType==='multi') return /\b(?:code|program|function|method|implement|write)\b/i.test(q)?null:1800;
   if (responseType==='snippet'||isImplementationSnippetQuestion(q)) return 1600;
@@ -1177,7 +1233,8 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
   const priorAnswersForRegenerate=sameQuestionAnswers.length?sameQuestionAnswers:session.turns.slice(-1);
   const reanswer=regenerate
     ? `YES. Re-answer the same interviewer request with a materially different, independently useful approach while preserving all factual grounding and explicit constraints. Correct any weakness in the earlier answers. Do not mention that this is a retry or re-answer. For coding, use a different valid implementation/structure when practical without violating the requested constraints. Recent answers to avoid merely repeating:
-${priorAnswersForRegenerate.map((turn,index)=>`Earlier answer ${index+1}:${String(turn?.answer||'').slice(0,3500)}`).join('\n\n')}`
+${priorAnswersForRegenerate.map((turn,index)=>`Earlier answer ${index+1}:
+${String(turn?.answer||'').slice(0,3500)}`).join('\n\n')}`
     : 'NO';
   return `CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nUSER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n${userInstructions || 'No additional user instructions.'}\nApply these instructions to every answer in this prepared session when they are compatible with factual grounding and the mandatory coding/diagram contracts. Treat requests such as STAR format, very short answers, explanatory style, behavioral-answer style, or experience-first wording as persistent presentation preferences.\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nCODE LANGUAGE HINT\n${codeLanguage || 'No explicit language detected; preserve the language requested or inherited from the referenced coding turn.'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
 }
@@ -1187,6 +1244,7 @@ GROUNDING — INTERNAL ONLY:
 - Treat RETRIEVED EVIDENCE as the only source of truth for candidate-specific experience, project ownership, employers, dates, metrics, tools actually used, responsibilities, certifications, and other resume/JD-specific facts. Do not invent or upgrade a personal claim from general model knowledge.
 - Use resume/JD evidence silently to make candidate-specific answers accurate. NEVER print source tags, citations, evidence IDs, resume headings, JD headings, or labels such as "Resume · ..." / "JD · ..." in the visible answer.
 - General technical knowledge may supplement the explanation, but it must not be rewritten as a personal claim unless the supplied resume evidence supports it.
+- CONTINUITY OVERRIDES AMBIGUITY: when the current question says this/that/these/those/it/the feature/the situation, resolve it from RECENT INTERVIEW CONTEXT and the immediately preceding answer before asking for clarification. If STT slightly corrupts a phrase but the last 1-3 turns establish one stable technical topic, answer that topic conservatively instead of switching to an unrelated technology. Never acknowledge call/audio/network/screen logistics in the candidate answer.
 - If a question asks about the candidate's own experience and the retrieved evidence does not support the requested fact, do not fabricate first-person experience. State the production-experience boundary once, then immediately give a strong practical implementation/POC-level answer with the same technical depth you would use if discussing the technology: architecture, key steps, failure handling, security/observability where relevant, and how you would validate it. Never stop after saying you have not used it.
 
 INTERNAL ANALYSIS DISCIPLINE — FINAL ANSWER ONLY:
@@ -1201,305 +1259,1104 @@ INTERNAL ANALYSIS DISCIPLINE — FINAL ANSWER ONLY:
 
 QUESTION INTENT IS AUTHORITATIVE — FOR EVERY MODEL:
 - Parse and answer the current interviewer question independently first. RECENT INTERVIEW CONTEXT is non-authoritative background unless CONTEXTUAL FOLLOW-UP explicitly says YES.
-- Never narrow a new standalone question to the technology/topic from the previous turn.
+- Never narrow a new standalone question to the technology/topic from the previous turn. Example: after "Selenium Java framework folder structure", "What automation challenges did you face?" means automation-level challenges, not TestNG-specific challenges.
 - Use previous turns only for explicit pronouns/modifiers/continuations such as "that", "same", "why?", "show code for it", or when CONTEXTUAL FOLLOW-UP says YES.
 - A coding constraint/modifier such as "without StringBuilder", "do not use streams", "another way", or "using only loops" inherits the immediately previous coding task. It MUST remain a coding answer and include the complete updated code, not explanation alone.
 - Prefer the exact noun/domain in the current question over nouns appearing only in history.
+- For a standalone current question, previous Q/A content is deliberately omitted. Never answer the previous topic. Example: after BDD hooks, 'OOP concepts you implemented with examples' must answer OOP concepts (encapsulation, abstraction, inheritance/polymorphism as actually supportable), not hooks.
 
 CONCEPT COMPLETENESS:
 - For a finite, standard concept/list explicitly requested by the interviewer, give the complete commonly supported set in the first answer when it is practical, not a partial list that requires repeated follow-ups.
 - Keep completeness proportional: name the complete set, explain each item briefly, and do not add unrelated framework trivia.
+- If versions/frameworks differ, state that compactly instead of confidently inventing or mixing APIs.
 
 UNDERSTAND THE INTERVIEWER, NOT THE RAW TRANSCRIPT:
-The input is noisy live speech. Remove repetitions, fillers and false starts. Infer the final intended technical question from the complete current utterance plus recent interview turns. Silently repair phonetic technology names from the canonical Resume/JD vocabulary and surrounding topic.
+The input is noisy live speech. Remove repetitions, fillers and false starts such as "okay", "basically", "you know", "mhmm", "hmm", "aaa", "uh", laughter/vocalizations, duplicated words and incomplete lead-ins. These have zero semantic weight and must never appear in or steer the answer. Infer the final intended technical question from the complete current utterance plus recent interview turns. Silently repair phonetic technology names from the canonical Resume/JD vocabulary and surrounding topic. Never say "you mean", "not X", "I assume", or ask for confirmation when one interpretation is clearly supported by context.
 
-Use REFRAMED CURRENT INTENT as the authoritative current question and RESPONSE MODE as the authoritative output format. RAW CURRENT TRANSCRIPT is context only.
+Use REFRAMED CURRENT INTENT as the authoritative current question and RESPONSE MODE as the authoritative output format. RAW CURRENT TRANSCRIPT is context only. The mere presence of words such as code, coding, development, DevOps, program, class, module, Java or Python never makes an experience, behavioral, conceptual or project question a coding task. Do not carry a prior coding format into a new topic. Continue in coding format only when the current intent explicitly requests implementation/code or clearly asks about the immediately previous code.
+
+Treat adjacent/continued interviewer fragments as one intent only when they are clearly related. When one captured utterance contains two or more complete questions, MULTI-QUESTION POLICY is authoritative: answer all detected questions in the same response. If they are related, combine them naturally while covering every requested point. If they are distinct, answer the first briefly at a useful high level, then move immediately to the second in the original order. Never discard an earlier complete question merely because a newer one follows in the same prompt. Pronouns/modifiers such as "it", "that", "this", "those", "same", "using Java", "give one example", "give me two", "the second one", "what about security", and "how does that flow work" inherit the immediately preceding topic. Preserve explicit constraints exactly: requested count, language, format, scenario, flow, comparison, code contract, or output.
 
 INTERVIEW DELIVERY CALIBRATION:
-- Produce the answer the candidate can speak directly to the interviewer, not a compressed notes summary.
-- For experience, role, day-to-day, tools, challenges and project questions, prefer 3-5 short connected paragraphs rather than a terse bullet checklist.
-- Make the answer role-aware. Lead with the strongest Resume-supported experience that overlaps the target role.
-- Visual emphasis is allowed only through **double-asterisk emphasis** around a small number of important technologies, responsibilities, controls or decision words.
-- Natural explanation rule: prefer a small connected explanation over a compressed checklist. For a concept, normally state the idea, explain the runtime/working behavior, then add one practical usage or implication when it adds real value.`;
+- Produce the answer the candidate can speak directly to the interviewer, not a compressed notes summary. Prefer natural first-person wording such as "I use", "I validate", "I review", "I work with" when Resume evidence supports the claim.
+- For experience, role, day-to-day, tools, challenges and project questions, prefer 3-5 short connected paragraphs rather than a terse bullet checklist. Each paragraph should carry one clear idea and normally be 1-3 sentences. Use bullets only when the question naturally asks for a list, comparison, steps, features or troubleshooting sequence.
+- Make the answer role-aware. Lead with the strongest Resume-supported experience that overlaps the target role, then explain concrete current/recent-project mechanics. JD requirements may decide relevance/order, but they never create personal experience.
+- When the Resume supports a specific current/recent client, project, platform or responsibility that directly answers the question, prefer that concrete evidence over generic skill-list wording. Do not mix unrelated tools from older projects merely to make the answer look broader.
+- For "what tools" questions, group tools by how they are actually used (platform/pipeline, validation, automation, API, CI/CD, test management) and explain the role of each group in one sentence.
+- For challenge questions, explain the challenge and the concrete handling in the same paragraph. For "your role in those/these challenges", inherit the previously discussed challenges and answer ownership/actions rather than repeating the challenge list.
+- For yes/no questions, start with "Yes." or "No." when the answer is genuinely binary, then explain the distinction in 2-4 short paragraphs/sentences. For "How" questions, start with the implementation/action. For "What" questions, define the requested item directly, then explain its practical meaning. For difference/comparison questions, state the core distinction first.
+- Use blank lines between logical paragraphs so the live answer is easy to scan while speaking. Avoid dense walls of text.
+- Visual emphasis is allowed only through **double-asterisk emphasis** around a small number of important technologies, responsibilities, controls or decision words. Emphasize selectively (normally 1-3 short phrases per paragraph), never entire sentences and never every keyword. The overlay renders these markers as bold text.
+- Keep the answer substantive but prioritized. Lead with the 3-5 points that most directly answer the question, strongest first. Stop once the interviewer has the complete story; do not append low-value adjacent technologies or generic lifecycle detail merely because it is available.
+- Use plain human interview language. Prefer short, natural sentences over polished essay language. A normal answer should fit comfortably inside 90 seconds; only an explicit deep dive may run longer, with a hard ceiling of about two minutes.
 
-// --- API ENDPOINTS ---
 
-app.get('/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
-app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+NARROW TECHNICAL QUESTION DISCIPLINE:
+- Treat the interviewer’s requested boundary as a hard scope limit. If they ask one mechanism, one example, one API, one SQL construct, or a general "how does X work" question, answer that exact thing first and stop after the minimum useful explanation.
+- Do not turn a narrow question into an options survey. Mention alternatives only when the interviewer asks for alternatives/examples or when one contrast is necessary to avoid a misleading answer. Even then, give the strongest 2-3 relevant choices, not every possible approach.
+- Prefer the mechanism implied by the current architecture and recent interview context. Example: in a Spring MVC multi-page server-side workflow, lead with HTTP session / @SessionAttributes for temporary form state; do not lead with Angular state, NgRx, browser storage and database drafts unless the interviewer is specifically asking about a client-side Angular design or persistence across sessions.
+- For framework plumbing questions such as Spring JDBC, answer the runtime path directly: configured DataSource -> pooled JDBC Connection -> JdbcTemplate/DAO executes SQL -> maps results/translates exceptions -> releases the connection. Do not drift into unrelated UI modernization or architecture unless asked.
+- For a narrow conceptual answer, normally use 2-4 sentences. If the interviewer explicitly asks for examples, give at most 2-3 concise examples unless they request a count or deeper detail.
+- Do not add security, persistence, state-management libraries, cloud services, transactions, monitoring, or other adjacent concerns merely because they are good engineering practices. Include them only when they materially answer the current question.
 
-app.post('/api/session/start', async (req, res) => {
+ANSWER PRIORITY AND SHAPE:
+1. Answer exactly the authoritative current intent. For MULTI_QUESTION input, cover every detected question in order; otherwise answer the single current question. The first sentence must contain the answer itself — the requested value, return/status code, decision, action, or core distinction — whenever one exists. This is a gunshot opening: no acknowledgement, no 'Logic:' label, no restatement, no setup, and no generic background before the answer.
+   RECENCY RULE: when a live transcript contains older discussion plus a newer substantive request, answer the newest substantive request. Older content is context only and must not be re-answered unless the newest request explicitly refers to it. Ignore screen-sharing, typing, window-control, audio/video, greetings, meals, confirmations, and other interview logistics; never claim I performed those physical/UI actions.
+2. SPOKEN ANSWER SHAPE is authoritative for normal spoken answers:
+   - INTERVIEWER_HANDOFF: Do not introduce myself or continue the previous technical answer. Give 2-3 concise, natural questions I can ask the interviewer about the role, team, priorities, delivery expectations, or current challenges. Prefer questions that use any concrete team/role context already present.
+   - VERSION: Put the requested version in the first short sentence immediately. If an exact project version is explicitly supported by evidence, use it. If the technology is present in the Resume/JD/current technical context but the exact project version is not documented, never lead with 'not in the resume/CV', 'I cannot determine it', or 'I haven't used it'; give a clearly conservative production-era stable version estimate, normally one stable major/minor behind the newest stable line you know, then add at most one short sentence noting the newer line when useful. Do not claim the estimate is resume-verified or fabricate an exact patch/build number.
+   - DIRECT / CONCEPT: Start with 1 direct sentence, then add a short 2-4 sentence explanation that connects what it is -> how it works -> why/when it matters. Do not stop at keywords when one more sentence would make the concept speakable.
+   - FEATURES: 1 direct sentence, blank line, then 3-5 short hyphen bullets. Each bullet must be a complete mini-explanation: name the feature, explain the mechanism or behavior, and state the practical reason it matters when useful. Never output keyword-only bullets.
+   - COMPARISON: 1-line distinction, blank line, then 2-4 labelled hyphen bullets. Each bullet must explain the real behavioral/decision difference in a complete sentence, not just list attributes.
+   - EXPERIENCE: 1 direct first-person sentence, then 3-5 short connected paragraphs/sentences covering what I owned, how the important pieces worked together, and the practical outcome. Prefer paragraph form over bullets unless the interviewer explicitly asks for a list. Explain the flow naturally instead of listing tools. Never manufacture a named technology just because the JD asks for it.
+   - IMPLEMENTATION_FLOW: 1 direct architecture/implementation choice, then 3-6 concise ordered paragraphs or bullets showing source -> processing -> controls -> target/consumer. Prefer short paragraphs for conversational framework/day-to-day explanations; use bullets when the interviewer asks for steps or when sequence is clearer that way. Each step must explain what happens and why it is there.
+   - TROUBLESHOOTING: immediate production action first, blank line, then 3-5 ordered hyphen bullets covering evidence collection, isolation, fix, and validation. Each step should say what I inspect/do and what that tells me. Do not guess one root cause without evidence.
+3. Readability is mandatory. Never emit one dense wall of text for a multi-point answer. Put each bullet on its own line and put one blank line before a bullet block. For non-bulleted answers longer than three sentences, use short paragraphs of 1-2 sentences each.
+4. Prefer implementation reality over textbook theory. Explain what runs, where it runs, what data moves, what control is applied, and why the choice is made. Avoid generic phrases such as "it improves scalability", "it is robust", or "it provides seamless integration" unless you name the concrete mechanism that makes that true.
+5A. For senior-engineer concept examples, prefer a concise production-shaped example grounded in the supplied Resume/JD stack/domain over classroom examples such as Car/Vehicle, Animal/Dog, or generic Student objects. For Java/Spring interviews, a service/repository, DTO/event, account/order, API, database, Kafka, or cloud example is usually more interview-ready when supported by evidence.
+5. Match length to the question. Narrow factual/correction/follow-up: 1-3 sentences. Normal experience/concept/implementation: roughly 35-75 seconds of speech and normally no more than 4-5 important points. Put the highest-value point first so the answer still lands if the interviewer interrupts. End-to-end or explicitly detailed flow: roughly 60-90 seconds. Only an explicit deep-dive request may approach two minutes; never exceed two minutes. Do not fill the token budget merely because it is available.
+6. Strictly answer the boundary asked. Do not volunteer adjacent technologies, security controls, observability, framework variants, or architecture patterns unless they directly answer the current question.
+7. Preserve concrete values/examples from the interviewer. If the interviewer gives a number, SLA, source system, failure point, or requested count, use that exact constraint in the answer.
+8. Sound like a senior engineer speaking naturally: clear, practical, first-person where factual, and immediately speakable. Use complete sentences, not keyword chains. Avoid bookish definitions and sales-style wording.
+   Natural explanation rule: prefer a small connected explanation over a compressed checklist. For a concept, normally state the idea, explain the runtime/working behavior, then add one practical usage or implication when it improves understanding. For an experience answer, connect actions with cause/effect ("we did X so Y happened") instead of stacking product names.
+   Keep technical terms that matter, but explain their role in the sentence. The answer should be easy to read once and say back naturally without the candidate having to mentally expand shorthand.
+9. Do not repeat a stock answer across questions. Adapt to the current intent, actual Resume evidence, JD priorities, years of experience, target role and recent interview context without exposing those sources.
+10. Prefer current production approaches; use legacy approaches only when asked or when the supplied experience specifically requires them.
+
+FACTUAL OWNERSHIP / RESUME GROUNDING — NON-NEGOTIABLE:
+- Resume evidence is the only authority for claims that I personally used, built, implemented, owned, deployed, migrated, optimized or operated something. JD content describes the target role; it is NOT evidence that I did it.
+- Never convert a JD requirement into past experience. Never invent a client use case, metric, architecture, Cortex implementation, fraud use case, contract analytics implementation, vector store, Streamlit dashboard, Snowpipe pipeline, or any other project detail unless Resume evidence supports it.
+- When Resume evidence supports the surrounding platform but not the exact named feature, answer maturely: state the boundary once, then connect the closest real production work and explain how I would implement the requested feature. Example pattern: "My recent Snowflake work was on governed AI/platform integration rather than a production Cortex Analyst implementation specifically. I owned <supported work>. For Cortex Analyst, I would extend that foundation by <practical implementation>." Do not sound defensive and do not mention the Resume/JD.
+- If the technology is completely unsupported by Resume evidence, say once: "I haven't used <technology> in production." Then immediately give 3-5 practical implementation/POC points showing how it works in a production-style setup and how I would validate it. Do not stop at the limitation. Do not invent that I actually completed a local POC, freelancing engagement, or production implementation when the evidence does not support that claim; phrase unsupported hands-on work as the concrete approach I would take.
+- If supported, prefer strong ownership language such as "I built", "I implemented", "I owned", "I handled", or "I used" and tie it to the actual project context and production mechanics.
+- Never invent numerical improvements or latency reductions unless the supplied Resume evidence contains that metric.
+
+SELF INTRODUCTION:
+If asked for self-introduction/introduction/about yourself, produce one natural approximately 2-minute spoken introduction using the candidate's actual experience, strongest role-relevant projects/skills, production ownership and current target direction. Do not say it is aligned to the Resume/JD and do not list every skill. It must sound spoken, not like a profile summary.
+
+SCENARIO / SECURITY / ARCHITECTURE QUESTIONS:
+Only when the interviewer gives a TRUE hypothetical scenario/problem that requires design choices (for example: 'suppose...', 'design...', 'how would you handle this situation...'), start with 1-2 short, useful clarification questions I can ask before the solution. Do NOT treat an experience question ('what challenges did you face?'), a security/architecture topic by itself, a narrow follow-up, a challenge/correction, or a direct 'why' question as scenario-based. For those, answer immediately. For a true scenario, format the opening exactly for easy reading: start the first clarification with 'Can you please clarify on ' followed by the single most important clarification question. If a second clarification is genuinely useful, start it with 'Kindly confirm on ' followed by the confirmation question. Do not say 'I would clarify', 'I would ask', 'before I proceed', or similar narration. After those 1-2 questions, continue directly with the concise implementation solution using the best reasonable assumptions and relevant prior context.
+Answer the boundary actually asked. Trace the real request/token/data flow point-to-point where relevant. If asked for N scenarios, give exactly N. Mention technologies such as MCP, direct API, OBO, managed identity, client credentials, RBAC, Key Vault, queues, caches, etc. only when they directly explain the requested scenario or are supported by context. Give the implementation choice and operational reason, not a textbook definition.
+
+CODING QUESTIONS:
+When RESPONSE MODE says MINIMAL_SQL_EXAMPLE, obey that narrower contract instead of the generic coding contract: output only the requested SQL query plus the smallest useful sample input/output. Never add CREATE TABLE, INSERT, schema, constraints, setup/cleanup statements, stored procedures, or unrelated SQL unless the interviewer explicitly asks for them. A request such as "show a sample INNER JOIN" needs the INNER JOIN query, not database scaffolding.
+
+When RESPONSE MODE says CODING_REQUIRED, code is mandatory even if the question came from screen capture and even if the interviewer did not literally say "code". Also treat an explicit request for a small example/snippet that is best demonstrated in code as a coding answer, but do not turn ordinary conceptual or experience questions into coding merely because a programming language is mentioned. Start with "Logic:" and give the simple approach in 1-2 concise lines. Then write "Complete code:" and provide one complete working end-to-end solution or the smallest complete snippet that directly demonstrates the requested concept. Add concise inline comments to every meaningful logical step so I can explain it line by line. Preserve the requested language, visible method/class signatures, input/output contract and constraints. Never return explanation alone for an algorithmic problem. For a coding follow-up, place the requested explanation/change first and then repeat the complete earlier code, updated when required, so the candidate can continue from the full solution. A language-only follow-up preserves the previous task exactly and rewrites the complete solution in that language. For a visible error/edit, identify the exact failing block and still provide the complete corrected program when enough context is available. When you print a complete runnable program, also provide exactly one concise "Sample input:" and corresponding "Sample output:" after the code so the candidate can explain the program behavior. Do not force sample input/output for a tiny API/configuration snippet that has no meaningful console or function input/output contract. Mention complexity and edge cases briefly after code when useful.
+
+IMPLEMENTATION-SNIPPET QUESTIONS:
+When RESPONSE MODE says EXPLANATION_WITH_CODE_SNIPPET, the interviewer expects both the practical explanation and a short code example. Explain the approach first, then output "Code snippet:" and the smallest usable snippet in the requested or context-supported language/framework. Broken-link detection/validation questions are a canonical example: explain status-code validation briefly and then show the concise implementation. Do not return explanation alone. Do not inflate this into a full application with boilerplate or sample I/O unless explicitly requested.
+
+
+FLOW / ARCHITECTURE DIAGRAM QUESTIONS:
+When RESPONSE MODE says DRAWABLE_DIAGRAM_REQUIRED, a diagram is mandatory. Give one short overview line, then provide a detailed monospaced Unicode box-drawing diagram designed to be copied into Notepad or redrawn in draw.io. Build real boxes with ┌ ─ ┐ │ └ ┘, use a vertical layout where possible, and include arrows with direction, numbered steps, labelled decision branches, request/data paths, external dependencies, storage and error/return paths relevant to the question. Do not use a one-line arrow sentence or bracket-only placeholders such as [Component]. Do not substitute a prose-only architecture explanation. After the diagram, add only the concise explanation needed to present the flow.
+
+FORMAT:
+LIVE OUTPUT IS IMMUTABLE: decide the final answer structure and wording before emitting the first token. Never stream a draft and then restate, shorten, rewrite, or reformat it later; the first visible answer must already satisfy the requested response contract.
+Return lightweight display text only. You may use **double-asterisk bold markers** selectively for important interview keywords; do not use italics, headings, tables or decorative Markdown. Make the answer visually readable in the existing plain-text overlay: one direct opening sentence/paragraph, then a blank line before bullets when bullets are useful. Use hyphen bullets only; keep them short and normally limit them to 3-5. For comparison/difference questions, prefer paired bullets such as "- OAuth 2.0: ..." and "- JWT: ...", followed by one short practical conclusion when useful. For a narrow fact or yes/no follow-up, stay with 1-3 sentences and no bullets. For small coding questions, do not create a page of explanation: give Logic in 1-2 lines, Complete code with the smallest complete runnable solution, and at most 1-2 lines after it for complexity/edge cases. For a narrow SQL example, skip unrelated setup and treat the requested SELECT/JOIN statement itself as the complete code; include only the tiny sample input/output needed to demonstrate the result. The minimal labels "Logic:", "Complete code:" and "Flow diagram:" are required only for their matching response modes. For coding output, write the code directly after "Complete code:" (or "Code snippet:") and preserve indentation and inline comments. Do not show Markdown fence markers to the user; the overlay automatically presents the code portion in a separate editor-style block. Do not give competing solutions unless explicitly asked. Avoid generic transitions such as 'First', 'Second', 'Finally' unless sequence itself matters. Prefer concrete production nouns, exact roles/operations and the reason they were used. If the current wording is unclear or corrupted, first resolve it from the immediately preceding 1-3 interview turns, their answers, canonical Resume/JD vocabulary, and the newest action being requested. Ask for clarification only when those sources still leave two or more materially different plausible technical meanings; never invent missing facts. The final output must be accurate, question-specific and sufficiently explained for the candidate to speak without mentally expanding keywords. Before returning, remove only content that is repetitive, generic, or outside the exact question; do not remove the short implementation explanation that makes the answer interview-ready.
+
+INTERVIEW ANSWER SHAPE CALIBRATION:
+Interviewer: "How did you secure integrations?" Candidate shape: Start with one direct first-person answer, then explain the 2-4 relevant controls as complete sentences—for example authentication, transport protection, credential storage and authorization—only when supported by context. Do not return a comma-separated technology list.
+Interviewer: "Data is not coming on the landing page. How do you debug it?" Candidate shape: Give the starting check, then walk through the practical troubleshooting sequence (client/API response, data source/data page, logs/tracer, UI mapping/access) in concise complete sentences.
+Interviewer: "What happens when a user opens a case?" Candidate shape: Explain the runtime flow in order from client request to API/data retrieval, server-side access/business-rule evaluation, client rendering and action submission. Keep it conversational and technically specific.
+
+HUMAN EXPLANATION CALIBRATION:
+- Do not answer as a glossary or keyword map. A strong answer should read like a knowledgeable engineer explaining the point to another engineer.
+- Example shape for a concept: "Playwright auto-waiting is built into locator actions and assertions, so I normally do not add separate waits. Before an action such as click or fill, it waits for the element to become actionable, which removes a lot of timing-related flakiness; explicit waits are only for exceptional application conditions."
+- Example shape for troubleshooting: "I fix flaky tests by removing the nondeterminism instead of hiding it with retries. I first use traces/logs/screenshots to identify whether the issue is timing, test data, shared state or an unstable dependency, then I stabilize that specific layer and validate it with repeated isolated runs."
+- These are style examples only. Do not copy their technologies or facts into unrelated answers.
+
+INTERVIEW PRESENTATION CALIBRATION:
+- Narrow factual question: answer directly in 1-3 sentences. Example shape: "Integer division by zero throws ArithmeticException at runtime. If the divisor is the literal 0 in a constant expression, Java can reject it at compile time."
+- Feature/advantage question: one direct sentence, then 3-5 short bullets with the feature and why it matters.
+- Difference/comparison question: one-line distinction first, then 2-4 compact labelled bullets. Do not write a long essay.
+- Experience/project question: speak in first person only when supported by retrieved resume evidence; give what I used, where/how I used it, and the practical result in 2-4 concise sentences.
+- Troubleshooting/scenario question: give the immediate production action first, then 3-5 ordered hyphen bullets covering diagnosis, evidence, fix, and validation. Do not guess a single root cause without evidence.
+- Small code request: smallest complete working code that answers the request; avoid framework scaffolding unless the interviewer asked for it.
+- If the interviewer mispronounces or live transcription slightly corrupts a technical term, silently infer the nearest context-supported term from the prepared CV/JD vocabulary, retrieved evidence, and recent technical topic. Prefer a clear domain interpretation over asking for rephrasing when the surrounding context makes it unambiguous; for example, in Playwright automation context, "custom fixer" should be understood as "custom fixture" when fixtures are supported by the session context.
+
+CALIBRATION EXAMPLES:
+Interviewer: "Do you need Contributor at runtime?" Candidate: "No. Runtime only needs the least-privileged data-plane role required for reads. Contributor is needed only for deployment or management operations that change resources."
+Interviewer: "Have you used ToolX in production?" Candidate: "I haven't used ToolX in production. I understand its core pattern and would validate it first with a small POC covering integration, failure handling, security, and observability."
+Interviewer: "You mentioned code in your DevOps project. Have you used Agile methodology?" Candidate format: normal concise spoken experience answer; never Logic/Complete code.
+Interviewer: "Find the first non-repeating character in a string." Candidate format: Logic plus complete runnable code with inline comments.
+After that code, interviewer: "without StringBuilder." Candidate format: keep the same coding task, explain the changed approach briefly, then provide the complete updated runnable code without StringBuilder.
+Interviewer: "How do you find broken links in Selenium?" Candidate format: concise explanation followed by Code snippet: with the practical link/status validation code.
+After a coding turn, interviewer: "Do you have experience with Xpedition and Capital integration?" Candidate format: normal concise spoken experience answer; never repeat the earlier code.
+Interviewer: "asdf asdf asdf" Candidate: "I’m not sure what you’re asking. Please rephrase the question."`
+function strictModeInstructions(responseType) {
+  if(responseType==='multi')return 'NON-NEGOTIABLE OUTPUT CONTRACT: The current prompt contains multiple interviewer questions. Cover every question in the original order. Related questions may be merged into one connected explanation; distinct questions must both be answered, with the first concise and the second immediately after it. Never answer only the last question. If a sub-question requests code, include usable code for that sub-question.';
+  if(responseType==='code')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This is a coding response. Explanation without usable code is invalid. For a narrow SQL query/join example, the requested SQL statement itself is the complete solution: do not add CREATE TABLE, INSERT, schema/setup/cleanup, or other scaffolding unless explicitly requested; include a tiny Sample input: and matching Sample output:. For other coding tasks, output Logic:, then Complete code:, then the full runnable code with meaningful inline comments. When a complete runnable program is printed, include one Sample input: and matching Sample output:. For a follow-up, include the entire previous solution again after the explanation.';
+  if(responseType==='snippet')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This question requires a practical implementation snippet. Give the concise explanation first, then Code snippet: followed by usable code. Explanation-only output is invalid. Keep the snippet small; do not force full program scaffolding or sample input/output unless requested.';
+  if(responseType==='diagram')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This is a diagram response. A prose chain on one line is invalid. Output Flow diagram:, then a multi-line Notepad-friendly Unicode diagram containing at least three real boxes made with ┌ ─ ┐ │ └ ┘ and connected by directional arrows. Include relevant labelled branches and supporting components.';
+  return '';
+}
+function removeExactRepeatedOutput(value) {
+  const text=normalizeStructuredText(value);
+  if(text.length<100)return text;
+  const needle=text.slice(0,Math.min(90,Math.floor(text.length/3))).trim();
+  const second=needle.length>=35?text.indexOf(needle,needle.length):-1;
+  if(second>0){
+    const firstHalf=text.slice(0,second).trim();
+    const secondHalf=text.slice(second).trim();
+    if(normalizeText(firstHalf)===normalizeText(secondHalf))return firstHalf;
+  }
+  return text;
+}
+function hasCompleteCode(answer) {
+  const text=String(answer||'');
+  const lines=text.split('\n').filter(line=>line.trim()).length;
+  const executable=/```|\b(class|interface|function|def|public static|static void|return|for\s*\(|while\s*\(|if\s*\(|console\.log|System\.out)\b/i.test(text);
+  const commented=/\/\/|\/\*|^\s*#(?!#)/m.test(text);
+  return lines>=8&&executable&&commented;
+}
+function hasCodeSnippet(answer) {
+  const text=String(answer||'');
+  const hasLabel=/\bCode snippet:\s*/i.test(text);
+  const executable=/\b(?:class|function|def|return|for\s*\(|while\s*\(|if\s*\(|try\s*\{|catch\s*\(|new\s+[A-Z]|driver\.|HttpURLConnection|requests\.|fetch\s*\(|axios\.|console\.log|System\.out)\b/i.test(text);
+  return hasLabel&&executable&&text.split('\n').filter(line=>line.trim()).length>=4;
+}
+function hasDrawableDiagram(answer) {
+  const text=String(answer||'');
+  const tops=(text.match(/^\s*┌[─-]{3,}┐\s*$/gm)||[]).length;
+  const bottoms=(text.match(/^\s*└[─-]{3,}┘\s*$/gm)||[]).length;
+  const connectors=(text.match(/[↓↑→←↔]|(?:--?>)|(?:\n\s*[│|]\s*\n)/g)||[]).length;
+  return Math.min(tops,bottoms)>=3&&connectors>=2;
+}
+function wrapDiagramLabel(value,maxWidth=48) {
+  const words=normalizeText(value).replace(/^\[[\s]*|[\s]*\]$/g,'').split(/\s+/).filter(Boolean);
+  const lines=[];
+  let line='';
+  for(const word of words){
+    if(!line){line=word.slice(0,maxWidth);continue;}
+    if(`${line} ${word}`.length<=maxWidth)line+=` ${word}`;
+    else {lines.push(line);line=word.slice(0,maxWidth);}
+  }
+  if(line)lines.push(line);
+  return lines.length?lines:['Step'];
+}
+function renderDiagramBox(label) {
+  const lines=wrapDiagramLabel(label);
+  const width=Math.max(24,Math.min(48,Math.max(...lines.map(line=>line.length))));
+  const fitted=[];
+  for(const line of lines){
+    if(line.length<=width)fitted.push(line);
+    else for(let start=0;start<line.length;start+=width)fitted.push(line.slice(start,start+width));
+  }
+  const finalWidth=Math.max(24,...fitted.map(line=>line.length));
+  const rule='─'.repeat(finalWidth+2);
+  return [`┌${rule}┐`,...fitted.map(line=>`│ ${line.padEnd(finalWidth)} │`),`└${rule}┘`].join('\n');
+}
+function makeDrawableDiagram(answer) {
+  const clean=removeExactRepeatedOutput(answer);
+  if(hasDrawableDiagram(clean))return clean;
+  const segments=clean.split(/\n|(?<=[.!?])\s+/).map(item=>item.trim()).filter(Boolean);
+  const chain=segments.sort((a,b)=>(b.match(/→|--?>/g)||[]).length-(a.match(/→|--?>/g)||[]).length)[0]||'';
+  let chainText=chain.includes(':')?chain.slice(chain.indexOf(':')+1):chain;
+  const parts=chainText.split(/\s*(?:→|--?>)\s*/).map(item=>item.replace(/^[,;:\s]+|[.;:\s]+$/g,'').trim()).filter(Boolean);
+  if(parts.length<3)return clean;
+  const diagram=parts.map((item,index)=>`${index?'             ↓\n':''}${renderDiagramBox(item)}`).join('\n');
+  const foundation=segments.find(item=>/\b(master[- ]data foundation|below that|supporting components?)\b/i.test(item));
+  const foundationBoxes=foundation?foundation.replace(/^.*?:\s*/,'').replace(/[.]$/,'').split(/\s*,\s*|\s+and\s+/i).map(item=>item.trim()).filter(Boolean).map(renderDiagramBox).join('\n       ↓ supports\n'):'';
+  return `Flow diagram:\n\n${diagram}${foundationBoxes?`\n\nSupporting foundation:\n${foundationBoxes}\n       ↓ supports the complete flow`:''}`;
+}
+function formatSpokenAnswer(value) {
+  let text=removeExactRepeatedOutput(value);
+  if(!text)return text;
+  // Recover list formatting when a provider emits bullets inline.
+  text=text.replace(/\s+(?=-\s+(?:[A-Z0-9@]|First\b|Next\b|Then\b|Finally\b))/g,'\n');
+  text=text.replace(/\s+(?=\d+[.)]\s+[A-Z])/g,'\n');
+  const lines=text.split('\n').map(line=>line.replace(/[ \t]+$/,'').trimEnd());
+  let firstBullet=lines.findIndex(line=>/^\s*(?:-|\d+[.)])\s+/.test(line));
+  if(firstBullet>0 && lines[firstBullet-1].trim()!=='')lines.splice(firstBullet,0,'');
+  text=lines.join('\n').replace(/\n{3,}/g,'\n\n').trim();
+  // If a longer spoken answer still arrives as one paragraph, make it readable
+  // without changing wording: group complete sentences into short paragraphs.
+  if(!text.includes('\n') && text.length>360){
+    const sentences=text.split(/(?<=[.!?])\s+(?=[A-Z])/).filter(Boolean);
+    if(sentences.length>=4){
+      const paras=[];
+      for(let i=0;i<sentences.length;i+=2)paras.push(sentences.slice(i,i+2).join(' '));
+      text=paras.join('\n\n');
+    }
+  }
+  return text;
+}
+async function ensureModeConformance({answer,responseType,prompt,model,effort,provider='openai'}) {
+  let clean=removeExactRepeatedOutput(answer);
+  if(responseType==='diagram'){
+    clean=makeDrawableDiagram(clean);
+    if(hasDrawableDiagram(clean))return {answer:clean,repaired:clean!==answer};
+  } else if(responseType==='code'&&hasCompleteCode(clean))return {answer:clean,repaired:clean!==answer};
+  else if(responseType==='snippet'&&hasCodeSnippet(clean))return {answer:clean,repaired:clean!==answer};
+  else if(responseType==='spoken'){const formatted=formatSpokenAnswer(clean);return {answer:formatted,repaired:formatted!==answer};}
+
   try {
-    const email = requireLicensedRequest(req, res);
-    if (!email) return;
+    const correction=await providerResponseJson({
+      provider,model,
+      instructions:`${COPILOT_INSTRUCTIONS}
 
-    const { resume, jd, role, yearsExperience, userInstructions } = req.body;
-    let resumeText = '';
-    let jdText = '';
+${strictModeInstructions(responseType)}`,
+      input:`Produce the required final answer now. The earlier output violated the mandatory ${responseType} format. Do not discuss the violation.
 
-    if (typeof resume === 'string' && resume.length > 0 && !resume.startsWith('data:')) {
-      resumeText = normalizeText(resume).slice(0, MAX_DOCUMENT_CHARS);
-    } else if (resume?.base64) {
-      resumeText = await extractDocumentText(resume);
+ORIGINAL REQUEST AND CONTEXT:
+${typeof prompt==='string'?prompt:JSON.stringify(prompt)}
+
+INCOMPLETE OUTPUT TO REPLACE:
+${clean}`,
+      effort,maxTokens:responseType==='code'?null:1800
+    });
+    clean=removeExactRepeatedOutput(providerOutputText(provider,correction));
+    if(responseType==='diagram')clean=makeDrawableDiagram(clean);
+    return {answer:clean,repaired:true};
+  } catch(err) {
+    console.warn(`[LLM format] ${responseType} correction failed:`,err.message);
+    return {answer:clean,repaired:clean!==answer};
+  }
+}
+function selectAnswerRoute(_question, prepared=null, _options={}) {
+  // The user explicitly chooses the live answer provider on Prepare Interview.
+  // No automatic routing/classifier is introduced, so latency and answer flow remain deterministic.
+  const selected=String(prepared?.session?.answerProvider||'openai');
+  if(selected==='cerebras') return {provider:'cerebras',model:CEREBRAS_MODEL,effort:CEREBRAS_REASONING_EFFORT,tier:'cerebras',reason:'user-selected-cerebras-gpt-oss-120b'};
+  if(selected==='terra') return {provider:'openai',model:OPENAI_TERRA_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-terra-fast',reason:'user-selected-openai-terra-fast'};
+  if(selected==='luna') return {provider:'openai',model:OPENAI_LUNA_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-luna-fast',reason:'user-selected-openai-luna-fast'};
+  return {provider:'openai',model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-sol-fast',reason:'user-selected-openai-sol-fast'};
+}
+function addTurn(session, question, answer, retrieved=[],responseType='spoken') {
+  session.turns.push({ question:normalizeStructuredText(question).slice(0,4000), answer:normalizeStructuredText(answer).slice(0,14000), responseType, retrieved:retrieved.slice(0, TOP_K).map(c => ({source:c.source, section:c.section, text:c.text, score:c.score})), at:Date.now() });
+  if (session.turns.length > MAX_HISTORY_TURNS) session.turns = session.turns.slice(-MAX_HISTORY_TURNS);
+}
+function stripRepeatedPriorPrompt(session, question) {
+  const current=normalizeStructuredText(question);
+  const previous=normalizeStructuredText(session?.turns?.[session.turns.length-1]?.question||'');
+  if(!current||!previous)return current;
+  const normalizeComparable=value=>String(value||'').toLowerCase().replace(/[^a-z0-9+#.]+/g,' ').replace(/\s+/g,' ').trim();
+  const cur=normalizeComparable(current), prev=normalizeComparable(previous);
+  if(prev.length>=20&&cur.startsWith(prev)){
+    // Locate the same prefix in the original text by word count and keep only the newly
+    // appended interviewer words. This is local string work and adds no model latency.
+    const prevWords=prev.split(' ').filter(Boolean).length;
+    const tokens=current.trim().split(/\s+/);
+    const remainder=tokens.slice(prevWords).join(' ').trim();
+    if(remainder.split(/\s+/).filter(Boolean).length>=2)return remainder;
+  }
+  return current;
+}
+async function prepareQuestion(email, question, {inputSource='', requestId='', clientSentAt=0, regenerate=false}={}) {
+  const startedAt = Date.now();
+  const perf = { requestId:String(requestId||''), clientToBackendMs:Number(clientSentAt)>0?Math.max(0,startedAt-Number(clientSentAt)):null };
+  const intentStartedAt = Date.now();
+  const session = interviewSessions.get(email);
+  question=stripNonSemanticSpeechFillers(question);
+  question=stripRepeatedPriorPrompt(session,question);
+  let retrieved = [];
+  let embeddingMs = 0, retrievalMs = 0;
+  let retrievalMode = 'none';
+  const canonical = session ? resolveCanonicalQuestion(session, question) : { corrected:question, replacements:[] };
+  const correctedQuestion = canonical.corrected || question;
+  const reframedIntent=reframeQuestionIntent(correctedQuestion);
+  const logisticsOnly=!reframedIntent&&isInterviewLogisticsQuestion(correctedQuestion);
+  const intentQuestion=reframedIntent||correctedQuestion;
+  const rejection = logisticsOnly ? 'NO_ANSWER_REQUIRED' : rejectLowConfidenceInput(intentQuestion);
+  const followupInfo = session ? resolveFollowupIntent(session, intentQuestion) : { isFollowup:false, resolvedQuestion:intentQuestion, previous:null };
+  const responseType=classifyResponseType(intentQuestion,followupInfo,inputSource);
+  perf.intentMs = Date.now() - intentStartedAt;
+  const retrievalDecisionStartedAt = Date.now();
+
+  if (!rejection && session?.chunks?.length) {
+    const previous = followupInfo.previous;
+    const retrievalBase = followupInfo.isFollowup ? followupInfo.resolvedQuestion : intentQuestion;
+    const retrievalQuery = expandQuestionWithCanonicalTerms(session, retrievalBase);
+
+    const retrievalCacheKey = `${email}|${session.preparedAt||0}|${normalizeText(retrievalQuery).toLowerCase().slice(0,1600)}`;
+    if (followupInfo.isFollowup && previous?.retrieved?.length) {
+      // Reuse prior evidence only for a genuine follow-up; standalone questions never inherit old-turn evidence.
+      retrieved = previous.retrieved.map(c => ({...c}));
+      retrievalMode = 'history-reuse';
+      perf.retrievalCacheHit = false;
+    } else if (retrievalResultCache.has(retrievalCacheKey)) {
+      // Exact standalone retrieval reuse. Chunks are immutable for a prepared session, so this changes latency only, not evidence selection.
+      retrieved = retrievalResultCache.get(retrievalCacheKey).map(c => ({...c}));
+      retrievalMode = 'retrieval-cache';
+      perf.retrievalCacheHit = true;
+    } else if (canUseFastLexical(session, retrievalQuery)) {
+      const r0 = Date.now();
+      retrieved = retrieveChunksLexical(session, retrievalQuery);
+      retrievalMs = Date.now() - r0;
+      retrievalMode = 'lexical-fast';
+      perf.retrievalCacheHit = false;
+      retrievalResultCache.set(retrievalCacheKey, retrieved.map(c => ({...c})));
+    } else {
+      const embeddingKey = normalizeText(retrievalQuery).toLowerCase().slice(0,1200);
+      perf.embeddingCacheHit = queryEmbeddingCache.has(embeddingKey);
+      const e0 = Date.now();
+      const vector = await embedQuery(retrievalQuery);
+      embeddingMs = Date.now() - e0;
+      const r0 = Date.now();
+      retrieved = retrieveChunks(session, vector, retrievalQuery);
+      retrievalMs = Date.now() - r0;
+      retrievalMode = perf.embeddingCacheHit ? 'vector-hybrid-embedding-cache' : 'vector-hybrid';
+      perf.retrievalCacheHit = false;
+      retrievalResultCache.set(retrievalCacheKey, retrieved.map(c => ({...c})));
     }
+    if (retrievalResultCache.size > RETRIEVAL_RESULT_CACHE_MAX) retrievalResultCache.delete(retrievalResultCache.keys().next().value);
+  }
+  perf.retrievalDecisionMs = Date.now() - retrievalDecisionStartedAt;
+  const promptBuildStartedAt = Date.now();
+  const prompt = session ? buildPrompt(session, question, retrieved, followupInfo, correctedQuestion,inputSource,intentQuestion,regenerate) : `INPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,followupInfo,inputSource)}\n\nREFRAMED CURRENT INTENT\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
+  perf.promptBuildMs = Date.now() - promptBuildStartedAt;
+  perf.promptChars = String(prompt||'').length;
+  perf.promptTokenEstimate = Math.ceil(perf.promptChars / 4);
+  return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, intentQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt, ...perf } };
+}
+app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, terraModel:OPENAI_TERRA_MODEL, lunaModel:OPENAI_LUNA_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',options:['openai','terra','luna','cerebras']}, embeddingModel:EMBEDDING_MODEL }));
+app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, openaiConfigured:!!OPENAI_API_KEY, cerebrasConfigured:!!CEREBRAS_API_KEY, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT }));
 
-    if (typeof jd === 'string' && jd.length > 0 && !jd.startsWith('data:')) {
-      jdText = normalizeText(jd).slice(0, MAX_DOCUMENT_CHARS);
-    } else if (jd?.base64) {
-      jdText = await extractDocumentText(jd);
+app.post('/validate-license', (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (!email) return res.status(400).json({ ok:false, reason:'email required' });
+  const result = isLicenseValid(email);
+  return res.status(result.ok ? 200 : 401).json(result);
+});
+
+app.post('/prepare-context', async (req, res) => {
+  const email = requireLicensedRequest(req, res); if (!email) return;
+  if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:'OPENAI_API_KEY missing on backend' });
+  if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:'OPENAI_API_KEY missing on backend' });
+  const rawYears=req.body.yearsExperience;
+  const yearsExperience=(rawYears===null||rawYears===undefined||String(rawYears).trim()==='')?null:Number(rawYears);
+  const role = normalizeText(req.body.role || '').slice(0,160);
+  const requestedProvider=String(req.body.answerProvider || 'openai').trim().toLowerCase();
+  const answerProvider=['openai','terra','luna','cerebras'].includes(requestedProvider)?requestedProvider:'openai';
+  if(answerProvider==='cerebras'&&!CEREBRAS_API_KEY)return res.status(500).json({ok:false,error:'CEREBRAS_API_KEY missing on backend for selected model'});
+  if((answerProvider==='openai'||answerProvider==='terra'||answerProvider==='luna')&&!OPENAI_API_KEY)return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for selected model'});
+  if (yearsExperience!==null && (!Number.isFinite(yearsExperience) || yearsExperience < 0 || yearsExperience > 60)) return res.status(400).json({ ok:false, error:'yearsExperience must be between 0 and 60 when provided' });
+  if (!req.body.resume) return res.status(400).json({ ok:false, error:'Resume is required' });
+  const t0 = Date.now();
+  try {
+    const [resumeText, jdFileText] = await Promise.all([extractDocumentText(req.body.resume), extractDocumentText(req.body.jd)]);
+    // Current setup uses JD upload only. jdText remains accepted solely for backward compatibility.
+    const jdText = normalizeText(`${jdFileText}\n${String(req.body.jdText || '')}`).slice(0, MAX_DOCUMENT_CHARS);
+    const userInstructions=normalizeStructuredText(req.body.userInstructions||'').slice(0,5000);
+    const parseMs = Date.now() - t0;
+
+    const summaryStart = Date.now();
+    const profile = await generateStructuredProfile(resumeText, jdText, yearsExperience, role);
+    const summaryMs = Date.now() - summaryStart;
+    const resolvedYears=Number.isFinite(profile.yearsExperience)?profile.yearsExperience:(Number.isFinite(yearsExperience)?yearsExperience:null);
+    const resolvedRole=normalizeText(profile.targetRole || role || '').slice(0,160);
+
+    const chunks = [...semanticChunks(resumeText, 'resume'), ...(jdText?semanticChunks(jdText, 'jd'):[])];
+    const embeddingStart = Date.now();
+    const vectors = await embedTexts(chunks.map(c => `${c.source}: ${c.section}\n${c.text}`));
+    if (vectors.length !== chunks.length) throw new Error('Embedding count did not match document chunks');
+    chunks.forEach((c,i) => { c.embedding = vectors[i]; });
+    const embeddingMs = Date.now() - embeddingStart;
+
+    interviewSessions.set(email, {
+      email, yearsExperience:resolvedYears, role:resolvedRole, answerProvider, userInstructions, profile:{...profile,yearsExperience:resolvedYears,targetRole:resolvedRole}, chunks, turns:[], preparedAt:Date.now(),
+      stats:{ resumeChars:resumeText.length, jdChars:jdText.length, chunkCount:chunks.length, parseMs, summaryMs, embeddingMs }
+    });
+    console.log(`[RAG] Prepared ${email}: ${chunks.length} chunks in ${Date.now()-t0}ms`);
+    return res.json({ ok:true, answerProvider, answerModel:answerProvider==='cerebras'?CEREBRAS_MODEL:(answerProvider==='terra'?OPENAI_TERRA_MODEL:(answerProvider==='luna'?OPENAI_LUNA_MODEL:LLM_DEFAULT_MODEL)), chunkCount:chunks.length, profile:{ yearsExperience:resolvedYears, targetRole:resolvedRole, primarySkills:(profile.primarySkills || []).slice(0,12), jdProvided:!!jdText }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
+  } catch (err) {
+    console.error('[RAG] Prepare error:', err.message);
+    return res.status(500).json({ ok:false, error:err.message || 'Context preparation failed' });
+  }
+});
+
+app.post('/context-status', (req, res) => {
+  const email = requireLicensedRequest(req, res); if (!email) return;
+  const session = interviewSessions.get(email);
+  res.json({ ok:true, prepared:!!session, stats:session?.stats || null, preparedAt:session?.preparedAt || null });
+});
+
+app.post('/ask', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const text = normalizeStructuredText(req.body.text || '');
+  if (!email || !text) return res.status(400).json({ ok:false, error:'email and text are required' });
+  const license = isLicenseValid(email); if (!license.ok) return res.status(401).json({ ok:false, error:license.reason || 'Invalid license' });
+  if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:'OPENAI_API_KEY missing on backend' });
+  if (text.length > 12000) return res.status(400).json({ ok:false, error:'Transcript input too long' });
+  try {
+    const prepared = await prepareQuestion(email, text);
+    if (prepared.rejection) return res.json({ ok:true, answer:prepared.rejection==='NO_ANSWER_REQUIRED'?'':prepared.rejection, model:'local-guard', modelTier:'local', contextPrepared:!!prepared.session, retrieved:[], latency:{...prepared.latency, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt} });
+    const route = selectAnswerRoute(text, prepared);
+    const llmStart = Date.now();
+    const cerebrasQuality = route.provider==='cerebras' ? `
+
+CEREBRAS QUALITY CALIBRATION:
+- Match the maturity, relevance and technical precision of a strong senior-engineer interview answer.
+- Current-question intent outranks prior-turn context; do not inherit the previous topic unless this is an explicit follow-up.
+- Do not add plausible-but-unsupported technologies, metrics, files, tools or implementation details.
+- For finite concept lists, be complete on the first response when practical.` : '';
+    const data = await providerResponseJson({
+      provider:route.provider,model:route.model,instructions:`${COPILOT_INSTRUCTIONS}${cerebrasQuality}
+
+${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,
+      effort:route.effort,maxTokens:answerTokenBudget(text,false,prepared.responseType)
+    });
+    let answer=providerOutputText(route.provider,data);
+    answer=(await ensureModeConformance({answer,responseType:prepared.responseType,prompt:prepared.prompt,model:route.model,effort:route.effort,provider:route.provider})).answer;
+    if (prepared.session && answer) addTurn(prepared.session,prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
+    const latency = { embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, retrievalMode:prepared.latency.retrievalMode, promptReadyMs:prepared.latency.promptReadyMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt };
+    const providerServiceTier=route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:String(data?.service_tier||OPENAI_SERVICE_TIER);
+    console.log(`[LLM] ${email} model=${route.model} modelTier=${route.tier} serviceTier=${providerServiceTier} total=${latency.totalMs}ms embed=${latency.embeddingMs}ms retrieve=${latency.retrievalMs}ms mode=${prepared.latency.retrievalMode} llm=${latency.llmMs}ms`);
+    return res.json({ ok:true, answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, contextPrepared:!!prepared.session, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})), latency });
+  } catch (err) {
+    console.error('[LLM] Request error:', err.message);
+    return res.status(502).json({ ok:false, error:err.message || 'LLM request failed' });
+  }
+});
+
+
+function buildCaptureContext(session) {
+  if (!session) return '';
+  const profile = session.profile || {};
+  const recent = (session.turns || []).slice(-2).map((t,i) => `Recent Q${i+1}: ${t.question}\nRecent A${i+1}: ${t.answer}`).join('\n');
+  const skills = Array.isArray(profile.primarySkills) ? profile.primarySkills.slice(0,18).join(', ') : '';
+  return normalizeText(`Candidate role: ${profile.targetRole || session.role || ''}\nYears experience: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'not specified'}\nPrimary skills: ${skills}\n${recent}`);
+}
+
+function buildVisionInput(text, imageDataUrl, session, captureSource='') {
+  const context = buildCaptureContext(session);
+  const instruction = normalizeText(`${text || 'Analyze and solve the captured screen.'}\n\nCAPTURE CONTEXT\n${captureSource ? `Window: ${captureSource}\n` : ''}${context ? `${context}\n` : ''}Rules for screen tasks:\n- Read the screenshot directly; do not ask me to transcribe visible code or question text.\n- Identify every complete current question visible in the captured content before choosing an answer format. If there are multiple complete questions, preserve them in order; do not silently keep only the last one.\n- A mention of code, coding, development, DevOps, a programming language or a module inside an experience/conceptual question does not make it a coding task.\n- For genuine coding problems, always start with Logic (1-2 lines), then provide complete runnable code in the language visible in the screenshot unless another language is requested. Never return explanation alone.\n- Preserve method/class signatures shown in the screenshot when they are part of the problem contract.\n- Cover edge cases and complexity briefly when relevant.\n- Add concise inline comments to meaningful code statements so the solution can be explained in an interview.\n- For flowchart, architecture-flow or diagram requests, provide a detailed drawable Unicode box flow using ┌ ─ ┐ │ └ ┘, arrows, branches and data direction; never return prose alone.\n- If the screenshot contains an error, diagnose the actual failing line/behavior and provide the corrected code.\n- Keep the answer practical, concise, and directly usable.`);
+  return [{ role:'user', content:[
+    { type:'input_text', text:instruction },
+    { type:'input_image', image_url:imageDataUrl, detail:'high' }
+  ] }];
+}
+
+app.post('/extract-screen-text', async (req, res) => {
+  const startedAt = Date.now();
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const imageDataUrl = String(req.body.imageDataUrl || '').trim();
+  if (!email || !/^data:image\/(?:png|jpeg|jpg|webp);base64,/i.test(imageDataUrl)) return res.status(400).json({ok:false,error:'email and screen image are required'});
+  const license = isLicenseValid(email); if (!license.ok) return res.status(401).json({ok:false,error:license.reason || 'Invalid license'});
+  if (!OPENAI_API_KEY) return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend'});
+  const session = interviewSessions.get(email);
+  const recent = (session?.turns || []).slice(-3).map(t => `Q: ${t.question}\nA: ${t.answer}`).join('\n');
+  const extractionRules = `Extract the useful visible content from this screenshot so it can be used as the next interview prompt. The FIRST line must be exactly one of TASK_TYPE: CODING, TASK_TYPE: DIAGRAM, or TASK_TYPE: OTHER. After that first line return only the extracted/normalized prompt text, no analysis and no markdown fences.\n- First identify all complete current question intents; earlier conversational lead-ins do not control TASK_TYPE. If two complete questions are visible, keep both in their original order.\n- Use CODING only for an actual request to write, implement, complete, debug, analyze or run code, or solve an algorithm/data-structure programming task.\n- A question about experience, projects, Agile, DevOps, integrations or concepts is OTHER even when its transcript mentions code, coding, development, a programming language, class or module.\n- Use DIAGRAM for flowchart, architecture-flow, sequence, component, block or draw.io-style requests.\n- Preserve code exactly enough to solve it, including identifiers, method/class signatures, error text and visible line numbers when present.\n- Capture all visible content materially relevant to solving the current question, including supporting code, data, error messages, constraints, expected output, diagram labels, and question context that changes the solution.\n- Preserve explicit constraints and requested output.\n- Ignore Topper UI text, browser chrome, taskbar, notifications and unrelated navigation.\n- If this is a continuation of earlier captured content, keep only what is visible now; the desktop app will append multiple captures.\n- Do not answer the content. Extract it only.\nRecent interview context for disambiguation only:\n${recent}`;
+  try {
+    const r = await fetch('https://api.openai.com/v1/responses', {method:'POST', headers:{'authorization':`Bearer ${OPENAI_API_KEY}`,'content-type':'application/json'}, body:JSON.stringify({model:LLM_VISION_EXTRACT_MODEL, service_tier:OPENAI_SERVICE_TIER, instructions:extractionRules, input:[{role:'user',content:[{type:'input_text',text:'Extract the screen content.'},{type:'input_image',image_url:imageDataUrl,detail:'high'}]}], reasoning:{effort:'none'}, text:{verbosity:'low'}, max_output_tokens:1600})});
+    const data = await r.json().catch(()=>({}));
+    if (!r.ok) return res.status(r.status).json({ok:false,error:data?.error?.message || `Vision extraction failed (${r.status})`});
+    const raw=outputText(data).trim();
+    const typeMatch=raw.match(/^TASK_TYPE:\s*(CODING|DIAGRAM|OTHER)\s*\n?/i);
+    const taskType=String(typeMatch?.[1]||'OTHER').toLowerCase();
+    const text=raw.replace(/^TASK_TYPE:\s*(?:CODING|DIAGRAM|OTHER)\s*\n?/i,'').trim();
+    return res.json({ok:true,text,taskType,captureMs:Date.now()-startedAt});
+  } catch (err) { return res.status(502).json({ok:false,error:err.message || 'Vision extraction failed'}); }
+});
+
+// Latency-only prefetch: warm the existing query-embedding cache while the interviewer/user
+// is still finishing the question. It never changes retrieval selection or answer content.
+app.post('/prefetch-query', async (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const question = normalizeStructuredText(req.body?.text || '');
+  if (!email || !question || question.length > 12000) return res.status(204).end();
+  const license = isLicenseValid(email);
+  if (!license.ok) return res.status(204).end();
+  const session = interviewSessions.get(email);
+  if (!session?.chunks?.length) return res.status(204).end();
+  try {
+    const canonical = resolveCanonicalQuestion(session, question);
+    const correctedQuestion = canonical.corrected || question;
+    const reframedIntent = reframeQuestionIntent(correctedQuestion);
+    if (!reframedIntent && isInterviewLogisticsQuestion(correctedQuestion)) return res.status(204).end();
+    const intentQuestion = reframedIntent || correctedQuestion;
+    if (rejectLowConfidenceInput(intentQuestion)) return res.status(204).end();
+    const followupInfo = resolveFollowupIntent(session, intentQuestion);
+    // Genuine follow-ups reuse prior evidence and strong lexical matches are already local/instant.
+    if (followupInfo.isFollowup && followupInfo.previous?.retrieved?.length) return res.status(204).end();
+    const retrievalBase = followupInfo.isFollowup ? followupInfo.resolvedQuestion : intentQuestion;
+    const retrievalQuery = expandQuestionWithCanonicalTerms(session, retrievalBase);
+    if (canUseFastLexical(session, retrievalQuery)) return res.status(204).end();
+    const key = normalizeText(retrievalQuery).toLowerCase().slice(0,1200);
+    if (!queryEmbeddingCache.has(key)) await embedQuery(retrievalQuery);
+    return res.status(204).end();
+  } catch (err) {
+    // Prefetch is best-effort only; it must never affect the interview flow.
+    console.warn('[PREFETCH] skipped:', err.message);
+    return res.status(204).end();
+  }
+});
+
+app.post('/ask/stream', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const text = normalizeStructuredText(req.body.text || '');
+  const inputSource=normalizeText(req.body.inputSource||'').slice(0,40);
+  const imageDataUrl = String(req.body.imageDataUrl || '').trim();
+  const captureSource = normalizeText(req.body.captureSource || '').slice(0,300);
+  const requestId = normalizeText(req.body.requestId || '').slice(0,120);
+  const clientSentAt = Number(req.body.clientSentAt || 0);
+  const regenerate = req.body.regenerate === true;
+  const hasImage = /^data:image\/(?:png|jpeg|jpg|webp);base64,/i.test(imageDataUrl);
+  if (!email || (!text && !hasImage)) return res.status(400).json({ ok:false, error:'email and text or image are required' });
+  const license = isLicenseValid(email); if (!license.ok) return res.status(401).json({ ok:false, error:license.reason || 'Invalid license' });
+  if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:'OPENAI_API_KEY missing on backend (required for embeddings/vision)' });
+  const maxInputChars=String(inputSource).startsWith('screen-capture')?32000:12000;
+  if (text.length > maxInputChars) return res.status(400).json({ ok:false, error:'Transcript input too long' });
+
+  let prepared;
+  try {
+    if (hasImage) {
+      const startedAt = Date.now();
+      const session = interviewSessions.get(email);
+      const intentQuestion=reframeQuestionIntent(text)||text;
+      prepared = {
+        session,
+        intentQuestion,
+        responseType:classifyResponseType(intentQuestion,session?resolveFollowupIntent(session,intentQuestion):null,inputSource),
+        prompt:buildVisionInput(text, imageDataUrl, session, captureSource),
+        retrieved:[],
+        latency:{ startedAt, embeddingMs:0, retrievalMs:0, retrievalMode:'vision-direct', promptReadyMs:Date.now()-startedAt }
+      };
+    } else {
+      prepared = await prepareQuestion(email,text,{inputSource,requestId,clientSentAt,regenerate});
     }
+  } catch (err) { return res.status(502).json({ ok:false, error:err.message || 'Retrieval failed' }); }
 
-    if (!resumeText && !jdText) {
-      return res.status(400).json({ ok: false, error: 'Please provide at least a resume or job description.' });
-    }
+  const route = selectAnswerRoute(text, prepared, { hasImage });
 
-    const numericYears = Number.isFinite(Number(yearsExperience)) ? Number(yearsExperience) : null;
-    const profile = await generateStructuredProfile(resumeText, jdText, numericYears, role);
+  // Preserve the existing direct screenshot path; it now shares the same OpenAI provider.
+  if (hasImage) {
+    if (!OPENAI_API_KEY) return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for vision'});
+    try {
+      const visionStart=Date.now();
+      const data=await openAIJson('https://api.openai.com/v1/responses',openAIResponseBody({model:LLM_VISION_EXTRACT_MODEL,instructions:`${COPILOT_INSTRUCTIONS}
 
-    const resumeChunks = semanticChunks(resumeText, 'resume');
-    const jdChunks = semanticChunks(jdText, 'jd');
-    const chunks = [...resumeChunks, ...jdChunks];
+${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,effort:'none',verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',maxTokens:answerTokenBudget(text,true,prepared.responseType),stream:false}));
+      let visionAnswer=outputText(data);
+      visionAnswer=(await ensureModeConformance({answer:visionAnswer,responseType:prepared.responseType,prompt:prepared.prompt,model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT})).answer;
+      if(prepared.session&&visionAnswer)addTurn(prepared.session,`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`,visionAnswer,prepared.retrieved,prepared.responseType);
+      const latency={embeddingMs:0,retrievalMs:0,retrievalMode:'vision-direct',promptReadyMs:prepared.latency.promptReadyMs,firstTokenMs:Date.now()-prepared.latency.startedAt,llmMs:Date.now()-visionStart,totalMs:Date.now()-prepared.latency.startedAt,attempts:1};
+      res.status(200);res.setHeader('Content-Type','text/event-stream; charset=utf-8');res.setHeader('Cache-Control','no-cache, no-transform');res.setHeader('Connection','keep-alive');res.setHeader('X-Accel-Buffering','no');res.flushHeaders?.();
+      res.write(`event: meta\ndata: ${JSON.stringify({model:LLM_VISION_EXTRACT_MODEL,modelTier:'openai-vision',phase:'retrieval',contextPrepared:!!prepared.session,retrievalMode:'vision-direct'})}\n\n`);
+      res.write(`event: delta\ndata: ${JSON.stringify({delta:visionAnswer})}\n\n`);
+      res.write(`event: done\ndata: ${JSON.stringify({answer:visionAnswer,model:LLM_VISION_EXTRACT_MODEL,modelTier:'openai-vision',serviceTier:String(data?.service_tier||OPENAI_SERVICE_TIER),latency})}\n\n`);
+      return res.end();
+    } catch(err) { return res.status(502).json({ok:false,error:err.message||'Vision LLM request failed'}); }
+  }
 
-    if (OPENAI_API_KEY && chunks.length > 0) {
-      try {
-        const textsToEmbed = chunks.map(c => `${c.section}: ${c.text}`);
-        const embeddings = await embedTexts(textsToEmbed);
-        chunks.forEach((chunk, idx) => {
-          chunk.embedding = embeddings[idx] || null;
-        });
-      } catch (embErr) {
-        console.warn('[RAG] Embedding batch failed during session initialization:', embErr.message);
+  res.status(200);
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  let clientClosed = false;
+  let activeUpstreamController = null;
+  res.on('close', () => { clientClosed = true; try { activeUpstreamController?.abort('client-disconnected'); } catch (_) {} });
+  const emit = (event, data) => { if (!clientClosed && !res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
+  emit('meta', { model:route.model, modelTier:route.tier, serviceTierRequested:route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER, routeReason:route.reason, phase:'retrieval', contextPrepared:!!prepared.session, embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, promptReadyMs:prepared.latency.promptReadyMs, retrievalMode:prepared.latency.retrievalMode });
+
+  if (prepared.rejection) {
+    const latency = { ...prepared.latency, firstTokenMs:Date.now()-prepared.latency.startedAt, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt, attempts:0 };
+    const guardedAnswer=prepared.rejection==='NO_ANSWER_REQUIRED'?'':prepared.rejection;
+    if(guardedAnswer)emit('delta', { delta:guardedAnswer });
+    emit('meta', { model:'local-guard', modelTier:'local', phase:'complete', latency, retrieved:[] });
+    emit('done', { answer:guardedAnswer, model:'local-guard', modelTier:'local', latency });
+    return res.end();
+  }
+
+  if (route.provider==='hybrid') {
+    const llmStart=Date.now();
+    const instructions=`${COPILOT_INSTRUCTIONS}\n\n${strictModeInstructions(prepared.responseType)}`;
+    const maxTokens=answerTokenBudget(text,false,prepared.responseType);
+    const cerebrasController=new AbortController();
+    const solController=new AbortController();
+    activeUpstreamController={abort:(reason)=>{try{cerebrasController.abort(reason)}catch(_){};try{solController.abort(reason)}catch(_){}}};
+    let firstTokenMs=null;
+    let provisional='';
+    let finalAnswer='';
+    let cerebrasError=null;
+    let solError=null;
+    let solServiceTier=OPENAI_SERVICE_TIER;
+
+    const streamProvider=async(provider, controller, onDelta)=>{
+      const body=provider==='cerebras'
+        ? cerebrasChatBody({instructions,input:prepared.prompt,maxTokens,stream:true,effort:HYBRID_CEREBRAS_REASONING_EFFORT})
+        : openAIResponseBody({model:LLM_DEFAULT_MODEL,instructions,input:prepared.prompt,effort:LLM_REASONING_EFFORT,maxTokens,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',stream:true});
+      const url=provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:'https://api.openai.com/v1/responses';
+      const key=provider==='cerebras'?CEREBRAS_API_KEY:OPENAI_API_KEY;
+      const response=await fetch(url,{method:'POST',signal:controller.signal,headers:{'content-type':'application/json',authorization:`Bearer ${key}`},body:JSON.stringify(body)});
+      if(!response.ok){const data=await response.json().catch(()=>({}));throw new Error(data?.error?.message||`${provider} request failed (${response.status})`)}
+      const reader=response.body.getReader();
+      const decoder=new TextDecoder();
+      let buffer='';
+      let complete='';
+      while(true){
+        const {done,value}=await reader.read();
+        if(done)break;
+        buffer+=decoder.decode(value,{stream:true});
+        const blocks=buffer.split('\n\n');buffer=blocks.pop()||'';
+        for(const block of blocks){
+          const dataLines=block.split('\n').filter(line=>line.startsWith('data:')).map(line=>line.slice(5).trim());
+          if(!dataLines.length)continue;
+          const raw=dataLines.join('\n'); if(!raw||raw==='[DONE]')continue;
+          let evt;try{evt=JSON.parse(raw)}catch(_){continue}
+          const eventType=String(evt?.type||'');
+          const delta=provider==='cerebras'?String(evt?.choices?.[0]?.delta?.content||''):(eventType==='response.output_text.delta'?String(evt?.delta||''):'');
+          if(delta){complete+=delta;onDelta?.(delta)}
+          if(provider==='openai'&&eventType==='response.completed'&&evt?.response?.service_tier)solServiceTier=String(evt.response.service_tier);
+          if(eventType==='error'||evt?.error)throw new Error(evt?.error?.message||evt?.message||`${provider} stream error`);
+          if(provider==='openai'&&eventType==='response.failed')throw new Error(evt?.response?.error?.message||'OpenAI response failed');
+        }
       }
-    }
-
-    const sessionData = {
-      email,
-      profile,
-      chunks,
-      turns: [],
-      userInstructions: String(userInstructions || '').trim(),
-      yearsExperience: profile.yearsExperience,
-      role: profile.targetRole,
-      createdAt: Date.now()
+      return normalizeStructuredText(complete);
     };
 
-    interviewSessions.set(email, sessionData);
+    emit('meta',{model:`${CEREBRAS_MODEL} → ${LLM_DEFAULT_MODEL}`,modelTier:route.tier,phase:'hybrid-upgrade',status:'instant-draft'});
+    const cerebrasPromise=streamProvider('cerebras',cerebrasController,(delta)=>{
+      provisional+=delta;
+      if(firstTokenMs===null)firstTokenMs=Date.now()-prepared.latency.startedAt;
+      emit('delta',{delta});
+    }).catch(err=>{cerebrasError=err;console.warn('[Hybrid] Cerebras provisional failed:',err.message);return ''});
+    const solPromise=streamProvider('openai',solController,null).catch(err=>{solError=err;console.warn('[Hybrid] Sol upgrade failed:',err.message);return ''});
 
-    res.json({
-      ok: true,
-      profile,
-      chunkCount: chunks.length,
-      message: 'Interview session created successfully.'
-    });
-  } catch (err) {
-    console.error('[API /session/start error]', err);
-    res.status(500).json({ ok: false, error: err.message || 'Failed to initialize session' });
-  }
-});
-
-app.post('/api/session/instructions', (req, res) => {
-  const email = requireLicensedRequest(req, res);
-  if (!email) return;
-  const session = interviewSessions.get(email);
-  if (!session) return res.status(404).json({ ok: false, error: 'Session not found' });
-
-  session.userInstructions = String(req.body.userInstructions || '').trim();
-  res.json({ ok: true, userInstructions: session.userInstructions });
-});
-
-app.get('/api/session/turns', (req, res) => {
-  const email = String(req.query.email || '').trim().toLowerCase();
-  if (!email) return res.status(400).json({ ok: false, error: 'Email required' });
-  const session = interviewSessions.get(email);
-  res.json({ ok: true, turns: session ? session.turns : [] });
-});
-
-app.post('/api/session/clear', (req, res) => {
-  const email = requireLicensedRequest(req, res);
-  if (!email) return;
-  const session = interviewSessions.get(email);
-  if (session) session.turns = [];
-  res.json({ ok: true, message: 'Turns cleared' });
-});
-
-app.post('/api/query', async (req, res) => {
-  try {
-    const email = requireLicensedRequest(req, res);
-    if (!email) return;
-
-    const session = interviewSessions.get(email);
-    if (!session) return res.status(404).json({ ok: false, error: 'Interview session not found. Please initialize session first.' });
-
-    const rawQuestion = String(req.body.question || '').trim();
-    const provider = String(req.body.provider || 'openai').trim().toLowerCase();
-    const model = String(req.body.model || LLM_DEFAULT_MODEL).trim();
-    const regenerate = !!req.body.regenerate;
-    const inputSource = String(req.body.inputSource || 'typed').trim();
-
-    const lowConfError = rejectLowConfidenceInput(rawQuestion);
-    if (lowConfError) {
-      return res.json({ ok: true, answer: lowConfError, responseType: 'spoken' });
-    }
-
-    if (isInterviewLogisticsQuestion(rawQuestion)) {
-      return res.json({ ok: true, answer: 'I hear you clearly and I am ready to continue.', responseType: 'spoken' });
-    }
-
-    const intentQuestion = reframeQuestionIntent(rawQuestion) || rawQuestion;
-    const followupInfo = resolveFollowupIntent(session, intentQuestion);
-    const correctedInfo = resolveCanonicalQuestion(session, intentQuestion);
-    const correctedQuestion = correctedInfo.corrected;
-
-    let retrieved = [];
-    if (session.chunks && session.chunks.length > 0) {
-      if (canUseFastLexical(session, correctedQuestion)) {
-        retrieved = retrieveChunksLexical(session, correctedQuestion);
-      } else if (OPENAI_API_KEY) {
-        try {
-          const queryVector = await embedQuery(correctedQuestion);
-          retrieved = retrieveChunks(session, queryVector, correctedQuestion);
-        } catch (_) {
-          retrieved = retrieveChunksLexical(session, correctedQuestion);
-        }
-      } else {
-        retrieved = retrieveChunksLexical(session, correctedQuestion);
-      }
-    }
-
-    const promptText = buildPrompt(session, rawQuestion, retrieved, followupInfo, correctedQuestion, inputSource, intentQuestion, regenerate);
-    const responseType = classifyResponseType(intentQuestion, followupInfo, inputSource);
-    const maxTokens = answerTokenBudget(intentQuestion, false, responseType);
-
-    const result = await providerResponseJson({
-      provider,
-      model,
-      instructions: COPILOT_INSTRUCTIONS,
-      input: promptText,
-      effort: provider === 'cerebras' ? CEREBRAS_REASONING_EFFORT : LLM_REASONING_EFFORT,
-      maxTokens: maxTokens || 1200,
-      verbosity: LLM_VERBOSITY
-    });
-
-    const answer = providerOutputText(provider, result);
-
-    session.turns.push({
-      question: rawQuestion,
-      intentQuestion,
-      answer,
-      responseType,
-      timestamp: Date.now()
-    });
-    if (session.turns.length > MAX_HISTORY_TURNS * 2) {
-      session.turns = session.turns.slice(-MAX_HISTORY_TURNS * 2);
-    }
-
-    res.json({
-      ok: true,
-      answer,
-      responseType,
-      intentQuestion,
-      retrievedCount: retrieved.length
-    });
-  } catch (err) {
-    console.error('[API /query error]', err);
-    res.status(500).json({ ok: false, error: err.message || 'Query processing failed' });
-  }
-});
-
-app.post('/api/vision', async (req, res) => {
-  try {
-    const email = requireLicensedRequest(req, res);
-    if (!email) return;
-
-    const { imageBase64, prompt } = req.body;
-    if (!imageBase64) return res.status(400).json({ ok: false, error: 'imageBase64 required' });
-
-    const instructions = 'Extract and analyze technical details, diagrams, or code from the provided image for an interview context. Be precise and structured.';
-    const inputData = [
-      { type: 'input_text', text: String(prompt || 'Extract code or diagram structure from image') },
-      { type: 'input_image', image_url: `data:image/png;base64,${imageBase64}` }
-    ];
-
-    const data = await openAIJson('https://api.openai.com/v1/responses', {
-      model: LLM_VISION_EXTRACT_MODEL,
-      service_tier: OPENAI_SERVICE_TIER,
-      instructions,
-      input: inputData,
-      max_output_tokens: 1500
-    });
-
-    const answer = outputText(data);
-    res.json({ ok: true, answer });
-  } catch (err) {
-    console.error('[API /vision error]', err);
-    res.status(500).json({ ok: false, error: err.message || 'Vision extraction failed' });
-  }
-});
-
-// --- SERVER & WEBSOCKET SETUP ---
-
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server, path: '/ws' });
-
-wss.on('connection', (ws, req) => {
-  const urlParams = new URLSearchParams(req.url.replace(/^.*?\?/, ''));
-  const email = String(urlParams.get('email') || '').trim().toLowerCase();
-
-  let deepgramWs = null;
-
-  if (DEEPGRAM_API_KEY) {
-    const dgUrl = 'wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=16000&channels=1&punctuate=true&interim_results=true&endpointing=300';
     try {
-      deepgramWs = new WebSocket(dgUrl, {
-        headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` }
-      });
-
-      deepgramWs.on('open', () => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'stt_connected' }));
+      emit('meta',{model:LLM_DEFAULT_MODEL,modelTier:route.tier,phase:'hybrid-upgrade',status:'sol-finalizing'});
+      const timeout=new Promise(resolve=>setTimeout(()=>resolve('__HYBRID_TIMEOUT__'),HYBRID_SOL_UPGRADE_TIMEOUT_MS));
+      const solResult=await Promise.race([solPromise,timeout]);
+      if(solResult==='__HYBRID_TIMEOUT__'){
+        try{solController.abort('hybrid-upgrade-timeout')}catch(_){}
+        const cerebrasDone=await cerebrasPromise;
+        finalAnswer=normalizeStructuredText(cerebrasDone||provisional||'');
+      } else {
+        finalAnswer=normalizeStructuredText(solResult||'');
+        if(finalAnswer){try{cerebrasController.abort('sol-final-ready')}catch(_){}}
+        else {
+          const cerebrasDone=await cerebrasPromise;
+          finalAnswer=normalizeStructuredText(cerebrasDone||provisional||'');
         }
-      });
-
-      deepgramWs.on('message', (data) => {
-        try {
-          const parsed = JSON.parse(data.toString('utf8'));
-          const transcript = parsed?.channel?.alternatives?.[0]?.transcript || '';
-          const isFinal = !!parsed?.is_final;
-          if (transcript.trim() && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'transcript', text: transcript, isFinal }));
-          }
-        } catch (_) {}
-      });
-
-      deepgramWs.on('error', (err) => {
-        console.warn('[Deepgram WS error]', err.message);
-      });
-    } catch (e) {
-      console.warn('[Deepgram init error]', e.message);
+      }
+      if(finalAnswer && !solError && solResult!=='__HYBRID_TIMEOUT__'){
+        const conformance=await ensureModeConformance({answer:finalAnswer,responseType:prepared.responseType,prompt:prepared.prompt,model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT,provider:'openai'});
+        finalAnswer=conformance.answer;
+      }
+      if(finalAnswer && finalAnswer!==normalizeStructuredText(provisional)) emit('replace',{text:finalAnswer});
+      if(!finalAnswer)throw (solError||cerebrasError||new Error('Both hybrid providers returned no answer'));
+      if(firstTokenMs===null){firstTokenMs=Date.now()-prepared.latency.startedAt;emit('delta',{delta:finalAnswer})}
+      if(!clientClosed&&prepared.session)addTurn(prepared.session,prepared.intentQuestion||text,finalAnswer,prepared.retrieved,prepared.responseType);
+      const usedSol=!solError&&solResult!=='__HYBRID_TIMEOUT__'&&!!String(solResult||'').trim();
+      const latency={embeddingMs:prepared.latency.embeddingMs,retrievalMs:prepared.latency.retrievalMs,retrievalMode:prepared.latency.retrievalMode,promptReadyMs:prepared.latency.promptReadyMs,firstTokenMs,llmMs:Date.now()-llmStart,totalMs:Date.now()-prepared.latency.startedAt,attempts:1};
+      console.log(`[LLM hybrid] ${email} provisional=${CEREBRAS_MODEL} final=${usedSol?LLM_DEFAULT_MODEL:CEREBRAS_MODEL} first=${firstTokenMs??'-'}ms total=${latency.totalMs}ms`);
+      emit('meta',{model:usedSol?LLM_DEFAULT_MODEL:CEREBRAS_MODEL,modelTier:route.tier,serviceTier:usedSol?solServiceTier:CEREBRAS_SERVICE_TIER,phase:'complete',latency,retrieved:prepared.retrieved.map(c=>({source:c.source,section:c.section,score:Number(c.score.toFixed(3))}))});
+      emit('done',{answer:finalAnswer,model:usedSol?LLM_DEFAULT_MODEL:CEREBRAS_MODEL,modelTier:route.tier,serviceTier:usedSol?solServiceTier:CEREBRAS_SERVICE_TIER,latency});
+    } catch(err) {
+      console.error('[LLM hybrid] Error:',err.message);
+      emit('error',{error:err.message||'Hybrid LLM stream failed'});
+    } finally {
+      try{cerebrasController.abort('hybrid-finished')}catch(_){};try{solController.abort('hybrid-finished')}catch(_){};
+      return res.end();
     }
   }
 
-  ws.on('message', (msg) => {
-    if (Buffer.isBuffer(msg) || msg instanceof ArrayBuffer) {
-      if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-        deepgramWs.send(msg);
-      }
-    } else {
+  const llmStart = Date.now();
+  let firstTokenMs = null;
+  let answer = '';
+  let streamAttempt = 0;
+  let providerServiceTier = '';
+  let providerRequestAtMs = null;
+  let providerHeadersMs = null;
+  let firstProviderDeltaAfterRequestMs = null;
+  try {
+    // Retry once when the provider accepts a request but stalls before producing any text.
+    // Normal fast responses are untouched; this only caps the rare 30-60s first-token stalls.
+    while (streamAttempt < 2 && firstTokenMs === null) {
+      streamAttempt++;
+      const upstreamController = new AbortController();
+      activeUpstreamController = upstreamController;
+      const firstTokenTimeoutMs = hasImage ? Math.max(9000, LLM_FIRST_TOKEN_TIMEOUT_MS) : LLM_FIRST_TOKEN_TIMEOUT_MS;
+      const firstTokenTimer = setTimeout(() => upstreamController.abort('first-token-timeout'), firstTokenTimeoutMs);
+      let upstream;
       try {
-        const payload = JSON.parse(msg.toString('utf8'));
-        if (payload.type === 'ping' && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'pong' }));
+        const cerebrasQuality = route.provider==='cerebras' ? `
+
+CEREBRAS QUALITY CALIBRATION:
+- Match the maturity, relevance and technical precision of a strong senior-engineer interview answer. Do not compensate for uncertainty with extra high-level architecture or invented implementation details.
+- Current-question intent outranks prior-turn context. Answer only the scope actually asked.
+- For experience questions, use first-person details only when RETRIEVED EVIDENCE supports them; otherwise keep the technical explanation generic and truthful.
+- Prefer 1 direct answer plus 2-5 concise explanatory points over broad generic prose.
+- Do not introduce technologies, patterns, metrics, files, pipelines or tools merely because they are plausible.
+- For finite concept lists, be complete on the first response when practical.` : '';
+        const instructions=`${COPILOT_INSTRUCTIONS}${cerebrasQuality}
+
+${strictModeInstructions(prepared.responseType)}`;
+        const maxTokens=answerTokenBudget(text,false,prepared.responseType);
+        const streamBody=route.provider==='cerebras'
+          ? cerebrasChatBody({instructions,input:prepared.prompt,maxTokens,stream:true,effort:route.effort})
+          : openAIResponseBody({model:route.model,instructions,input:prepared.prompt,effort:route.effort,maxTokens,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',stream:true});
+        const upstreamUrl=route.provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:'https://api.openai.com/v1/responses';
+        const upstreamKey=route.provider==='cerebras'?CEREBRAS_API_KEY:OPENAI_API_KEY;
+        if(!upstreamKey)throw new Error(route.provider==='cerebras'?'CEREBRAS_API_KEY missing on backend':'OPENAI_API_KEY missing on backend');
+        providerRequestAtMs = Date.now() - prepared.latency.startedAt;
+        const providerFetchStartedAt = Date.now();
+        upstream = await fetch(upstreamUrl, {
+          method:'POST', signal:upstreamController.signal,
+          headers:{'content-type':'application/json', authorization:`Bearer ${upstreamKey}`},
+          body:JSON.stringify(streamBody)
+        });
+        providerHeadersMs = Date.now() - providerFetchStartedAt;
+        if (!upstream.ok) {
+          clearTimeout(firstTokenTimer);
+          const data = await upstream.json().catch(() => ({}));
+          throw new Error(data?.error?.message || `${route.provider==='cerebras'?'Cerebras':'OpenAI'} request failed (${upstream.status})`);
         }
+        const reader = upstream.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, {stream:true});
+          const blocks = buffer.split('\n\n');
+          buffer = blocks.pop() || '';
+          for (const block of blocks) {
+            const dataLines = block.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trim());
+            if (!dataLines.length) continue;
+            const raw = dataLines.join('\n');
+            if (!raw || raw === '[DONE]') continue;
+            let evt; try { evt = JSON.parse(raw); } catch (_) { continue; }
+            const eventType=String(evt?.type||'');
+            const delta=route.provider==='cerebras'
+              ? String(evt?.choices?.[0]?.delta?.content||'')
+              : (eventType==='response.output_text.delta' ? String(evt?.delta||'') : '');
+            if (delta) {
+              if (firstTokenMs === null) {
+                firstTokenMs = Date.now() - prepared.latency.startedAt;
+                firstProviderDeltaAfterRequestMs = Date.now() - providerFetchStartedAt;
+                clearTimeout(firstTokenTimer);
+              }
+              answer += delta;
+              emit('delta', { delta });
+            }
+            if (eventType==='error' || evt?.error) throw new Error(evt?.error?.message || evt?.message || `${route.provider==='cerebras'?'Cerebras':'OpenAI'} stream error`);
+            if (route.provider==='openai' && eventType==='response.completed' && evt?.response?.service_tier) providerServiceTier=String(evt.response.service_tier);
+            if (route.provider==='openai' && eventType==='response.failed') throw new Error(evt?.response?.error?.message || 'OpenAI response failed');
+          }
+        }
+        clearTimeout(firstTokenTimer);
+        break;
+      } catch (attemptErr) {
+        clearTimeout(firstTokenTimer);
+        const timedOut = upstreamController.signal.aborted && firstTokenMs === null;
+        if (timedOut && streamAttempt < 2) {
+          console.warn(`[LLM stream] first-token timeout after ${firstTokenTimeoutMs}ms; retrying once`);
+          emit('meta', { model:route.model, modelTier:route.tier, phase:'retry', reason:'provider first-token timeout' });
+          continue;
+        }
+        throw attemptErr;
+      }
+    }
+    // The streamed provider text is immutable once emitted. Do not run any post-stream
+    // rewrite/reformat pass that can flash a second, shorter answer over what the user read.
+    // Required format is enforced in the initial prompt/strict mode before generation.
+    answer=normalizeStructuredText(answer);
+    if(!answer)throw new Error('Provider returned no answer');
+    if (!clientClosed && prepared.session && answer) addTurn(prepared.session,hasImage?`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`:prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
+    const latency = { ...prepared.latency, providerRequestAtMs, providerHeadersMs, firstProviderDeltaAfterRequestMs, firstTokenMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt, attempts:streamAttempt };
+    providerServiceTier=providerServiceTier||(route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER);
+    emit('meta', { model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, phase:'complete', latency, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})) });
+    emit('done', { answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, latency });
+  } catch (err) {
+    console.error('[LLM stream] Error:', err.message);
+    emit('error', { error:err.message || 'LLM stream failed' });
+  } finally {
+    res.end();
+  }
+});
+const server = http.createServer(app);
+
+const wss = new WebSocket.Server({
+  server,
+  path: '/stt',
+});
+
+function buildDeepgramUrl() {
+  const params = new URLSearchParams({
+    model: String(process.env.DG_MODEL || 'nova-3'),
+    language: String(process.env.DG_LANGUAGE || 'en-US'),
+    encoding: 'linear16',
+    sample_rate: '16000',
+    channels: '1',
+    interim_results: 'true',
+    punctuate: 'true',
+    smart_format: 'true',
+    // Low latency finalization. Keep utterance_end_ms >= 1000; Deepgram can reject lower values.
+    endpointing: '300',
+    utterance_end_ms: '1000',
+    vad_events: 'true',
+  });
+
+  return `wss://api.deepgram.com/v1/listen?${params.toString()}`;
+}
+
+wss.on('connection', (clientWs, req) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const email = String(url.searchParams.get('email') || 'unknown').trim().toLowerCase();
+
+  console.log(`[STT] Client connected: ${email}`);
+
+  const licenseResult = isLicenseValid(email);
+  if (!licenseResult.ok) {
+    clientWs.send(JSON.stringify({
+      type: 'error',
+      message: licenseResult.reason || 'Invalid license',
+    }));
+    clientWs.close(1008, 'invalid license');
+    return;
+  }
+
+  if (!DEEPGRAM_API_KEY) {
+    clientWs.send(JSON.stringify({
+      type: 'error',
+      message: 'DEEPGRAM_API_KEY missing on backend',
+    }));
+    clientWs.close();
+    return;
+  }
+
+  let dgWs = null;
+  let dgOpen = false;
+  let dgConnecting = false;
+  let keepAliveTimer = null;
+  let pendingAudio = [];
+  const MAX_PENDING_AUDIO = 50;
+  let sessionLimitTimer = null;
+  let clientPingTimer = null;
+  let dgConnectedAt = 0;
+  let lastDeepgramAudioAt = 0;
+  let limitReached = false;
+
+  function sendClient(payload) {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(JSON.stringify(payload));
+    }
+  }
+
+  function clearSessionTimers() {
+    if (sessionLimitTimer) {
+      clearTimeout(sessionLimitTimer);
+      sessionLimitTimer = null;
+    }
+    if (clientPingTimer) {
+      clearInterval(clientPingTimer);
+      clientPingTimer = null;
+    }
+  }
+
+  function closeForTranscriptLimit() {
+    if (limitReached) return;
+    limitReached = true;
+    const message = 'Transcript limit reached: 2 hours 15 minutes. Captions are disconnecting now.';
+    console.log('[STT] ' + message);
+    sendClient({ type: 'limit_reached', message });
+    cleanupDeepgram();
+    try { clientWs.close(1000, 'transcript limit reached'); } catch (_) {}
+  }
+
+  sessionLimitTimer = setTimeout(closeForTranscriptLimit, MAX_TRANSCRIPTION_SESSION_MS);
+  clientPingTimer = setInterval(() => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      try { clientWs.ping(); } catch (_) {}
+    }
+  }, BACKEND_CLIENT_PING_MS);
+
+  function resetDeepgramState() {
+    dgOpen = false;
+    dgConnecting = false;
+
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
+
+    dgWs = null;
+  }
+
+  function cleanupDeepgram() {
+    dgOpen = false;
+    dgConnecting = false;
+
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
+
+    if (dgWs) {
+      try {
+        if (dgWs.readyState === WebSocket.OPEN) {
+          dgWs.send(JSON.stringify({ type: 'CloseStream' }));
+        }
+        dgWs.close();
       } catch (_) {}
+      dgWs = null;
+    }
+  }
+
+  function connectDeepgram() {
+    if (dgWs && (dgWs.readyState === WebSocket.OPEN || dgWs.readyState === WebSocket.CONNECTING)) return;
+
+    dgOpen = false;
+    dgConnecting = true;
+
+    const deepgramUrl = buildDeepgramUrl();
+    console.log('[Deepgram] Connecting with params:', deepgramUrl.replace('wss://api.deepgram.com/v1/listen?', ''));
+
+    dgWs = new WebSocket(deepgramUrl, {
+      headers: {
+        Authorization: `Token ${DEEPGRAM_API_KEY}`,
+      },
+    });
+
+    dgWs.on('open', () => {
+      dgOpen = true;
+      dgConnecting = false;
+      console.log('[Deepgram] WebSocket connected after first Meet audio');
+      dgConnectedAt = Date.now();
+      lastDeepgramAudioAt = Date.now();
+      sendClient({ type: 'status', text: 'Deepgram connected. Captions active.' });
+
+      for (const chunk of pendingAudio.splice(0)) {
+        if (dgWs.readyState === WebSocket.OPEN) dgWs.send(chunk);
+      }
+
+      // Prevent Deepgram/Railway idle close during long silence. KeepAlive runs continuously;
+      // a tiny silent PCM frame is sent only during the first 30 minutes without speech/audio.
+      keepAliveTimer = setInterval(() => {
+        if (dgWs && dgWs.readyState === WebSocket.OPEN) {
+          try { dgWs.send(JSON.stringify({ type: 'KeepAlive' })); } catch (_) {}
+
+          const now = Date.now();
+          const withinNoSpeechWindow = dgConnectedAt && (now - dgConnectedAt <= NO_SPEECH_KEEPALIVE_LIMIT_MS);
+          const noAudioRecently = now - lastDeepgramAudioAt >= SILENCE_PCM_KEEPALIVE_AFTER_MS;
+          if (withinNoSpeechWindow && noAudioRecently) {
+            try {
+              dgWs.send(SILENCE_PCM_100MS_16K_MONO);
+              lastDeepgramAudioAt = now;
+            } catch (_) {}
+          }
+        }
+      }, DEEPGRAM_KEEPALIVE_MS);
+    });
+
+    dgWs.on('unexpected-response', (request, response) => {
+      let body = '';
+
+      response.on('data', chunk => {
+        body += chunk.toString();
+      });
+
+      response.on('end', () => {
+        console.error('[Deepgram] Unexpected response');
+        console.error('[Deepgram] Status:', response.statusCode);
+        console.error('[Deepgram] Headers:', response.headers);
+        console.error('[Deepgram] Body:', body);
+
+        sendClient({
+          type: 'error',
+          message: body || `Deepgram connection failed with status ${response.statusCode}`,
+          status: response.statusCode,
+          body,
+          dgError: response.headers['dg-error'],
+          dgRequestId: response.headers['dg-request-id'],
+        });
+
+        resetDeepgramState();
+      });
+    });
+
+    dgWs.on('message', data => {
+      try {
+        const msg = JSON.parse(data.toString());
+
+        if (msg.type === 'SpeechStarted') {
+          sendClient({ type: 'speech_started' });
+          return;
+        }
+
+        const transcript = msg?.channel?.alternatives?.[0]?.transcript || '';
+        if (!transcript) return;
+
+        sendClient({
+          type: 'transcript',
+          text: transcript,
+          isFinal: Boolean(msg.is_final),
+          speechFinal: Boolean(msg.speech_final),
+          confidence: Number(msg?.channel?.alternatives?.[0]?.confidence || 0),
+        });
+      } catch (err) {
+        console.error('[Deepgram] Parse error:', err.message);
+      }
+    });
+
+    dgWs.on('close', (code, reason) => {
+      dgOpen = false;
+      dgConnecting = false;
+      if (keepAliveTimer) {
+        clearInterval(keepAliveTimer);
+        keepAliveTimer = null;
+      }
+
+      dgWs = null;
+
+      const reasonText = reason.toString();
+      console.log('[Deepgram] Closed:', code, reasonText);
+
+      // Do not close the app/client on Deepgram idle/network close. The next real
+      // audio chunk will reconnect and continue captions.
+      if (clientWs.readyState === WebSocket.OPEN && code !== 1000) {
+        sendClient({ type: 'status', text: 'Deepgram paused. Waiting for audio to reconnect captions...' });
+      }
+    });
+
+    dgWs.on('error', err => {
+      dgOpen = false;
+      dgConnecting = false;
+      dgWs = null;
+      console.error('[Deepgram] Error:', err.message);
+      sendClient({ type: 'error', message: err.message });
+    });
+  }
+
+  clientWs.on('message', audioChunk => {
+    if (limitReached) return;
+    if (!audioChunk || audioChunk.length === 0) return;
+    lastDeepgramAudioAt = Date.now();
+
+    if (!dgWs || dgWs.readyState === WebSocket.CLOSED || dgWs.readyState === WebSocket.CLOSING) {
+      pendingAudio.push(Buffer.from(audioChunk));
+      if (pendingAudio.length > MAX_PENDING_AUDIO) pendingAudio.shift();
+      connectDeepgram();
+      return;
+    }
+
+    if (dgOpen && dgWs.readyState === WebSocket.OPEN) {
+      lastDeepgramAudioAt = Date.now();
+      dgWs.send(audioChunk);
+      return;
+    }
+
+    if (dgConnecting || dgWs.readyState === WebSocket.CONNECTING) {
+      pendingAudio.push(Buffer.from(audioChunk));
+      if (pendingAudio.length > MAX_PENDING_AUDIO) pendingAudio.shift();
     }
   });
 
-  ws.on('close', () => {
-    if (deepgramWs) {
-      try { deepgramWs.close(); } catch (_) {}
-    }
+  clientWs.on('close', () => {
+    console.log(`[STT] Client disconnected: ${email}`);
+    clearSessionTimers();
+    cleanupDeepgram();
+    pendingAudio = [];
+  });
+
+  clientWs.on('error', err => {
+    console.error('[STT] Client error:', err.message);
   });
 });
 
 server.listen(PORT, () => {
-  console.log(`[SERVER] Ready and listening on port ${PORT}`);
+  console.log(`[BOOT] Topper backend running on port ${PORT}`);
 });

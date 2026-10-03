@@ -1134,7 +1134,7 @@ body { font-family: Arial, "Segoe UI", sans-serif; }
   padding: .85em 1em;
   border: 1px solid rgba(255,255,255,.10);
   border-radius: 6px;
-  background: rgba(8,10,8,.82);
+  background: #000000;
   color: #f3f4ee;
   font-family: Consolas, "Cascadia Code", "Courier New", monospace;
   font-size: .90em;

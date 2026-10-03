@@ -1,4 +1,4 @@
-# Topper v14.7.7
+# Topper v14.7.8
 
 Replacement package based strictly on the attached v14.7.2 baseline. No new Railway environment variables are required.
 
@@ -42,3 +42,13 @@ Changed JavaScript is validated with `node --check`; the replacement ZIP is vali
 - Uses current framework/recent interview context to prioritize the most relevant mechanism (for example Spring MVC session state for a server-side multi-page workflow).
 - Keeps Spring JDBC explanations on the direct DataSource -> connection pool -> JdbcTemplate/DAO execution path.
 - No changes to retrieval architecture, embeddings, provider/model routing, streaming, STT transport, screen capture, licensing, payment, or overlay behavior.
+
+
+## v14.7.8 continuity + overlay reliability patch
+- Resolves this/that/it/feature/situation follow-ups from recent interview turns before asking for clarification.
+- Conservatively inherits a stable recent technical topic for mildly corrupted STT instead of switching to unrelated technologies.
+- Prefers production-shaped CV/JD-supported examples over classroom examples for senior concept questions.
+- Uses short implementation snippets for resource/pattern questions instead of unnecessary full applications.
+- Renders fenced or labelled code in a true black editor block.
+- Reasserts Windows topmost Z-order once per second without focusing the overlay. Content protection remains enabled.
+- Retrieval, embeddings, provider/model routing, token ceilings, streaming transport, licensing, payments and preparation architecture are unchanged.

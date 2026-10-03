@@ -16,6 +16,7 @@ else app.setAsDefaultProtocolClient('topper');
 const { startRemoteTranscriptStream, sendAudioChunk, stopRemoteTranscriptStream } = require('./transcriber/remoteDeepgram');
 
 let overlayWindow = null;
+let overlayTopmostTimer = null;
 let publicCursorWindow = null;
 let cursorTrackerTimer = null;
 let cursorInsideOverlay = false;
@@ -310,6 +311,17 @@ function createOverlayWindow() {
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlayWindow.on('blur', () => { if (overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible()) { overlayWindow.setAlwaysOnTop(true, 'screen-saver'); overlayWindow.moveTop(); } });
   overlayWindow.on('show', () => { if (overlayWindow && !overlayWindow.isDestroyed()) { overlayWindow.setAlwaysOnTop(true, 'screen-saver'); overlayWindow.moveTop(); } });
+  // Windows can occasionally disturb Z-order when another app creates/activates a topmost window.
+  // Reassert topmost without focusing Topper; this is local UI work and does not touch the LLM path.
+  clearInterval(overlayTopmostTimer);
+  overlayTopmostTimer = setInterval(() => {
+    try {
+      if (overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible() && !overlayWindow.isMinimized()) {
+        overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+        overlayWindow.moveTop();
+      }
+    } catch (_) {}
+  }, 1000);
   const rememberBounds = () => {
     if (!overlayWindow || overlayWindow.isDestroyed() || overlayCollapsed || overlayWindow.isMinimized() || overlayWindow.isMaximized()) return;
     const b = overlayWindow.getBounds();
@@ -324,6 +336,8 @@ function createOverlayWindow() {
   overlayWindow.on('move', rememberBounds);
   overlayWindow.on('unmaximize', () => { if (expandedOverlayBounds) overlayWindow.setBounds(expandedOverlayBounds); });
   overlayWindow.on('closed', () => {
+    clearInterval(overlayTopmostTimer);
+    overlayTopmostTimer = null;
     stopPrivateCursorTracking();
     if (publicCursorWindow && !publicCursorWindow.isDestroyed()) publicCursorWindow.destroy();
     publicCursorWindow=null;
