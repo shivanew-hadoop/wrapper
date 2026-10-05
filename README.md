@@ -60,3 +60,9 @@ Changed JavaScript is validated with `node --check`; the replacement ZIP is vali
 - Leading interview connection/audio/network chatter is silently discarded before intent processing.
 - Bold interview keywords use a distinct high-contrast accent in the overlay; code editor behavior remains unchanged.
 - No changes to retrieval architecture, embeddings, model routing, streaming, token budgets, licensing, payment, or screen capture.
+
+
+## v14.7.10
+- Mixed logistics + technical prompts now treat `my/the question was/is` as a hard local boundary and never answer call/network status chatter.
+- Context-supported STT repair maps `private/try/drive resource(s)` to `try-with-resources` only when recent turns establish that Java topic.
+- No model call, embedding, retrieval, routing, streaming, token-budget, or UI architecture changes.

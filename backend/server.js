@@ -380,6 +380,18 @@ function resolveCanonicalQuestion(session, question) {
     });
   }
 
+  // Live speech may render "try-with-resources" as "private resource"/"try resource".
+  // Repair only when the recent technical context already establishes try-with-resources,
+  // preventing an unrelated use of "private" or "resource" from being rewritten.
+  const recentTryResourceContext=/\btry[- ]with[- ]resources?\b/.test(technologyContext);
+  if(recentTryResourceContext && /\b(?:private|try|drive)\s+(?:with\s+)?resources?\b/i.test(working)){
+    working=working.replace(/\b(?:private|try|drive)\s+(?:with\s+)?resources?\b/gi, match=>{
+      const to='try-with-resources';
+      replacements.push({from:match,to,distance:0,kind:'context-phrase'});
+      return to;
+    });
+  }
+
   const playwrightFixtureContext=/\bplaywright\b/.test(technologyContext) || /\bfixtures?\b/.test(technologyContext);
   // "custom fixer" is itself a strong automation-testing STT signal for "custom fixture".
   // Do not require Playwright to have survived profile extraction before repairing it.
@@ -903,6 +915,13 @@ function stripLeadingInterviewLogistics(value) {
   let text=collapseQuestionSpeechNoise(value);
   if(!text)return '';
   // Mixed STT often contains connection/audio chatter followed by the real technical question.
+  // A spoken marker such as "my question was" is a hard boundary: everything before it is
+  // interview logistics, not an answerable candidate question. This is deterministic/local.
+  const marker=text.match(/\b(?:so\s*,?\s*)?(?:my|the)\s+question\s+(?:was|is)\s*[,.:;-]?\s*/i);
+  if(marker&&Number.isFinite(marker.index)){
+    const tail=text.slice(marker.index+marker[0].length).trim();
+    if(tail)text=tail;
+  }
   // Remove only leading logistics clauses; never answer or acknowledge them.
   const clauses=text.split(/(?<=[?.!])\s+|\s+(?=(?:okay|alright|so|my question|the question)[,.:]?\s)/i).map(x=>x.trim()).filter(Boolean);
   while(clauses.length>1){
@@ -1405,7 +1424,7 @@ INTERVIEW PRESENTATION CALIBRATION:
 - Troubleshooting/scenario question: give the immediate production action first, then 3-5 ordered hyphen bullets covering diagnosis, evidence, fix, and validation. Do not guess a single root cause without evidence.
 - Small code request: smallest complete working code that answers the request; avoid framework scaffolding unless the interviewer asked for it.
 - CURRENT-TOPIC PRECEDENCE: If the newest interviewer prompt explicitly names a technical concept (for example Java records, IS-A/HAS-A, Spring JDBC, Kafka, idempotency), that explicit concept overrides prior-turn context. Never carry the previous topic into a new explicitly named topic. Use prior turns only to resolve pronouns, ellipsis, or genuinely corrupted/ambiguous fragments.
-- Never acknowledge call/audio/network/screen/logistics chatter. If a live transcript contains logistics followed by a technical question, silently discard the logistics and answer the technical question directly.
+- Never acknowledge call/audio/network/screen/logistics chatter. If a live transcript contains logistics followed by a technical question, silently discard the logistics and answer the technical question directly. Never answer with status phrases such as "fine on my side", "working on my side", "please proceed", "go ahead", or "I can hear you" when any technical fragment is present.
 - If the interviewer mispronounces or live transcription slightly corrupts a technical term, silently infer the nearest context-supported term from the prepared CV/JD vocabulary, retrieved evidence, and recent technical topic. Prefer a clear domain interpretation over asking for rephrasing when the surrounding context makes it unambiguous; for example, in Playwright automation context, "custom fixer" should be understood as "custom fixture" when fixtures are supported by the session context.
 
 CALIBRATION EXAMPLES:
