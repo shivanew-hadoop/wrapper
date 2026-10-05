@@ -899,6 +899,21 @@ function collapseQuestionSpeechNoise(value) {
     .trim();
 }
 
+function stripLeadingInterviewLogistics(value) {
+  let text=collapseQuestionSpeechNoise(value);
+  if(!text)return '';
+  // Mixed STT often contains connection/audio chatter followed by the real technical question.
+  // Remove only leading logistics clauses; never answer or acknowledge them.
+  const clauses=text.split(/(?<=[?.!])\s+|\s+(?=(?:okay|alright|so|my question|the question)[,.:]?\s)/i).map(x=>x.trim()).filter(Boolean);
+  while(clauses.length>1){
+    const first=clauses[0];
+    if(isInterviewLogisticsQuestion(first)||/\b(?:problem (?:on )?(?:my|your) side|checking from my end|from my end|connection issue|network issue|audio (?:is )?(?:good|clear)|going good|no problem)\b/i.test(first))clauses.shift();
+    else break;
+  }
+  text=clauses.join(' ').replace(/^(?:(?:hello|hi|yeah|yes|okay|alright|no problem)[,.:;]?\s+)+/i,'').trim();
+  return text;
+}
+
 function cleanIntentLead(value) {
   let text=collapseQuestionSpeechNoise(value)
     .replace(/^(?:(?:okay|alright|right|well|so|and|then|now|you know|basically|actually|yeah|yes)[,.:;]?\s+)+/i,'')
@@ -983,26 +998,40 @@ function isCodeTurn(turn) {
   if(!turn)return false;
   return turn.responseType==='code'||turn.responseType==='snippet'||isCodingQuestion(turn.question)||/\b(?:Logic:|Complete code:|Code snippet:)\b|\b(?:class|function|def|public static|return)\b/i.test(turn.answer||'');
 }
+function currentExplicitTechnicalTopic(question) {
+  const q=normalizeText(question);
+  if(!q)return '';
+  const patterns=[
+    /\bjava\s+records?\b|\brecord\s+classes?\b/i,
+    /\b(?:is[- ]?a|has[- ]?a)\s+(?:relationship|relationships)\b|\b(?:is[- ]?a|has[- ]?a)\b/i,
+    /\btry[- ]with[- ]resources?\b/i,
+    /\bidempotenc(?:y|e)|idempotent(?:cy)?(?:[- ]key)?\b/i
+  ];
+  for(const pattern of patterns){const m=q.match(pattern);if(m)return m[0];}
+  return '';
+}
 function recentTopicContinuity(session, question) {
   const turns=session?.turns||[];
   if(!turns.length)return null;
   const q=normalizeText(question).toLowerCase();
+  // Regression guard: an explicit topic in the NEW question always wins over history.
+  // History is only allowed to resolve a genuinely ambiguous reference/noisy fragment.
+  if(currentExplicitTechnicalTopic(question))return null;
   const recent=turns.slice(-3);
-  // If STT produced a malformed/partial technical phrase, inherit a stable topic that was
-  // discussed in the immediately preceding turns instead of guessing a new unrelated topic.
   const noisy=/\b(?:kind of|something|recently|used|coding|programming|delay|private|resource|situation|changes|implementation)\b/.test(q);
   const explicitReferent=/\b(?:this|that|these|those|them|same|one|feature|situation)\b/.test(q);
+  if(!explicitReferent&&!noisy)return null;
   const topicPatterns=[
     /\btry[- ]with[- ]resources?\b/i,
     /\bidempotenc(?:y|e)|idempotent(?:cy)?(?:[- ]key)?\b/i,
     /\bjava\s+records?\b|\brecord\s+classes?\b/i,
-    /\b(?:is-a|has-a)\b/i
+    /\b(?:is[- ]?a|has[- ]?a)\b/i
   ];
   for(let i=recent.length-1;i>=0;i--){
     const combined=`${recent[i].question||''}\n${recent[i].answer||''}`;
     for(const pattern of topicPatterns){
       const m=combined.match(pattern);
-      if(m&&(explicitReferent||noisy))return {turn:recent[i],topic:m[0]};
+      if(m)return {turn:recent[i],topic:m[0]};
     }
   }
   return null;
@@ -1011,6 +1040,9 @@ function resolveFollowupIntent(session, question) {
   const turns=session?.turns||[];
   const immediate=turns[turns.length-1];
   if(!immediate)return {isFollowup:false,resolvedQuestion:question,previous:null};
+  // If the current prompt names its own technical topic, pronouns such as "this one" or
+  // "those" refer locally to that named topic, not to an older interview turn.
+  if(currentExplicitTechnicalTopic(question))return {isFollowup:false,resolvedQuestion:question,previous:null};
   const continuity=recentTopicContinuity(session,question);
   if(!isContextualFollowup(question)&&!continuity)return {isFollowup:false,resolvedQuestion:question,previous:null};
   const codeReference=isCodingFollowupQuestion(question)||/\b(?:alternative|same|previous|earlier|above)\s+(?:code|solution|implementation)|\b(?:convert|rewrite)\s+(?:it|that)\b/i.test(normalizeText(question));
@@ -1372,6 +1404,8 @@ INTERVIEW PRESENTATION CALIBRATION:
 - Experience/project question: speak in first person only when supported by retrieved resume evidence; give what I used, where/how I used it, and the practical result in 2-4 concise sentences.
 - Troubleshooting/scenario question: give the immediate production action first, then 3-5 ordered hyphen bullets covering diagnosis, evidence, fix, and validation. Do not guess a single root cause without evidence.
 - Small code request: smallest complete working code that answers the request; avoid framework scaffolding unless the interviewer asked for it.
+- CURRENT-TOPIC PRECEDENCE: If the newest interviewer prompt explicitly names a technical concept (for example Java records, IS-A/HAS-A, Spring JDBC, Kafka, idempotency), that explicit concept overrides prior-turn context. Never carry the previous topic into a new explicitly named topic. Use prior turns only to resolve pronouns, ellipsis, or genuinely corrupted/ambiguous fragments.
+- Never acknowledge call/audio/network/screen/logistics chatter. If a live transcript contains logistics followed by a technical question, silently discard the logistics and answer the technical question directly.
 - If the interviewer mispronounces or live transcription slightly corrupts a technical term, silently infer the nearest context-supported term from the prepared CV/JD vocabulary, retrieved evidence, and recent technical topic. Prefer a clear domain interpretation over asking for rephrasing when the surrounding context makes it unambiguous; for example, in Playwright automation context, "custom fixer" should be understood as "custom fixture" when fixtures are supported by the session context.
 
 CALIBRATION EXAMPLES:
@@ -1534,11 +1568,16 @@ function stripRepeatedPriorPrompt(session, question) {
   const cur=normalizeComparable(current), prev=normalizeComparable(previous);
   if(prev.length>=20&&cur.startsWith(prev)){
     // Locate the same prefix in the original text by word count and keep only the newly
-    // appended interviewer words. This is local string work and adds no model latency.
+    // appended interviewer words. Preserve an explicit technical anchor when the new tail
+    // refers back with "this/that/it" so stripping repetition cannot erase the subject.
     const prevWords=prev.split(' ').filter(Boolean).length;
     const tokens=current.trim().split(/\s+/);
     const remainder=tokens.slice(prevWords).join(' ').trim();
-    if(remainder.split(/\s+/).filter(Boolean).length>=2)return remainder;
+    if(remainder.split(/\s+/).filter(Boolean).length>=2){
+      const anchor=currentExplicitTechnicalTopic(current);
+      if(anchor&&/\b(?:this|that|it|one|feature|those|these)\b/i.test(remainder))return `${anchor}. ${remainder}`;
+      return remainder;
+    }
   }
   return current;
 }
@@ -1548,6 +1587,7 @@ async function prepareQuestion(email, question, {inputSource='', requestId='', c
   const intentStartedAt = Date.now();
   const session = interviewSessions.get(email);
   question=stripNonSemanticSpeechFillers(question);
+  question=stripLeadingInterviewLogistics(question) || question;
   question=stripRepeatedPriorPrompt(session,question);
   let retrieved = [];
   let embeddingMs = 0, retrievalMs = 0;

@@ -52,3 +52,11 @@ Changed JavaScript is validated with `node --check`; the replacement ZIP is vali
 - Renders fenced or labelled code in a true black editor block.
 - Reasserts Windows topmost Z-order once per second without focusing the overlay. Content protection remains enabled.
 - Retrieval, embeddings, provider/model routing, token ceilings, streaming transport, licensing, payments and preparation architecture are unchanged.
+
+
+## v14.7.9 - Context regression guard
+- Explicit current technical topics now always override inherited recent-topic context.
+- Recent-turn continuity is used only for genuine pronouns/ellipsis or noisy ambiguous fragments.
+- Leading interview connection/audio/network chatter is silently discarded before intent processing.
+- Bold interview keywords use a distinct high-contrast accent in the overlay; code editor behavior remains unchanged.
+- No changes to retrieval architecture, embeddings, model routing, streaming, token budgets, licensing, payment, or screen capture.

@@ -1125,7 +1125,7 @@ body { font-family: Arial, "Segoe UI", sans-serif; }
 .qaResponse { line-height: 1.55; }
 .qaResponse .answerLine { min-height: 1.55em; }
 .qaResponse .answerParagraphGap { height: .72em; }
-.qaResponse strong { font-weight: 750; color: #ffffff; }
+.qaResponse strong { font-weight: 800; color: #7ee7ea; text-shadow: 0 0 0.01px currentColor; }
 .qaResponse .answerBullet { position: relative; padding-left: 1.15em; margin: .18em 0; }
 .qaResponse .answerBullet::before { content: "•"; position: absolute; left: .15em; color: rgba(255,255,255,.72); }
 .qaResponse .answerCodeLabel { margin: .55em 0 .35em; font-weight: 700; color: rgba(255,255,255,.92); }
