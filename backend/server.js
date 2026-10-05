@@ -1267,13 +1267,20 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
   const info = followupInfo || resolveFollowupIntent(session, question);
   const userInstructions=normalizeStructuredText(session.userInstructions||'').slice(0,5000);
   const codeLanguage=detectCodeLanguageHint(intentQuestion,info.previous);
+  // Cost-safe context compaction: preserve the same continuity window and evidence ranking,
+  // but do not resend entire prior answers or oversized RAG chunks on every Sol call.
+  // The newest turns remain intact enough for pronoun/topic resolution; no extra model call is added.
   const history = info.isFollowup
-    ? session.turns.slice(-MAX_HISTORY_TURNS).map((t,i) => `Turn ${i+1}\nInterviewer: ${t.question}\nCandidate: ${t.answer}`).join('\n\n')
+    ? session.turns.slice(-MAX_HISTORY_TURNS).map((t,i) => {
+        const q=normalizeStructuredText(t.question||'').slice(0,900);
+        const a=normalizeStructuredText(t.answer||'').slice(0,1200);
+        return `Turn ${i+1}\nInterviewer: ${q}\nCandidate: ${a}`;
+      }).join('\n\n')
     : '';
   const evidence = retrieved.map((c,i) => {
     const sourceName = c.source === 'resume' ? 'Resume' : (c.source === 'jd' ? 'JD' : String(c.source || 'Source'));
     const sourceId = `${c.source === 'resume' ? 'R' : (c.source === 'jd' ? 'J' : 'S')}${i+1}`;
-    return `[${sourceId}] ${sourceName} · ${c.section}\n${c.text.slice(0, 900)}`;
+    return `[${sourceId}] ${sourceName} · ${c.section}\n${normalizeStructuredText(c.text||'').slice(0, 700)}`;
   }).join('\n\n');
   const followup = info.isFollowup
     ? `YES. Treat the current words as a continuation/modifier of the immediately previous interviewer request. Resolved intent:\n${info.resolvedQuestion}`
@@ -1287,7 +1294,11 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
 ${priorAnswersForRegenerate.map((turn,index)=>`Earlier answer ${index+1}:
 ${String(turn?.answer||'').slice(0,3500)}`).join('\n\n')}`
     : 'NO';
-  return `CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nUSER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n${userInstructions || 'No additional user instructions.'}\nApply these instructions to every answer in this prepared session when they are compatible with factual grounding and the mandatory coding/diagram contracts. Treat requests such as STAR format, very short answers, explanatory style, behavioral-answer style, or experience-first wording as persistent presentation preferences.\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nCODE LANGUAGE HINT\n${codeLanguage || 'No explicit language detected; preserve the language requested or inherited from the referenced coding turn.'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
+  const compactCandidateSummary=normalizeStructuredText(profile.candidateSummary||'').slice(0,1500);
+  const compactSkills=(profile.primarySkills||[]).slice(0,20).join(', ');
+  const compactVocabulary=(profile.domainVocabulary||profile.primarySkills||[]).slice(0,30).join(', ');
+  const compactJdSummary=normalizeStructuredText(profile.jdSummary||'').slice(0,900);
+  return `CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${compactCandidateSummary}\nPrimary skills: ${compactSkills}\nCanonical resume/JD vocabulary: ${compactVocabulary}\n\nJOB ALIGNMENT\n${compactJdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nUSER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n${userInstructions || 'No additional user instructions.'}\nApply these instructions to every answer in this prepared session when they are compatible with factual grounding and the mandatory coding/diagram contracts. Treat requests such as STAR format, very short answers, explanatory style, behavioral-answer style, or experience-first wording as persistent presentation preferences.\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nCODE LANGUAGE HINT\n${codeLanguage || 'No explicit language detected; preserve the language requested or inherited from the referenced coding turn.'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
 }
 const COPILOT_INSTRUCTIONS = `You are the candidate in a live senior/lead engineer interview. Return one directly usable answer. Normal answers must be immediately speakable; coding and diagram questions must use the exact practical formats below. Never mention AI, ChatGPT, copilot, prompts, retrieval, transcription correction, evidence matching, or how you inferred the question. Never say "based on my CV/JD", "the resume confirms", "not listed", or similar meta commentary.
 
