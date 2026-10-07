@@ -197,6 +197,39 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
     }
     return lines;
   }
+  // v14.7.15: **bold** markers in answers become real bold text (Helvetica-Bold) instead of literal stars.
+  function styledPdfRuns(rawLine){
+    const src=String(rawLine??'').replace(/\t/g,'  ');
+    let plain='';const flags=[];
+    const add=(txt,bold)=>{const safe=pdfSafe(txt);for(let i=0;i<safe.length;i++)flags.push(bold);plain+=safe;};
+    const re=/\*\*(?=\S)(.+?)(?<=\S)\*\*/g;let last=0,m;
+    while((m=re.exec(src))){if(m.index>last)add(src.slice(last,m.index),false);add(m[1],true);last=m.index+m[0].length;}
+    if(last<src.length)add(src.slice(last),false);
+    return {plain,flags};
+  }
+  function wrapStyledPdfLine(text,width=78){
+    const out=[];
+    for(const rawLine of String(text??'').split('\n')){
+      const {plain,flags}=styledPdfRuns(rawLine);
+      let end=plain.length;while(end>0&&plain[end-1]===' ')end--;
+      if(!end){out.push([]);continue;}
+      const indent=(plain.match(/^\s*/)||[''])[0].slice(0,12);
+      const mk=(prefix,a,b)=>{const runs=[];if(prefix)runs.push({text:prefix,bold:false});for(let i=a;i<b;i++){const bd=!!flags[i],lr=runs[runs.length-1];if(lr&&lr.bold===bd)lr.text+=plain[i];else runs.push({text:plain[i],bold:bd});}return runs;};
+      let a=0,first=true;
+      for(;;){
+        const prefix=first?'':indent,room=width-prefix.length;
+        if(end-a<=room){out.push(mk(prefix,a,end));break;}
+        let cut=plain.lastIndexOf(' ',a+room);
+        if(cut-a<Math.max(12,Math.floor(width*0.45)))cut=a+room;
+        let pieceEnd=cut;while(pieceEnd>a&&plain[pieceEnd-1]===' ')pieceEnd--;
+        if(pieceEnd<=a)pieceEnd=Math.min(a+room,end);
+        out.push(mk(prefix,a,pieceEnd));
+        a=cut;if(plain[a]===' ')a++;
+        first=false;
+      }
+    }
+    return out;
+  }
   function buildTranscriptPdf(session,user){
     const meta=session.metadata||{};
     const fmtDateTime=ms=>new Date(Number(ms)||Date.now()).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
@@ -206,7 +239,7 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
     const duration=`${mins}m ${String(secs).padStart(2,'0')}s`;
     const years=(meta.yearsExperience===0||meta.yearsExperience)?String(meta.yearsExperience):'Not provided';
     const rows=[];
-    const pushLines=(text,{bold=false}={})=>wrapPdfLine(text).forEach(line=>rows.push({text:line,bold}));
+    const pushLines=(text,{bold=false}={})=>wrapStyledPdfLine(text).forEach(runs=>rows.push({runs:bold?runs.map(r=>({text:r.text,bold:true})):runs}));
 
     pushLines('TOPPER INTERVIEW TRANSCRIPT',{bold:true});
     pushLines(`CV/Resume: ${pdfSafe(meta.resumeFileName||'Not available')}`);
@@ -214,23 +247,23 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
     pushLines(`Start time: ${fmtDateTime(session.startedAt)}    End time: ${fmtDateTime(session.endedAt)}    Duration: ${duration}`);
     pushLines(`Number of questions: ${session.turnCount}`);
     pushLines(`Summary: ${pdfSafe(session.summary?.overview||'Completed interview session.')}`);
-    rows.push({text:'',bold:false});
+    rows.push({runs:[]});
 
     session.turns.forEach((turn,index)=>{
       // Interviewer prompt/context is bold; response text keeps its original line/paragraph shape.
       pushLines(`Q${index+1} - ${turn.question}    [${fmtTime(turn.askedAt)}]`,{bold:true});
-      rows.push({text:'',bold:false});
+      rows.push({runs:[]});
       pushLines(turn.answer,{bold:false});
-      rows.push({text:'',bold:false});
+      rows.push({runs:[]});
       pushLines('..............................................................................');
-      rows.push({text:'',bold:false});
+      rows.push({runs:[]});
     });
 
     // 54 x 12pt lines from y=800 stays comfortably inside A4 top/bottom margins.
     // Horizontal wrapping is capped at 78 characters to keep long prompts/code inside the page.
     const perPage=54,pages=[];
     for(let i=0;i<rows.length;i+=perPage)pages.push(rows.slice(i,i+perPage));
-    if(!pages.length)pages.push([{text:'TOPPER INTERVIEW TRANSCRIPT',bold:true},{text:'No transcript content.',bold:false}]);
+    if(!pages.length)pages.push([{runs:[{text:'TOPPER INTERVIEW TRANSCRIPT',bold:true}]},{runs:[{text:'No transcript content.',bold:false}]}]);
     const objects=[];
     const add=body=>{objects.push(body);return objects.length;};
     const catalogId=add('');
@@ -243,9 +276,13 @@ module.exports = function createCommerce({ app, dataDir, publicDir }) {
       const stream=['BT','48 800 Td','12 TL'];
       let currentFont='';
       for(const row of pageRows){
-        const wanted=row.bold?'F2':'F1';
-        if(wanted!==currentFont){stream.push(`/${wanted} 9 Tf`);currentFont=wanted;}
-        stream.push(`(${escPdf(row.text)}) Tj`,'T*');
+        for(const run of (row.runs||[])){
+          if(!run.text)continue;
+          const wanted=run.bold?'F2':'F1';
+          if(wanted!==currentFont){stream.push(`/${wanted} 9 Tf`);currentFont=wanted;}
+          stream.push(`(${escPdf(run.text)}) Tj`);
+        }
+        stream.push('T*');
       }
       stream.push('ET');
       const content=stream.join('\n');

@@ -42,15 +42,14 @@ const OPENAI_SERVICE_TIER_RAW = String(process.env.OPENAI_SERVICE_TIER || 'fast'
 const OPENAI_SERVICE_TIER = new Set(['fast','priority','default','auto']).has(OPENAI_SERVICE_TIER_RAW)
   ? OPENAI_SERVICE_TIER_RAW
   : 'fast';
-// v14.7.11: GPT-5.6+ bills implicit cache WRITES at 1.25x on the latest user message, which here is the
-// per-question dynamic prompt that is never re-read. Explicit mode caches only the static instruction block.
-let EXPLICIT_PROMPT_CACHE = String(process.env.OPENAI_EXPLICIT_PROMPT_CACHE || 'true').trim().toLowerCase() !== 'false';
 const EMBEDDING_MODEL = String(process.env.EMBEDDING_MODEL || 'text-embedding-3-small').trim();
 const EMBEDDING_DIMENSIONS = Math.max(256, Number(process.env.EMBEDDING_DIMENSIONS || 512));
-const HISTORY_OLDER_ANSWER_CHARS = Math.max(400, Number(process.env.HISTORY_OLDER_ANSWER_CHARS || 1200));
 const MAX_CONTEXT_FILE_BYTES = 6 * 1024 * 1024;
 const MAX_DOCUMENT_CHARS = 70000;
 const MAX_HISTORY_TURNS = Math.max(2, Math.min(5, Number(process.env.MAX_HISTORY_TURNS || 3)));
+// v14.7.15: remember more past questions than we send as full history, so scenario context survives.
+const MAX_STORED_TURNS = Math.max(MAX_HISTORY_TURNS, Math.min(30, Number(process.env.MAX_STORED_TURNS || 12)));
+const EARLIER_QUESTIONS_MAX = Math.max(0, Math.min(8, Number(process.env.EARLIER_QUESTIONS_MAX || 4)));
 const TOP_K = Math.max(3, Math.min(6, Number(process.env.RAG_TOP_K || 4)));
 const LLM_FIRST_TOKEN_TIMEOUT_MS = Math.max(3000, Number(process.env.LLM_FIRST_TOKEN_TIMEOUT_MS || 5000));
 const FAST_LEXICAL_THRESHOLD = Math.max(0.18, Math.min(0.95, Number(process.env.FAST_LEXICAL_THRESHOLD || 0.34)));
@@ -221,17 +220,7 @@ async function openAIJson(url, body) {
     method:'POST', headers:{'content-type':'application/json', authorization:`Bearer ${OPENAI_API_KEY}`}, body:JSON.stringify(body)
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const msg=data?.error?.message || `OpenAI request failed (${response.status})`;
-    if(EXPLICIT_PROMPT_CACHE && body?.prompt_cache_options && /prompt_cache|breakpoint/i.test(msg)){
-      console.warn('[CACHE] explicit prompt cache rejected; disabling and retrying:',msg);
-      EXPLICIT_PROMPT_CACHE=false;
-      const retry={...body,instructions:body.input?.[0]?.content?.map(b=>b.text).join('\n\n')||'',input:body.input?.[1]?.content||''};
-      delete retry.prompt_cache_options;
-      return openAIJson(url,retry);
-    }
-    throw new Error(msg);
-  }
+  if (!response.ok) throw new Error(data?.error?.message || `OpenAI request failed (${response.status})`);
   return data;
 }
 function normalizedReasoningEffort(effort) {
@@ -248,17 +237,6 @@ function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',ef
     text:{verbosity:String(verbosity||'medium')},
     stream:!!stream
   };
-  const instr=String(instructions||'');
-  if(EXPLICIT_PROMPT_CACHE && typeof input==='string' && instr.startsWith(COPILOT_INSTRUCTIONS)){
-    // Static rules (identical for every request) get the only cache breakpoint; the per-turn tail
-    // (strict-mode contract) and the dynamic question are processed at the plain input rate with no write fee.
-    const tail=instr.slice(COPILOT_INSTRUCTIONS.length).trim();
-    const blocks=[{type:'input_text',text:COPILOT_INSTRUCTIONS,prompt_cache_breakpoint:{mode:'explicit'}}];
-    if(tail)blocks.push({type:'input_text',text:tail});
-    delete body.instructions;
-    body.input=[{role:'developer',content:blocks},{role:'user',content:input}];
-    body.prompt_cache_options={mode:'explicit'};
-  }
   if(Number.isFinite(maxTokens)&&maxTokens>0)body.max_output_tokens=maxTokens;
   return body;
 }
@@ -816,7 +794,7 @@ JOB DESCRIPTION:
 ${jdText ? jdText.slice(0, 24000) : 'Not provided. Use resume-only grounding.'}
 
 Return JSON with keys candidateSummary (max 1800 chars), jdSummary (max 1200 chars; empty string when no JD), primarySkills (array max 25), projectHighlights (array max 8), domainVocabulary (array max 60 of exact technology/product/framework/domain terms appearing in the resume or JD, preserving canonical spelling such as LangGraph, LangChain, Kubernetes), targetRole, yearsExperience. For yearsExperience, use a supplied value when present; otherwise prefer the deterministic resume timeline value above and only infer from resume dates if it was unresolved. For targetRole, use this exact priority: supplied role; explicit CV role/title; explicit JD job title/role/position/job-description-for title; if the JD exists but has no explicit title, infer one concise canonical job title from the JD responsibilities/requirements; only when there is no useful JD, infer from the resume. targetRole must be a job title only (normally 2-6 words, maximum 9), never a sentence, summary, requirement, company description, or slash-separated list. Do not replace an explicit CV title with a JD title.`,
-      effort:'low', maxTokens:900, responseFormat:{type:'json_object'}
+      effort:'low', maxTokens:2600, responseFormat:{type:'json_object'}
     });
     const raw = outputText(data);
     const start = raw.indexOf('{'), end = raw.lastIndexOf('}');
@@ -852,6 +830,8 @@ function isContextualFollowup(question) {
   if (/\b(it|that|this|those|these|them|earlier|previous|above|same|same thing|one example|another example|more detail|what about|how about|show code|give code|alternative code|alternative solution|alternative approach|convert it|rewrite it|same in|do it in|instead|another one|other way|dry run|time complexity|space complexity|edge cases?|optimi[sz]e|without|avoid|do not use|don't use|not using|using only|different way|different approach|another way)\b/.test(q)) return true;
   if (/^(?:in|using)\s+(?:java|python|c#|c\+\+|javascript|typescript|go|golang|rust|kotlin|swift)\??$/.test(q)) return true;
   if (/\b(explain|walk through|why did you|why have you|modify|change|fix)\b.*\b(code|logic|line|function|method|class|solution|algorithm|loop|map|array|string)\b/.test(q)) return true;
+  // v14.7.15: short connector fragments naming a scenario ("for ten csv files scenario?") continue the prior topic.
+  if (words.length <= 10 && /^(?:and\s+|so\s+|then\s+|ok(?:ay)?\s+)?(?:for|in|with|if|when|assuming|consider|in case of|what if)\b/.test(q) && /\b(?:scenario|case|situation|use case|setup|requirement)\b/.test(q)) return true;
   // A clear standalone topic question should not be attached to the prior turn just because it is short.
   if (/^(what|who|why|when|where|which)\s+(is|are|was|were|do|does|did|can|could|should|would)\b/.test(q)) return false;
   if (/^(explain|define|describe|compare|differentiate|tell me about|difference between)\b/.test(q)) return false;
@@ -1081,7 +1061,7 @@ function recentTopicContinuity(session, question) {
   return null;
 }
 function resolveFollowupIntent(session, question) {
-  const turns=session?.turns||[];
+  const turns=(session?.turns||[]).slice(-MAX_HISTORY_TURNS);
   const immediate=turns[turns.length-1];
   if(!immediate)return {isFollowup:false,resolvedQuestion:question,previous:null};
   // If the current prompt names its own technical topic, pronouns such as "this one" or
@@ -1293,7 +1273,14 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
   const userInstructions=normalizeStructuredText(session.userInstructions||'').slice(0,5000);
   const codeLanguage=detectCodeLanguageHint(intentQuestion,info.previous);
   const history = info.isFollowup
-    ? (()=>{const recent=session.turns.slice(-MAX_HISTORY_TURNS);return recent.map((t,i) => {const isLast=i===recent.length-1;const ans=isLast?t.answer:(String(t.answer||'').length>HISTORY_OLDER_ANSWER_CHARS?String(t.answer).slice(0,HISTORY_OLDER_ANSWER_CHARS)+' …':t.answer);return `Turn ${i+1}\nInterviewer: ${t.question}\nCandidate: ${ans}`}).join('\n\n')})()
+    ? session.turns.slice(-MAX_HISTORY_TURNS).map((t,i) => `Turn ${i+1}\nInterviewer: ${t.question}\nCandidate: ${t.answer}`).join('\n\n')
+    : '';
+  const historyTurnCount = info.isFollowup ? Math.min(MAX_HISTORY_TURNS, session.turns.length) : 0;
+  const earlierQuestions = EARLIER_QUESTIONS_MAX
+    ? session.turns.slice(0, session.turns.length - historyTurnCount).slice(-EARLIER_QUESTIONS_MAX).map(t => `- ${normalizeText(t.question).slice(0,140)}`)
+    : [];
+  const earlierBlock = earlierQuestions.length
+    ? `\n\nEARLIER INTERVIEWER QUESTIONS THIS SESSION (oldest to newest; background only)\n${earlierQuestions.join('\n')}\nUse these when the current question is an incomplete fragment, refers back, or clearly continues the same scenario (for example "for the ten CSV files scenario?"): answer it inside that scenario instead of asking for clarification. If the current question names its own new topic, answer it on its own and ignore these.`
     : '';
   const evidence = retrieved.map((c,i) => {
     const sourceName = c.source === 'resume' ? 'Resume' : (c.source === 'jd' ? 'JD' : String(c.source || 'Source'));
@@ -1303,7 +1290,7 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
   const followup = info.isFollowup
     ? `YES. Treat the current words as a continuation/modifier of the immediately previous interviewer request. Resolved intent:\n${info.resolvedQuestion}`
     : 'NO';
-  const sameQuestionAnswers=regenerate?session.turns
+  const sameQuestionAnswers=regenerate?session.turns.slice(-MAX_HISTORY_TURNS)
     .filter(turn=>normalizeText(turn.question).toLowerCase()===normalizeText(intentQuestion).toLowerCase())
     .slice(-3):[];
   const priorAnswersForRegenerate=sameQuestionAnswers.length?sameQuestionAnswers:session.turns.slice(-1);
@@ -1312,7 +1299,7 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
 ${priorAnswersForRegenerate.map((turn,index)=>`Earlier answer ${index+1}:
 ${String(turn?.answer||'').slice(0,3500)}`).join('\n\n')}`
     : 'NO';
-  return `CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nUSER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n${userInstructions || 'No additional user instructions.'}\nApply these instructions to every answer in this prepared session when they are compatible with factual grounding and the mandatory coding/diagram contracts. Treat requests such as STAR format, very short answers, explanatory style, behavioral-answer style, or experience-first wording as persistent presentation preferences.\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nCODE LANGUAGE HINT\n${codeLanguage || 'No explicit language detected; preserve the language requested or inherited from the referenced coding turn.'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${normalizeText(correctedQuestion)===normalizeText(intentQuestion)?'(identical to the reframed intent above)':correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
+  return `CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}${earlierBlock}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nUSER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n${userInstructions || 'No additional user instructions.'}\nApply these instructions to every answer in this prepared session when they are compatible with factual grounding and the mandatory coding/diagram contracts. Treat requests such as STAR format, very short answers, explanatory style, behavioral-answer style, or experience-first wording as persistent presentation preferences.\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nCODE LANGUAGE HINT\n${codeLanguage || 'No explicit language detected; preserve the language requested or inherited from the referenced coding turn.'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
 }
 const COPILOT_INSTRUCTIONS = `You are the candidate in a live senior/lead engineer interview. Return one directly usable answer. Normal answers must be immediately speakable; coding and diagram questions must use the exact practical formats below. Never mention AI, ChatGPT, copilot, prompts, retrieval, transcription correction, evidence matching, or how you inferred the question. Never say "based on my CV/JD", "the resume confirms", "not listed", or similar meta commentary.
 
@@ -1602,7 +1589,7 @@ function selectAnswerRoute(_question, prepared=null, _options={}) {
 }
 function addTurn(session, question, answer, retrieved=[],responseType='spoken') {
   session.turns.push({ question:normalizeStructuredText(question).slice(0,4000), answer:normalizeStructuredText(answer).slice(0,14000), responseType, retrieved:retrieved.slice(0, TOP_K).map(c => ({source:c.source, section:c.section, text:c.text, score:c.score})), at:Date.now() });
-  if (session.turns.length > MAX_HISTORY_TURNS) session.turns = session.turns.slice(-MAX_HISTORY_TURNS);
+  if (session.turns.length > MAX_STORED_TURNS) session.turns = session.turns.slice(-MAX_STORED_TURNS);
 }
 function stripRepeatedPriorPrompt(session, question) {
   const current=normalizeStructuredText(question);
@@ -2053,8 +2040,7 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,effort:'
       streamAttempt++;
       const upstreamController = new AbortController();
       activeUpstreamController = upstreamController;
-      const slowType=['code','diagram','multi','snippet'].includes(prepared.responseType);
-      const firstTokenTimeoutMs = hasImage ? Math.max(9000, LLM_FIRST_TOKEN_TIMEOUT_MS) : (slowType ? Math.max(8000, LLM_FIRST_TOKEN_TIMEOUT_MS) : LLM_FIRST_TOKEN_TIMEOUT_MS);
+      const firstTokenTimeoutMs = hasImage ? Math.max(9000, LLM_FIRST_TOKEN_TIMEOUT_MS) : LLM_FIRST_TOKEN_TIMEOUT_MS;
       const firstTokenTimer = setTimeout(() => upstreamController.abort('first-token-timeout'), firstTokenTimeoutMs);
       let upstream;
       try {
@@ -2088,12 +2074,7 @@ ${strictModeInstructions(prepared.responseType)}`;
         if (!upstream.ok) {
           clearTimeout(firstTokenTimer);
           const data = await upstream.json().catch(() => ({}));
-          const failMsg = data?.error?.message || `${route.provider==='cerebras'?'Cerebras':'OpenAI'} request failed (${upstream.status})`;
-          if (route.provider==='openai' && EXPLICIT_PROMPT_CACHE && /prompt_cache|breakpoint/i.test(failMsg)) {
-            console.warn('[CACHE] explicit prompt cache rejected; disabling and retrying:', failMsg);
-            EXPLICIT_PROMPT_CACHE = false; streamAttempt--; continue;
-          }
-          throw new Error(failMsg);
+          throw new Error(data?.error?.message || `${route.provider==='cerebras'?'Cerebras':'OpenAI'} request failed (${upstream.status})`);
         }
         const reader = upstream.body.getReader();
         const decoder = new TextDecoder();
@@ -2151,9 +2132,7 @@ ${strictModeInstructions(prepared.responseType)}`;
     const latency = { ...prepared.latency, providerRequestAtMs, providerHeadersMs, firstProviderDeltaAfterRequestMs, firstTokenMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt, attempts:streamAttempt };
     providerServiceTier=providerServiceTier||(route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER);
     const u=providerUsage||{};
-    const usageLog={inTok:u.input_tokens??null,cached:u.input_tokens_details?.cached_tokens??null,cacheWrite:u.input_tokens_details?.cache_write_tokens??null,outTok:u.output_tokens??null,reasoningTok:u.output_tokens_details?.reasoning_tokens??null};
-    console.log(`[USAGE] ${route.model} type=${prepared.responseType} tier=${providerServiceTier} attempts=${streamAttempt} first=${firstTokenMs}ms total=${latency.totalMs}ms`,JSON.stringify(usageLog));
-    latency.usage=usageLog;
+    console.log(`[USAGE] ${route.model} type=${prepared.responseType} tier=${providerServiceTier} attempts=${streamAttempt} first=${firstTokenMs}ms total=${latency.totalMs}ms`,JSON.stringify({inTok:u.input_tokens??null,cached:u.input_tokens_details?.cached_tokens??null,cacheWrite:u.input_tokens_details?.cache_write_tokens??null,outTok:u.output_tokens??null,reasoningTok:u.output_tokens_details?.reasoning_tokens??null}));
     emit('meta', { model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, phase:'complete', latency, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})) });
     emit('done', { answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, latency });
   } catch (err) {

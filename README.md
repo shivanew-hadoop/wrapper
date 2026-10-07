@@ -1,4 +1,4 @@
-# Topper v14.7.11
+# Topper v14.7.8
 
 Replacement package based strictly on the attached v14.7.2 baseline. No new Railway environment variables are required.
 
@@ -68,10 +68,8 @@ Changed JavaScript is validated with `node --check`; the replacement ZIP is vali
 - No model call, embedding, retrieval, routing, streaming, token-budget, or UI architecture changes.
 
 
-## v14.7.11 — latency/cost patch (backend only)
-- Explicit prompt caching: only the static COPILOT_INSTRUCTIONS block is cached; the per-question dynamic prompt no longer pays the 1.25x cache-write fee. Auto-disables if the API rejects the fields. Kill switch: OPENAI_EXPLICIT_PROMPT_CACHE=false.
-- New [USAGE] log line per answer: input / cached / cache-write / output / reasoning tokens, first-token and total ms.
-- First-token timeout raised to 8s for code/diagram/multi/snippet so slow-reasoning answers are not aborted and re-billed.
-- Older history turns keep the question + first 1200 chars of answer (last turn stays verbatim).
-- Identical raw transcript is no longer printed twice in the prompt.
-- Prompt rules, retrieval, routing, token ceilings, STT and UI unchanged.
+## v14.7.15
+- Memory: server keeps last 12 turns (was 3); older questions (text only, max 4) are added to the prompt; short scenario fragments like "for ten csv files scenario?" are treated as follow-ups. Follow-up/regenerate logic still looks at the same last-3 window as before.
+- PDF: **bold** markers in answers are rendered as real bold text (commerce.js). Code-like ** stays literal.
+- Everything else identical to v14.7.12 (original + [USAGE] log).
+- Includes the profile-generation fix from the earlier drop-in (maxTokens 900 -> 2600).
