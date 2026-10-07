@@ -42,8 +42,12 @@ const OPENAI_SERVICE_TIER_RAW = String(process.env.OPENAI_SERVICE_TIER || 'fast'
 const OPENAI_SERVICE_TIER = new Set(['fast','priority','default','auto']).has(OPENAI_SERVICE_TIER_RAW)
   ? OPENAI_SERVICE_TIER_RAW
   : 'fast';
+// v14.7.11: GPT-5.6+ bills implicit cache WRITES at 1.25x on the latest user message, which here is the
+// per-question dynamic prompt that is never re-read. Explicit mode caches only the static instruction block.
+let EXPLICIT_PROMPT_CACHE = String(process.env.OPENAI_EXPLICIT_PROMPT_CACHE || 'true').trim().toLowerCase() !== 'false';
 const EMBEDDING_MODEL = String(process.env.EMBEDDING_MODEL || 'text-embedding-3-small').trim();
 const EMBEDDING_DIMENSIONS = Math.max(256, Number(process.env.EMBEDDING_DIMENSIONS || 512));
+const HISTORY_OLDER_ANSWER_CHARS = Math.max(400, Number(process.env.HISTORY_OLDER_ANSWER_CHARS || 1200));
 const MAX_CONTEXT_FILE_BYTES = 6 * 1024 * 1024;
 const MAX_DOCUMENT_CHARS = 70000;
 const MAX_HISTORY_TURNS = Math.max(2, Math.min(5, Number(process.env.MAX_HISTORY_TURNS || 3)));
@@ -217,7 +221,17 @@ async function openAIJson(url, body) {
     method:'POST', headers:{'content-type':'application/json', authorization:`Bearer ${OPENAI_API_KEY}`}, body:JSON.stringify(body)
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.error?.message || `OpenAI request failed (${response.status})`);
+  if (!response.ok) {
+    const msg=data?.error?.message || `OpenAI request failed (${response.status})`;
+    if(EXPLICIT_PROMPT_CACHE && body?.prompt_cache_options && /prompt_cache|breakpoint/i.test(msg)){
+      console.warn('[CACHE] explicit prompt cache rejected; disabling and retrying:',msg);
+      EXPLICIT_PROMPT_CACHE=false;
+      const retry={...body,instructions:body.input?.[0]?.content?.map(b=>b.text).join('\n\n')||'',input:body.input?.[1]?.content||''};
+      delete retry.prompt_cache_options;
+      return openAIJson(url,retry);
+    }
+    throw new Error(msg);
+  }
   return data;
 }
 function normalizedReasoningEffort(effort) {
@@ -234,6 +248,17 @@ function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',ef
     text:{verbosity:String(verbosity||'medium')},
     stream:!!stream
   };
+  const instr=String(instructions||'');
+  if(EXPLICIT_PROMPT_CACHE && typeof input==='string' && instr.startsWith(COPILOT_INSTRUCTIONS)){
+    // Static rules (identical for every request) get the only cache breakpoint; the per-turn tail
+    // (strict-mode contract) and the dynamic question are processed at the plain input rate with no write fee.
+    const tail=instr.slice(COPILOT_INSTRUCTIONS.length).trim();
+    const blocks=[{type:'input_text',text:COPILOT_INSTRUCTIONS,prompt_cache_breakpoint:{mode:'explicit'}}];
+    if(tail)blocks.push({type:'input_text',text:tail});
+    delete body.instructions;
+    body.input=[{role:'developer',content:blocks},{role:'user',content:input}];
+    body.prompt_cache_options={mode:'explicit'};
+  }
   if(Number.isFinite(maxTokens)&&maxTokens>0)body.max_output_tokens=maxTokens;
   return body;
 }
@@ -1267,20 +1292,13 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
   const info = followupInfo || resolveFollowupIntent(session, question);
   const userInstructions=normalizeStructuredText(session.userInstructions||'').slice(0,5000);
   const codeLanguage=detectCodeLanguageHint(intentQuestion,info.previous);
-  // Cost-safe context compaction: preserve the same continuity window and evidence ranking,
-  // but do not resend entire prior answers or oversized RAG chunks on every Sol call.
-  // The newest turns remain intact enough for pronoun/topic resolution; no extra model call is added.
   const history = info.isFollowup
-    ? session.turns.slice(-MAX_HISTORY_TURNS).map((t,i) => {
-        const q=normalizeStructuredText(t.question||'').slice(0,900);
-        const a=normalizeStructuredText(t.answer||'').slice(0,1200);
-        return `Turn ${i+1}\nInterviewer: ${q}\nCandidate: ${a}`;
-      }).join('\n\n')
+    ? (()=>{const recent=session.turns.slice(-MAX_HISTORY_TURNS);return recent.map((t,i) => {const isLast=i===recent.length-1;const ans=isLast?t.answer:(String(t.answer||'').length>HISTORY_OLDER_ANSWER_CHARS?String(t.answer).slice(0,HISTORY_OLDER_ANSWER_CHARS)+' …':t.answer);return `Turn ${i+1}\nInterviewer: ${t.question}\nCandidate: ${ans}`}).join('\n\n')})()
     : '';
   const evidence = retrieved.map((c,i) => {
     const sourceName = c.source === 'resume' ? 'Resume' : (c.source === 'jd' ? 'JD' : String(c.source || 'Source'));
     const sourceId = `${c.source === 'resume' ? 'R' : (c.source === 'jd' ? 'J' : 'S')}${i+1}`;
-    return `[${sourceId}] ${sourceName} · ${c.section}\n${normalizeStructuredText(c.text||'').slice(0, 700)}`;
+    return `[${sourceId}] ${sourceName} · ${c.section}\n${c.text.slice(0, 900)}`;
   }).join('\n\n');
   const followup = info.isFollowup
     ? `YES. Treat the current words as a continuation/modifier of the immediately previous interviewer request. Resolved intent:\n${info.resolvedQuestion}`
@@ -1294,11 +1312,7 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
 ${priorAnswersForRegenerate.map((turn,index)=>`Earlier answer ${index+1}:
 ${String(turn?.answer||'').slice(0,3500)}`).join('\n\n')}`
     : 'NO';
-  const compactCandidateSummary=normalizeStructuredText(profile.candidateSummary||'').slice(0,1500);
-  const compactSkills=(profile.primarySkills||[]).slice(0,20).join(', ');
-  const compactVocabulary=(profile.domainVocabulary||profile.primarySkills||[]).slice(0,30).join(', ');
-  const compactJdSummary=normalizeStructuredText(profile.jdSummary||'').slice(0,900);
-  return `CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${compactCandidateSummary}\nPrimary skills: ${compactSkills}\nCanonical resume/JD vocabulary: ${compactVocabulary}\n\nJOB ALIGNMENT\n${compactJdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nUSER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n${userInstructions || 'No additional user instructions.'}\nApply these instructions to every answer in this prepared session when they are compatible with factual grounding and the mandatory coding/diagram contracts. Treat requests such as STAR format, very short answers, explanatory style, behavioral-answer style, or experience-first wording as persistent presentation preferences.\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nCODE LANGUAGE HINT\n${codeLanguage || 'No explicit language detected; preserve the language requested or inherited from the referenced coding turn.'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
+  return `CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nUSER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n${userInstructions || 'No additional user instructions.'}\nApply these instructions to every answer in this prepared session when they are compatible with factual grounding and the mandatory coding/diagram contracts. Treat requests such as STAR format, very short answers, explanatory style, behavioral-answer style, or experience-first wording as persistent presentation preferences.\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nCODE LANGUAGE HINT\n${codeLanguage || 'No explicit language detected; preserve the language requested or inherited from the referenced coding turn.'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${normalizeText(correctedQuestion)===normalizeText(intentQuestion)?'(identical to the reframed intent above)':correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
 }
 const COPILOT_INSTRUCTIONS = `You are the candidate in a live senior/lead engineer interview. Return one directly usable answer. Normal answers must be immediately speakable; coding and diagram questions must use the exact practical formats below. Never mention AI, ChatGPT, copilot, prompts, retrieval, transcription correction, evidence matching, or how you inferred the question. Never say "based on my CV/JD", "the resume confirms", "not listed", or similar meta commentary.
 
@@ -2028,6 +2042,7 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,effort:'
   let answer = '';
   let streamAttempt = 0;
   let providerServiceTier = '';
+  let providerUsage = null;
   let providerRequestAtMs = null;
   let providerHeadersMs = null;
   let firstProviderDeltaAfterRequestMs = null;
@@ -2038,7 +2053,8 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,effort:'
       streamAttempt++;
       const upstreamController = new AbortController();
       activeUpstreamController = upstreamController;
-      const firstTokenTimeoutMs = hasImage ? Math.max(9000, LLM_FIRST_TOKEN_TIMEOUT_MS) : LLM_FIRST_TOKEN_TIMEOUT_MS;
+      const slowType=['code','diagram','multi','snippet'].includes(prepared.responseType);
+      const firstTokenTimeoutMs = hasImage ? Math.max(9000, LLM_FIRST_TOKEN_TIMEOUT_MS) : (slowType ? Math.max(8000, LLM_FIRST_TOKEN_TIMEOUT_MS) : LLM_FIRST_TOKEN_TIMEOUT_MS);
       const firstTokenTimer = setTimeout(() => upstreamController.abort('first-token-timeout'), firstTokenTimeoutMs);
       let upstream;
       try {
@@ -2072,7 +2088,12 @@ ${strictModeInstructions(prepared.responseType)}`;
         if (!upstream.ok) {
           clearTimeout(firstTokenTimer);
           const data = await upstream.json().catch(() => ({}));
-          throw new Error(data?.error?.message || `${route.provider==='cerebras'?'Cerebras':'OpenAI'} request failed (${upstream.status})`);
+          const failMsg = data?.error?.message || `${route.provider==='cerebras'?'Cerebras':'OpenAI'} request failed (${upstream.status})`;
+          if (route.provider==='openai' && EXPLICIT_PROMPT_CACHE && /prompt_cache|breakpoint/i.test(failMsg)) {
+            console.warn('[CACHE] explicit prompt cache rejected; disabling and retrying:', failMsg);
+            EXPLICIT_PROMPT_CACHE = false; streamAttempt--; continue;
+          }
+          throw new Error(failMsg);
         }
         const reader = upstream.body.getReader();
         const decoder = new TextDecoder();
@@ -2104,6 +2125,7 @@ ${strictModeInstructions(prepared.responseType)}`;
             }
             if (eventType==='error' || evt?.error) throw new Error(evt?.error?.message || evt?.message || `${route.provider==='cerebras'?'Cerebras':'OpenAI'} stream error`);
             if (route.provider==='openai' && eventType==='response.completed' && evt?.response?.service_tier) providerServiceTier=String(evt.response.service_tier);
+            if (route.provider==='openai' && eventType==='response.completed' && evt?.response?.usage) providerUsage=evt.response.usage;
             if (route.provider==='openai' && eventType==='response.failed') throw new Error(evt?.response?.error?.message || 'OpenAI response failed');
           }
         }
@@ -2128,6 +2150,10 @@ ${strictModeInstructions(prepared.responseType)}`;
     if (!clientClosed && prepared.session && answer) addTurn(prepared.session,hasImage?`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`:prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
     const latency = { ...prepared.latency, providerRequestAtMs, providerHeadersMs, firstProviderDeltaAfterRequestMs, firstTokenMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt, attempts:streamAttempt };
     providerServiceTier=providerServiceTier||(route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER);
+    const u=providerUsage||{};
+    const usageLog={inTok:u.input_tokens??null,cached:u.input_tokens_details?.cached_tokens??null,cacheWrite:u.input_tokens_details?.cache_write_tokens??null,outTok:u.output_tokens??null,reasoningTok:u.output_tokens_details?.reasoning_tokens??null};
+    console.log(`[USAGE] ${route.model} type=${prepared.responseType} tier=${providerServiceTier} attempts=${streamAttempt} first=${firstTokenMs}ms total=${latency.totalMs}ms`,JSON.stringify(usageLog));
+    latency.usage=usageLog;
     emit('meta', { model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, phase:'complete', latency, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})) });
     emit('done', { answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, latency });
   } catch (err) {

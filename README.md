@@ -1,4 +1,4 @@
-# Topper v14.7.8
+# Topper v14.7.11
 
 Replacement package based strictly on the attached v14.7.2 baseline. No new Railway environment variables are required.
 
@@ -67,11 +67,11 @@ Changed JavaScript is validated with `node --check`; the replacement ZIP is vali
 - Context-supported STT repair maps `private/try/drive resource(s)` to `try-with-resources` only when recent turns establish that Java topic.
 - No model call, embedding, retrieval, routing, streaming, token-budget, or UI architecture changes.
 
-## v14.9.2 — Sol token-cost optimization (quality-preserving)
-- Exact functional base: v14.7.10 Mixed Logistics Intent Fix.
-- Keeps the same Sol model, reasoning effort, retrieval ranking/TOP_K, embeddings, three-turn continuity window, answer-quality rules, streaming path, STT, overlay, and recent logistics/context fixes.
-- Reduces repeated input tokens by compacting the prepared candidate summary/JD/vocabulary sent on each answer request.
-- Keeps all retrieved evidence items but caps duplicated text per evidence chunk; retrieval selection itself is unchanged.
-- Follow-ups still retain the same recent-turn count, but prior question/answer text is bounded so a long coding answer is not resent in full on every later question.
-- No additional LLM, embedding, retrieval, or network call is introduced; this optimization should not add latency.
-- Output-token behavior and answer token ceilings are intentionally unchanged to avoid degrading answer quality.
+
+## v14.7.11 — latency/cost patch (backend only)
+- Explicit prompt caching: only the static COPILOT_INSTRUCTIONS block is cached; the per-question dynamic prompt no longer pays the 1.25x cache-write fee. Auto-disables if the API rejects the fields. Kill switch: OPENAI_EXPLICIT_PROMPT_CACHE=false.
+- New [USAGE] log line per answer: input / cached / cache-write / output / reasoning tokens, first-token and total ms.
+- First-token timeout raised to 8s for code/diagram/multi/snippet so slow-reasoning answers are not aborted and re-billed.
+- Older history turns keep the question + first 1200 chars of answer (last turn stays verbatim).
+- Identical raw transcript is no longer printed twice in the prompt.
+- Prompt rules, retrieval, routing, token ceilings, STT and UI unchanged.
