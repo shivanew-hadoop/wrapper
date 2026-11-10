@@ -3,6 +3,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const WebSocket = require('ws');
@@ -14,6 +15,9 @@ try { WordExtractor = require('word-extractor'); } catch (_) {}
 const PORT = Number(process.env.PORT || 8080);
 const DEEPGRAM_API_KEY = String(process.env.DEEPGRAM_API_KEY || '').trim();
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
+// Optional OpenAI prompt-cache routing hint. Disabled by default for safe rollout.
+const OPENAI_PROMPT_CACHE_KEY_ENABLED = String(process.env.OPENAI_PROMPT_CACHE_KEY_ENABLED || 'false').toLowerCase() === 'true';
+const OPENAI_PROMPT_CACHE_METRICS = String(process.env.OPENAI_PROMPT_CACHE_METRICS || 'true').toLowerCase() === 'true';
 const CEREBRAS_API_KEY = String(process.env.CEREBRAS_API_KEY || '').trim();
 // Cerebras selection is intentionally pinned to OpenAI GPT-OSS 120B.
 // Do not allow an old Railway CEREBRAS_MODEL value to silently route this option to another model.
@@ -227,6 +231,20 @@ function normalizedReasoningEffort(effort) {
   const value=String(effort||'low').trim().toLowerCase();
   return ['none','low','medium','high','xhigh','max'].includes(value) ? value : 'low';
 }
+// A cache-routing hint, not an answer cache. Hash only stable candidate context and
+// fixed instructions; never put CV/JD text or API secrets in the key. The actual
+// prompt, retrieval evidence, current question and model settings are unchanged.
+function stablePromptCacheKey(model, instructions, input) {
+  if (!OPENAI_PROMPT_CACHE_KEY_ENABLED || typeof input !== 'string') return null;
+  const boundary = '\n\nRETRIEVED EVIDENCE\n';
+  const position = input.indexOf(boundary);
+  if (position < 0) return null; // Only prepared interview sessions.
+  const stablePrefix = input.slice(0, position);
+  if (!stablePrefix.startsWith('CANDIDATE PROFILE\n')) return null;
+  return 'topper-' + crypto.createHash('sha256')
+    .update(String(model)).update('\0').update(String(instructions))
+    .update('\0').update(stablePrefix).digest('hex').slice(0, 32);
+}
 function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY,stream=false}) {
   const body={
     model,
@@ -237,6 +255,8 @@ function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',ef
     text:{verbosity:String(verbosity||'medium')},
     stream:!!stream
   };
+  const cacheKey = stablePromptCacheKey(model, instructions, input);
+  if (cacheKey) body.prompt_cache_key = cacheKey;
   if(Number.isFinite(maxTokens)&&maxTokens>0)body.max_output_tokens=maxTokens;
   return body;
 }
@@ -2133,6 +2153,11 @@ ${strictModeInstructions(prepared.responseType)}`;
     providerServiceTier=providerServiceTier||(route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER);
     const u=providerUsage||{};
     console.log(`[USAGE] ${route.model} type=${prepared.responseType} tier=${providerServiceTier} attempts=${streamAttempt} first=${firstTokenMs}ms total=${latency.totalMs}ms`,JSON.stringify({inTok:u.input_tokens??null,cached:u.input_tokens_details?.cached_tokens??null,cacheWrite:u.input_tokens_details?.cache_write_tokens??null,outTok:u.output_tokens??null,reasoningTok:u.output_tokens_details?.reasoning_tokens??null}));
+    if (OPENAI_PROMPT_CACHE_METRICS && route.provider === 'openai') {
+      const inputTokens = Number(u.input_tokens || 0);
+      const cachedTokens = Number(u.input_tokens_details?.cached_tokens || 0);
+      console.log('[CACHE_PERF]', JSON.stringify({model:route.model,cacheKeyEnabled:OPENAI_PROMPT_CACHE_KEY_ENABLED,cachedTokens,inputTokens,cacheHitPct:inputTokens?Math.round(100*cachedTokens/inputTokens):null,prepareMs:prepared.latency.promptReadyMs,embeddingMs:prepared.latency.embeddingMs,retrievalMs:prepared.latency.retrievalMs,providerHeadersMs,firstProviderDeltaAfterRequestMs,totalMs:latency.totalMs}));
+    }
     emit('meta', { model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, phase:'complete', latency, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})) });
     emit('done', { answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, latency });
   } catch (err) {
