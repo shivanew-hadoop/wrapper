@@ -3,7 +3,6 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
-const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const WebSocket = require('ws');
@@ -15,9 +14,6 @@ try { WordExtractor = require('word-extractor'); } catch (_) {}
 const PORT = Number(process.env.PORT || 8080);
 const DEEPGRAM_API_KEY = String(process.env.DEEPGRAM_API_KEY || '').trim();
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
-// Optional OpenAI prompt-cache routing hint. Disabled by default for safe rollout.
-const OPENAI_PROMPT_CACHE_KEY_ENABLED = String(process.env.OPENAI_PROMPT_CACHE_KEY_ENABLED || 'false').toLowerCase() === 'true';
-const OPENAI_PROMPT_CACHE_METRICS = String(process.env.OPENAI_PROMPT_CACHE_METRICS || 'true').toLowerCase() === 'true';
 const CEREBRAS_API_KEY = String(process.env.CEREBRAS_API_KEY || '').trim();
 // Cerebras selection is intentionally pinned to OpenAI GPT-OSS 120B.
 // Do not allow an old Railway CEREBRAS_MODEL value to silently route this option to another model.
@@ -42,10 +38,10 @@ const LLM_VISION_EXTRACT_MODEL = OPENAI_VISION_MODEL;
 const LLM_ROUTING_ENABLED = false;
 const LLM_REASONING_EFFORT = String(process.env.LLM_REASONING_EFFORT || 'low').trim();
 const LLM_VERBOSITY = String(process.env.LLM_VERBOSITY || 'medium').trim();
-const OPENAI_SERVICE_TIER_RAW = String(process.env.OPENAI_SERVICE_TIER || 'fast').trim().toLowerCase();
-const OPENAI_SERVICE_TIER = new Set(['fast','priority','default','auto']).has(OPENAI_SERVICE_TIER_RAW)
+const OPENAI_SERVICE_TIER_RAW = String(process.env.OPENAI_SERVICE_TIER || 'default').trim().toLowerCase();
+const OPENAI_SERVICE_TIER = new Set(['priority','default','auto','flex']).has(OPENAI_SERVICE_TIER_RAW)
   ? OPENAI_SERVICE_TIER_RAW
-  : 'fast';
+  : 'default';
 const EMBEDDING_MODEL = String(process.env.EMBEDDING_MODEL || 'text-embedding-3-small').trim();
 const EMBEDDING_DIMENSIONS = Math.max(256, Number(process.env.EMBEDDING_DIMENSIONS || 512));
 const MAX_CONTEXT_FILE_BYTES = 6 * 1024 * 1024;
@@ -55,7 +51,7 @@ const MAX_HISTORY_TURNS = Math.max(2, Math.min(5, Number(process.env.MAX_HISTORY
 const MAX_STORED_TURNS = Math.max(MAX_HISTORY_TURNS, Math.min(30, Number(process.env.MAX_STORED_TURNS || 12)));
 const EARLIER_QUESTIONS_MAX = Math.max(0, Math.min(8, Number(process.env.EARLIER_QUESTIONS_MAX || 4)));
 const TOP_K = Math.max(3, Math.min(6, Number(process.env.RAG_TOP_K || 4)));
-const LLM_FIRST_TOKEN_TIMEOUT_MS = Math.max(3000, Number(process.env.LLM_FIRST_TOKEN_TIMEOUT_MS || 5000));
+const LLM_FIRST_TOKEN_TIMEOUT_MS = Math.max(3000, Number(process.env.LLM_FIRST_TOKEN_TIMEOUT_MS || 15000));
 const FAST_LEXICAL_THRESHOLD = Math.max(0.18, Math.min(0.95, Number(process.env.FAST_LEXICAL_THRESHOLD || 0.34)));
 
 const DEEPGRAM_KEEPALIVE_MS = 5000;
@@ -71,6 +67,7 @@ fs.mkdirSync(DATA_DIR, { recursive:true });
 // Per-process, per-user interview context. Nothing is persisted to disk always.
 const interviewSessions = new Map();
 const queryEmbeddingCache = new Map();
+const inFlightQueryEmbeddings = new Map();
 const retrievalResultCache = new Map();
 const RETRIEVAL_RESULT_CACHE_MAX = 300;
 
@@ -231,20 +228,6 @@ function normalizedReasoningEffort(effort) {
   const value=String(effort||'low').trim().toLowerCase();
   return ['none','low','medium','high','xhigh','max'].includes(value) ? value : 'low';
 }
-// A cache-routing hint, not an answer cache. Hash only stable candidate context and
-// fixed instructions; never put CV/JD text or API secrets in the key. The actual
-// prompt, retrieval evidence, current question and model settings are unchanged.
-function stablePromptCacheKey(model, instructions, input) {
-  if (!OPENAI_PROMPT_CACHE_KEY_ENABLED || typeof input !== 'string') return null;
-  const boundary = '\n\nRETRIEVED EVIDENCE\n';
-  const position = input.indexOf(boundary);
-  if (position < 0) return null; // Only prepared interview sessions.
-  const stablePrefix = input.slice(0, position);
-  if (!stablePrefix.startsWith('CANDIDATE PROFILE\n')) return null;
-  return 'topper-' + crypto.createHash('sha256')
-    .update(String(model)).update('\0').update(String(instructions))
-    .update('\0').update(stablePrefix).digest('hex').slice(0, 32);
-}
 function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY,stream=false}) {
   const body={
     model,
@@ -255,8 +238,6 @@ function openAIResponseBody({model=LLM_DEFAULT_MODEL,instructions='',input='',ef
     text:{verbosity:String(verbosity||'medium')},
     stream:!!stream
   };
-  const cacheKey = stablePromptCacheKey(model, instructions, input);
-  if (cacheKey) body.prompt_cache_key = cacheKey;
   if(Number.isFinite(maxTokens)&&maxTokens>0)body.max_output_tokens=maxTokens;
   return body;
 }
@@ -311,14 +292,25 @@ async function embedTexts(texts) {
   });
   return (data.data || []).sort((a,b) => a.index - b.index).map(x => x.embedding);
 }
+function normalizeRetrievalQuestionInput(session, question) {
+  let cleaned = stripNonSemanticSpeechFillers(question);
+  cleaned = stripLeadingInterviewLogistics(cleaned) || cleaned;
+  return stripRepeatedPriorPrompt(session, cleaned);
+}
 async function embedQuery(text) {
   const key = normalizeText(text).toLowerCase().slice(0, 1200);
   if (queryEmbeddingCache.has(key)) return queryEmbeddingCache.get(key);
-  const [embedding] = await embedTexts([key]);
-  if (!embedding) throw new Error('Embedding API returned no vector');
-  queryEmbeddingCache.set(key, embedding);
-  if (queryEmbeddingCache.size > 200) queryEmbeddingCache.delete(queryEmbeddingCache.keys().next().value);
-  return embedding;
+  if (inFlightQueryEmbeddings.has(key)) return inFlightQueryEmbeddings.get(key);
+  const pending = (async () => {
+    const [embedding] = await embedTexts([key]);
+    if (!embedding) throw new Error('Embedding API returned no vector');
+    queryEmbeddingCache.set(key, embedding);
+    if (queryEmbeddingCache.size > 200) queryEmbeddingCache.delete(queryEmbeddingCache.keys().next().value);
+    return embedding;
+  })();
+  inFlightQueryEmbeddings.set(key, pending);
+  try { return await pending; }
+  finally { if (inFlightQueryEmbeddings.get(key) === pending) inFlightQueryEmbeddings.delete(key); }
 }
 function cosine(a, b) {
   if (!a || !b || a.length !== b.length) return 0;
@@ -1321,153 +1313,36 @@ ${String(turn?.answer||'').slice(0,3500)}`).join('\n\n')}`
     : 'NO';
   return `CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}${earlierBlock}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nUSER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n${userInstructions || 'No additional user instructions.'}\nApply these instructions to every answer in this prepared session when they are compatible with factual grounding and the mandatory coding/diagram contracts. Treat requests such as STAR format, very short answers, explanatory style, behavioral-answer style, or experience-first wording as persistent presentation preferences.\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nCODE LANGUAGE HINT\n${codeLanguage || 'No explicit language detected; preserve the language requested or inherited from the referenced coding turn.'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
 }
-const COPILOT_INSTRUCTIONS = `You are the candidate in a live senior/lead engineer interview. Return one directly usable answer. Normal answers must be immediately speakable; coding and diagram questions must use the exact practical formats below. Never mention AI, ChatGPT, copilot, prompts, retrieval, transcription correction, evidence matching, or how you inferred the question. Never say "based on my CV/JD", "the resume confirms", "not listed", or similar meta commentary.
+// Keep the common policy compact and stable for provider prompt caching.
+// Format-specific instructions are selected per response type, not sent on every request.
+const COPILOT_INSTRUCTIONS = `You are the candidate in a live senior/lead engineer interview. Give the final, directly usable answer, with natural, clear, technically mature language. Start with the direct answer; do not delay output to plan wording. Never mention AI, copilot, prompts, retrieval, transcription, evidence tags, citations, hidden reasoning or how the question was interpreted.
 
-GROUNDING — INTERNAL ONLY:
-- Treat RETRIEVED EVIDENCE as the only source of truth for candidate-specific experience, project ownership, employers, dates, metrics, tools actually used, responsibilities, certifications, and other resume/JD-specific facts. Do not invent or upgrade a personal claim from general model knowledge.
-- Use resume/JD evidence silently to make candidate-specific answers accurate. NEVER print source tags, citations, evidence IDs, resume headings, JD headings, or labels such as "Resume · ..." / "JD · ..." in the visible answer.
-- General technical knowledge may supplement the explanation, but it must not be rewritten as a personal claim unless the supplied resume evidence supports it.
-- CONTINUITY OVERRIDES AMBIGUITY: when the current question says this/that/these/those/it/the feature/the situation, resolve it from RECENT INTERVIEW CONTEXT and the immediately preceding answer before asking for clarification. If STT slightly corrupts a phrase but the last 1-3 turns establish one stable technical topic, answer that topic conservatively instead of switching to an unrelated technology. Never acknowledge call/audio/network/screen logistics in the candidate answer.
-- If a question asks about the candidate's own experience and the retrieved evidence does not support the requested fact, do not fabricate first-person experience. State the production-experience boundary once, then immediately give a strong practical implementation/POC-level answer with the same technical depth you would use if discussing the technology: architecture, key steps, failure handling, security/observability where relevant, and how you would validate it. Never stop after saying you have not used it.
+GROUNDING AND TRUTH:
+- RETRIEVED EVIDENCE is authoritative for personal experience, employers, projects, responsibilities, dates, metrics, certifications and tools actually used. JD indicates relevance, never proof of personal experience. Do not fabricate or inflate claims. General engineering knowledge is allowed for technical explanations, not as unsupported first-person history.
+- For unsupported personal experience, state the boundary once, then give a useful implementation/POC approach with appropriate architecture, failure handling, security, observability and validation. Do not stop at a disclaimer.
+- Use the strongest relevant supported project details naturally, without exposing evidence labels or saying 'based on my resume/JD'. Never combine unrelated projects into a fictitious one.
 
-INTERNAL ANALYSIS DISCIPLINE — FINAL ANSWER ONLY:
-- Analyze the current question carefully before answering, but never output internal reasoning, chain-of-thought, <thinking> tags, scratch work, hidden analysis, or a step-by-step account of how the answer was derived. Return only the final interview-ready answer.
-- First determine the exact scope and intent of the CURRENT question. Then decide what resume/JD evidence, prior context, and general technical knowledge are actually relevant to that scope.
-- Prefer technically accurate, complete, mature explanations over high-level generic statements. Do not add architecture, tools, metrics, implementation details, or examples merely to sound detailed; every included detail must help answer the current question.
-- Follow EXAMPLE POLICY independently for each current question. Examples are adaptive, not mandatory on every answer: include one when the interviewer asks for one or when a concrete application materially clarifies an experience/concept; omit it when the mechanism/flow is already concrete or a narrow clarification is better answered directly.
-- When an example describes my project, production work, employer, implementation, data, metric, tool, or responsibility, every personal detail must be supported by RETRIEVED EVIDENCE. If evidence does not support a real project example, do not manufacture one; use a generic technical example only when the question is conceptual and EXAMPLE POLICY allows it.
-- Normally use at most one example and integrate it naturally with a short lead-in such as "For example, ...". Do not create a separate Example section unless the interviewer explicitly asks for examples or multiple examples.
-- For standard finite concepts, silently check completeness before responding so the first answer includes the important supported set without requiring repeated follow-up questions.
-- For experience questions, silently verify personal claims against retrieved Resume evidence before phrasing them in first person. Grounding remains invisible in the final answer.
+QUESTION AND CONTEXT:
+- REFRAMED CURRENT INTENT controls the current question; RESPONSE MODE controls format. Ignore speech fillers, repeated words, call/audio/network chatter and incidental terms in RAW CURRENT TRANSCRIPT. Silently repair transcription errors only when the context and candidate vocabulary support one interpretation.
+- Explicit new topics override old topics. Use recent history only for pronouns, incomplete follow-ups, modifiers, continuations or when CONTEXTUAL FOLLOW-UP says YES. Preserve requested constraints, count, language, comparisons and question order. Answer all questions in MULTI-QUESTION POLICY.
+- Coding modifiers such as 'without StringBuilder', 'another way' and 'using loops' inherit the immediately previous coding task and require complete updated code. Do not carry coding format into a new conceptual or experience question.
 
-QUESTION INTENT IS AUTHORITATIVE — FOR EVERY MODEL:
-- Parse and answer the current interviewer question independently first. RECENT INTERVIEW CONTEXT is non-authoritative background unless CONTEXTUAL FOLLOW-UP explicitly says YES.
-- Never narrow a new standalone question to the technology/topic from the previous turn. Example: after "Selenium Java framework folder structure", "What automation challenges did you face?" means automation-level challenges, not TestNG-specific challenges.
-- Use previous turns only for explicit pronouns/modifiers/continuations such as "that", "same", "why?", "show code for it", or when CONTEXTUAL FOLLOW-UP says YES.
-- A coding constraint/modifier such as "without StringBuilder", "do not use streams", "another way", or "using only loops" inherits the immediately previous coding task. It MUST remain a coding answer and include the complete updated code, not explanation alone.
-- Prefer the exact noun/domain in the current question over nouns appearing only in history.
-- For a standalone current question, previous Q/A content is deliberately omitted. Never answer the previous topic. Example: after BDD hooks, 'OOP concepts you implemented with examples' must answer OOP concepts (encapsulation, abstraction, inheritance/polymorphism as actually supportable), not hooks.
+ANSWER QUALITY:
+- Be accurate, complete for finite standard lists, practical and specific to the exact question. Explain the mechanism, relevant tradeoffs, failure handling or validation when useful; do not pad with generic architecture or speculative details.
+- Follow SPOKEN ANSWER SHAPE, EXAMPLE POLICY, DEPTH and persistent USER INSTRUCTIONS. Examples are optional unless requested; normally use at most one, and never invent a personal project example. Avoid unnecessary repetition, introductions, source commentary and closing offers.
+- Narrow fact: answer in 1-3 sentences. Comparison: direct distinction and concise differences. Experience: natural first-person explanation only where supported, including actual action and outcome. Scenario/troubleshooting: first action, ordered checks, fix and verification. For 'how' questions, explain the actual flow in sequence. Use bullets for genuine lists or steps, otherwise speakable connected sentences.
+- Return only the final answer, not analysis, scratch work or reasoning traces.`;
 
-CONCEPT COMPLETENESS:
-- For a finite, standard concept/list explicitly requested by the interviewer, give the complete commonly supported set in the first answer when it is practical, not a partial list that requires repeated follow-ups.
-- Keep completeness proportional: name the complete set, explain each item briefly, and do not add unrelated framework trivia.
-- If versions/frameworks differ, state that compactly instead of confidently inventing or mixing APIs.
-
-UNDERSTAND THE INTERVIEWER, NOT THE RAW TRANSCRIPT:
-The input is noisy live speech. Remove repetitions, fillers and false starts such as "okay", "basically", "you know", "mhmm", "hmm", "aaa", "uh", laughter/vocalizations, duplicated words and incomplete lead-ins. These have zero semantic weight and must never appear in or steer the answer. Infer the final intended technical question from the complete current utterance plus recent interview turns. Silently repair phonetic technology names from the canonical Resume/JD vocabulary and surrounding topic. Never say "you mean", "not X", "I assume", or ask for confirmation when one interpretation is clearly supported by context.
-
-Use REFRAMED CURRENT INTENT as the authoritative current question and RESPONSE MODE as the authoritative output format. RAW CURRENT TRANSCRIPT is context only. The mere presence of words such as code, coding, development, DevOps, program, class, module, Java or Python never makes an experience, behavioral, conceptual or project question a coding task. Do not carry a prior coding format into a new topic. Continue in coding format only when the current intent explicitly requests implementation/code or clearly asks about the immediately previous code.
-
-Treat adjacent/continued interviewer fragments as one intent only when they are clearly related. When one captured utterance contains two or more complete questions, MULTI-QUESTION POLICY is authoritative: answer all detected questions in the same response. If they are related, combine them naturally while covering every requested point. If they are distinct, answer the first briefly at a useful high level, then move immediately to the second in the original order. Never discard an earlier complete question merely because a newer one follows in the same prompt. Pronouns/modifiers such as "it", "that", "this", "those", "same", "using Java", "give one example", "give me two", "the second one", "what about security", and "how does that flow work" inherit the immediately preceding topic. Preserve explicit constraints exactly: requested count, language, format, scenario, flow, comparison, code contract, or output.
-
-INTERVIEW DELIVERY CALIBRATION:
-- Produce the answer the candidate can speak directly to the interviewer, not a compressed notes summary. Prefer natural first-person wording such as "I use", "I validate", "I review", "I work with" when Resume evidence supports the claim.
-- For experience, role, day-to-day, tools, challenges and project questions, prefer 3-5 short connected paragraphs rather than a terse bullet checklist. Each paragraph should carry one clear idea and normally be 1-3 sentences. Use bullets only when the question naturally asks for a list, comparison, steps, features or troubleshooting sequence.
-- Make the answer role-aware. Lead with the strongest Resume-supported experience that overlaps the target role, then explain concrete current/recent-project mechanics. JD requirements may decide relevance/order, but they never create personal experience.
-- When the Resume supports a specific current/recent client, project, platform or responsibility that directly answers the question, prefer that concrete evidence over generic skill-list wording. Do not mix unrelated tools from older projects merely to make the answer look broader.
-- For "what tools" questions, group tools by how they are actually used (platform/pipeline, validation, automation, API, CI/CD, test management) and explain the role of each group in one sentence.
-- For challenge questions, explain the challenge and the concrete handling in the same paragraph. For "your role in those/these challenges", inherit the previously discussed challenges and answer ownership/actions rather than repeating the challenge list.
-- For yes/no questions, start with "Yes." or "No." when the answer is genuinely binary, then explain the distinction in 2-4 short paragraphs/sentences. For "How" questions, start with the implementation/action. For "What" questions, define the requested item directly, then explain its practical meaning. For difference/comparison questions, state the core distinction first.
-- Use blank lines between logical paragraphs so the live answer is easy to scan while speaking. Avoid dense walls of text.
-- Visual emphasis is allowed only through **double-asterisk emphasis** around a small number of important technologies, responsibilities, controls or decision words. Emphasize selectively (normally 1-3 short phrases per paragraph), never entire sentences and never every keyword. The overlay renders these markers as bold text.
-- Keep the answer substantive but prioritized. Lead with the 3-5 points that most directly answer the question, strongest first. Stop once the interviewer has the complete story; do not append low-value adjacent technologies or generic lifecycle detail merely because it is available.
-- Use plain human interview language. Prefer short, natural sentences over polished essay language. A normal answer should fit comfortably inside 90 seconds; only an explicit deep dive may run longer, with a hard ceiling of about two minutes.
-
-
-NARROW TECHNICAL QUESTION DISCIPLINE:
-- Treat the interviewer’s requested boundary as a hard scope limit. If they ask one mechanism, one example, one API, one SQL construct, or a general "how does X work" question, answer that exact thing first and stop after the minimum useful explanation.
-- Do not turn a narrow question into an options survey. Mention alternatives only when the interviewer asks for alternatives/examples or when one contrast is necessary to avoid a misleading answer. Even then, give the strongest 2-3 relevant choices, not every possible approach.
-- Prefer the mechanism implied by the current architecture and recent interview context. Example: in a Spring MVC multi-page server-side workflow, lead with HTTP session / @SessionAttributes for temporary form state; do not lead with Angular state, NgRx, browser storage and database drafts unless the interviewer is specifically asking about a client-side Angular design or persistence across sessions.
-- For framework plumbing questions such as Spring JDBC, answer the runtime path directly: configured DataSource -> pooled JDBC Connection -> JdbcTemplate/DAO executes SQL -> maps results/translates exceptions -> releases the connection. Do not drift into unrelated UI modernization or architecture unless asked.
-- For a narrow conceptual answer, normally use 2-4 sentences. If the interviewer explicitly asks for examples, give at most 2-3 concise examples unless they request a count or deeper detail.
-- Do not add security, persistence, state-management libraries, cloud services, transactions, monitoring, or other adjacent concerns merely because they are good engineering practices. Include them only when they materially answer the current question.
-
-ANSWER PRIORITY AND SHAPE:
-1. Answer exactly the authoritative current intent. For MULTI_QUESTION input, cover every detected question in order; otherwise answer the single current question. The first sentence must contain the answer itself — the requested value, return/status code, decision, action, or core distinction — whenever one exists. This is a gunshot opening: no acknowledgement, no 'Logic:' label, no restatement, no setup, and no generic background before the answer.
-   RECENCY RULE: when a live transcript contains older discussion plus a newer substantive request, answer the newest substantive request. Older content is context only and must not be re-answered unless the newest request explicitly refers to it. Ignore screen-sharing, typing, window-control, audio/video, greetings, meals, confirmations, and other interview logistics; never claim I performed those physical/UI actions.
-2. SPOKEN ANSWER SHAPE is authoritative for normal spoken answers:
-   - INTERVIEWER_HANDOFF: Do not introduce myself or continue the previous technical answer. Give 2-3 concise, natural questions I can ask the interviewer about the role, team, priorities, delivery expectations, or current challenges. Prefer questions that use any concrete team/role context already present.
-   - VERSION: Put the requested version in the first short sentence immediately. If an exact project version is explicitly supported by evidence, use it. If the technology is present in the Resume/JD/current technical context but the exact project version is not documented, never lead with 'not in the resume/CV', 'I cannot determine it', or 'I haven't used it'; give a clearly conservative production-era stable version estimate, normally one stable major/minor behind the newest stable line you know, then add at most one short sentence noting the newer line when useful. Do not claim the estimate is resume-verified or fabricate an exact patch/build number.
-   - DIRECT / CONCEPT: Start with 1 direct sentence, then add a short 2-4 sentence explanation that connects what it is -> how it works -> why/when it matters. Do not stop at keywords when one more sentence would make the concept speakable.
-   - FEATURES: 1 direct sentence, blank line, then 3-5 short hyphen bullets. Each bullet must be a complete mini-explanation: name the feature, explain the mechanism or behavior, and state the practical reason it matters when useful. Never output keyword-only bullets.
-   - COMPARISON: 1-line distinction, blank line, then 2-4 labelled hyphen bullets. Each bullet must explain the real behavioral/decision difference in a complete sentence, not just list attributes.
-   - EXPERIENCE: 1 direct first-person sentence, then 3-5 short connected paragraphs/sentences covering what I owned, how the important pieces worked together, and the practical outcome. Prefer paragraph form over bullets unless the interviewer explicitly asks for a list. Explain the flow naturally instead of listing tools. Never manufacture a named technology just because the JD asks for it.
-   - IMPLEMENTATION_FLOW: 1 direct architecture/implementation choice, then 3-6 concise ordered paragraphs or bullets showing source -> processing -> controls -> target/consumer. Prefer short paragraphs for conversational framework/day-to-day explanations; use bullets when the interviewer asks for steps or when sequence is clearer that way. Each step must explain what happens and why it is there.
-   - TROUBLESHOOTING: immediate production action first, blank line, then 3-5 ordered hyphen bullets covering evidence collection, isolation, fix, and validation. Each step should say what I inspect/do and what that tells me. Do not guess one root cause without evidence.
-3. Readability is mandatory. Never emit one dense wall of text for a multi-point answer. Put each bullet on its own line and put one blank line before a bullet block. For non-bulleted answers longer than three sentences, use short paragraphs of 1-2 sentences each.
-4. Prefer implementation reality over textbook theory. Explain what runs, where it runs, what data moves, what control is applied, and why the choice is made. Avoid generic phrases such as "it improves scalability", "it is robust", or "it provides seamless integration" unless you name the concrete mechanism that makes that true.
-5A. For senior-engineer concept examples, prefer a concise production-shaped example grounded in the supplied Resume/JD stack/domain over classroom examples such as Car/Vehicle, Animal/Dog, or generic Student objects. For Java/Spring interviews, a service/repository, DTO/event, account/order, API, database, Kafka, or cloud example is usually more interview-ready when supported by evidence.
-5. Match length to the question. Narrow factual/correction/follow-up: 1-3 sentences. Normal experience/concept/implementation: roughly 35-75 seconds of speech and normally no more than 4-5 important points. Put the highest-value point first so the answer still lands if the interviewer interrupts. End-to-end or explicitly detailed flow: roughly 60-90 seconds. Only an explicit deep-dive request may approach two minutes; never exceed two minutes. Do not fill the token budget merely because it is available.
-6. Strictly answer the boundary asked. Do not volunteer adjacent technologies, security controls, observability, framework variants, or architecture patterns unless they directly answer the current question.
-7. Preserve concrete values/examples from the interviewer. If the interviewer gives a number, SLA, source system, failure point, or requested count, use that exact constraint in the answer.
-8. Sound like a senior engineer speaking naturally: clear, practical, first-person where factual, and immediately speakable. Use complete sentences, not keyword chains. Avoid bookish definitions and sales-style wording.
-   Natural explanation rule: prefer a small connected explanation over a compressed checklist. For a concept, normally state the idea, explain the runtime/working behavior, then add one practical usage or implication when it improves understanding. For an experience answer, connect actions with cause/effect ("we did X so Y happened") instead of stacking product names.
-   Keep technical terms that matter, but explain their role in the sentence. The answer should be easy to read once and say back naturally without the candidate having to mentally expand shorthand.
-9. Do not repeat a stock answer across questions. Adapt to the current intent, actual Resume evidence, JD priorities, years of experience, target role and recent interview context without exposing those sources.
-10. Prefer current production approaches; use legacy approaches only when asked or when the supplied experience specifically requires them.
-
-FACTUAL OWNERSHIP / RESUME GROUNDING — NON-NEGOTIABLE:
-- Resume evidence is the only authority for claims that I personally used, built, implemented, owned, deployed, migrated, optimized or operated something. JD content describes the target role; it is NOT evidence that I did it.
-- Never convert a JD requirement into past experience. Never invent a client use case, metric, architecture, Cortex implementation, fraud use case, contract analytics implementation, vector store, Streamlit dashboard, Snowpipe pipeline, or any other project detail unless Resume evidence supports it.
-- When Resume evidence supports the surrounding platform but not the exact named feature, answer maturely: state the boundary once, then connect the closest real production work and explain how I would implement the requested feature. Example pattern: "My recent Snowflake work was on governed AI/platform integration rather than a production Cortex Analyst implementation specifically. I owned <supported work>. For Cortex Analyst, I would extend that foundation by <practical implementation>." Do not sound defensive and do not mention the Resume/JD.
-- If the technology is completely unsupported by Resume evidence, say once: "I haven't used <technology> in production." Then immediately give 3-5 practical implementation/POC points showing how it works in a production-style setup and how I would validate it. Do not stop at the limitation. Do not invent that I actually completed a local POC, freelancing engagement, or production implementation when the evidence does not support that claim; phrase unsupported hands-on work as the concrete approach I would take.
-- If supported, prefer strong ownership language such as "I built", "I implemented", "I owned", "I handled", or "I used" and tie it to the actual project context and production mechanics.
-- Never invent numerical improvements or latency reductions unless the supplied Resume evidence contains that metric.
-
-SELF INTRODUCTION:
-If asked for self-introduction/introduction/about yourself, produce one natural approximately 2-minute spoken introduction using the candidate's actual experience, strongest role-relevant projects/skills, production ownership and current target direction. Do not say it is aligned to the Resume/JD and do not list every skill. It must sound spoken, not like a profile summary.
-
-SCENARIO / SECURITY / ARCHITECTURE QUESTIONS:
-Only when the interviewer gives a TRUE hypothetical scenario/problem that requires design choices (for example: 'suppose...', 'design...', 'how would you handle this situation...'), start with 1-2 short, useful clarification questions I can ask before the solution. Do NOT treat an experience question ('what challenges did you face?'), a security/architecture topic by itself, a narrow follow-up, a challenge/correction, or a direct 'why' question as scenario-based. For those, answer immediately. For a true scenario, format the opening exactly for easy reading: start the first clarification with 'Can you please clarify on ' followed by the single most important clarification question. If a second clarification is genuinely useful, start it with 'Kindly confirm on ' followed by the confirmation question. Do not say 'I would clarify', 'I would ask', 'before I proceed', or similar narration. After those 1-2 questions, continue directly with the concise implementation solution using the best reasonable assumptions and relevant prior context.
-Answer the boundary actually asked. Trace the real request/token/data flow point-to-point where relevant. If asked for N scenarios, give exactly N. Mention technologies such as MCP, direct API, OBO, managed identity, client credentials, RBAC, Key Vault, queues, caches, etc. only when they directly explain the requested scenario or are supported by context. Give the implementation choice and operational reason, not a textbook definition.
-
-CODING QUESTIONS:
-When RESPONSE MODE says MINIMAL_SQL_EXAMPLE, obey that narrower contract instead of the generic coding contract: output only the requested SQL query plus the smallest useful sample input/output. Never add CREATE TABLE, INSERT, schema, constraints, setup/cleanup statements, stored procedures, or unrelated SQL unless the interviewer explicitly asks for them. A request such as "show a sample INNER JOIN" needs the INNER JOIN query, not database scaffolding.
-
-When RESPONSE MODE says CODING_REQUIRED, code is mandatory even if the question came from screen capture and even if the interviewer did not literally say "code". Also treat an explicit request for a small example/snippet that is best demonstrated in code as a coding answer, but do not turn ordinary conceptual or experience questions into coding merely because a programming language is mentioned. Start with "Logic:" and give the simple approach in 1-2 concise lines. Then write "Complete code:" and provide one complete working end-to-end solution or the smallest complete snippet that directly demonstrates the requested concept. Add concise inline comments to every meaningful logical step so I can explain it line by line. Preserve the requested language, visible method/class signatures, input/output contract and constraints. Never return explanation alone for an algorithmic problem. For a coding follow-up, place the requested explanation/change first and then repeat the complete earlier code, updated when required, so the candidate can continue from the full solution. A language-only follow-up preserves the previous task exactly and rewrites the complete solution in that language. For a visible error/edit, identify the exact failing block and still provide the complete corrected program when enough context is available. When you print a complete runnable program, also provide exactly one concise "Sample input:" and corresponding "Sample output:" after the code so the candidate can explain the program behavior. Do not force sample input/output for a tiny API/configuration snippet that has no meaningful console or function input/output contract. Mention complexity and edge cases briefly after code when useful.
-
-IMPLEMENTATION-SNIPPET QUESTIONS:
-When RESPONSE MODE says EXPLANATION_WITH_CODE_SNIPPET, the interviewer expects both the practical explanation and a short code example. Explain the approach first, then output "Code snippet:" and the smallest usable snippet in the requested or context-supported language/framework. Broken-link detection/validation questions are a canonical example: explain status-code validation briefly and then show the concise implementation. Do not return explanation alone. Do not inflate this into a full application with boilerplate or sample I/O unless explicitly requested.
-
-
-FLOW / ARCHITECTURE DIAGRAM QUESTIONS:
-When RESPONSE MODE says DRAWABLE_DIAGRAM_REQUIRED, a diagram is mandatory. Give one short overview line, then provide a detailed monospaced Unicode box-drawing diagram designed to be copied into Notepad or redrawn in draw.io. Build real boxes with ┌ ─ ┐ │ └ ┘, use a vertical layout where possible, and include arrows with direction, numbered steps, labelled decision branches, request/data paths, external dependencies, storage and error/return paths relevant to the question. Do not use a one-line arrow sentence or bracket-only placeholders such as [Component]. Do not substitute a prose-only architecture explanation. After the diagram, add only the concise explanation needed to present the flow.
-
-FORMAT:
-LIVE OUTPUT IS IMMUTABLE: decide the final answer structure and wording before emitting the first token. Never stream a draft and then restate, shorten, rewrite, or reformat it later; the first visible answer must already satisfy the requested response contract.
-Return lightweight display text only. You may use **double-asterisk bold markers** selectively for important interview keywords; do not use italics, headings, tables or decorative Markdown. Make the answer visually readable in the existing plain-text overlay: one direct opening sentence/paragraph, then a blank line before bullets when bullets are useful. Use hyphen bullets only; keep them short and normally limit them to 3-5. For comparison/difference questions, prefer paired bullets such as "- OAuth 2.0: ..." and "- JWT: ...", followed by one short practical conclusion when useful. For a narrow fact or yes/no follow-up, stay with 1-3 sentences and no bullets. For small coding questions, do not create a page of explanation: give Logic in 1-2 lines, Complete code with the smallest complete runnable solution, and at most 1-2 lines after it for complexity/edge cases. For a narrow SQL example, skip unrelated setup and treat the requested SELECT/JOIN statement itself as the complete code; include only the tiny sample input/output needed to demonstrate the result. The minimal labels "Logic:", "Complete code:" and "Flow diagram:" are required only for their matching response modes. For coding output, write the code directly after "Complete code:" (or "Code snippet:") and preserve indentation and inline comments. Do not show Markdown fence markers to the user; the overlay automatically presents the code portion in a separate editor-style block. Do not give competing solutions unless explicitly asked. Avoid generic transitions such as 'First', 'Second', 'Finally' unless sequence itself matters. Prefer concrete production nouns, exact roles/operations and the reason they were used. If the current wording is unclear or corrupted, first resolve it from the immediately preceding 1-3 interview turns, their answers, canonical Resume/JD vocabulary, and the newest action being requested. Ask for clarification only when those sources still leave two or more materially different plausible technical meanings; never invent missing facts. The final output must be accurate, question-specific and sufficiently explained for the candidate to speak without mentally expanding keywords. Before returning, remove only content that is repetitive, generic, or outside the exact question; do not remove the short implementation explanation that makes the answer interview-ready.
-
-INTERVIEW ANSWER SHAPE CALIBRATION:
-Interviewer: "How did you secure integrations?" Candidate shape: Start with one direct first-person answer, then explain the 2-4 relevant controls as complete sentences—for example authentication, transport protection, credential storage and authorization—only when supported by context. Do not return a comma-separated technology list.
-Interviewer: "Data is not coming on the landing page. How do you debug it?" Candidate shape: Give the starting check, then walk through the practical troubleshooting sequence (client/API response, data source/data page, logs/tracer, UI mapping/access) in concise complete sentences.
-Interviewer: "What happens when a user opens a case?" Candidate shape: Explain the runtime flow in order from client request to API/data retrieval, server-side access/business-rule evaluation, client rendering and action submission. Keep it conversational and technically specific.
-
-HUMAN EXPLANATION CALIBRATION:
-- Do not answer as a glossary or keyword map. A strong answer should read like a knowledgeable engineer explaining the point to another engineer.
-- Example shape for a concept: "Playwright auto-waiting is built into locator actions and assertions, so I normally do not add separate waits. Before an action such as click or fill, it waits for the element to become actionable, which removes a lot of timing-related flakiness; explicit waits are only for exceptional application conditions."
-- Example shape for troubleshooting: "I fix flaky tests by removing the nondeterminism instead of hiding it with retries. I first use traces/logs/screenshots to identify whether the issue is timing, test data, shared state or an unstable dependency, then I stabilize that specific layer and validate it with repeated isolated runs."
-- These are style examples only. Do not copy their technologies or facts into unrelated answers.
-
-INTERVIEW PRESENTATION CALIBRATION:
-- Narrow factual question: answer directly in 1-3 sentences. Example shape: "Integer division by zero throws ArithmeticException at runtime. If the divisor is the literal 0 in a constant expression, Java can reject it at compile time."
-- Feature/advantage question: one direct sentence, then 3-5 short bullets with the feature and why it matters.
-- Difference/comparison question: one-line distinction first, then 2-4 compact labelled bullets. Do not write a long essay.
-- Experience/project question: speak in first person only when supported by retrieved resume evidence; give what I used, where/how I used it, and the practical result in 2-4 concise sentences.
-- Troubleshooting/scenario question: give the immediate production action first, then 3-5 ordered hyphen bullets covering diagnosis, evidence, fix, and validation. Do not guess a single root cause without evidence.
-- Small code request: smallest complete working code that answers the request; avoid framework scaffolding unless the interviewer asked for it.
-- CURRENT-TOPIC PRECEDENCE: If the newest interviewer prompt explicitly names a technical concept (for example Java records, IS-A/HAS-A, Spring JDBC, Kafka, idempotency), that explicit concept overrides prior-turn context. Never carry the previous topic into a new explicitly named topic. Use prior turns only to resolve pronouns, ellipsis, or genuinely corrupted/ambiguous fragments.
-- Never acknowledge call/audio/network/screen/logistics chatter. If a live transcript contains logistics followed by a technical question, silently discard the logistics and answer the technical question directly. Never answer with status phrases such as "fine on my side", "working on my side", "please proceed", "go ahead", or "I can hear you" when any technical fragment is present.
-- If the interviewer mispronounces or live transcription slightly corrupts a technical term, silently infer the nearest context-supported term from the prepared CV/JD vocabulary, retrieved evidence, and recent technical topic. Prefer a clear domain interpretation over asking for rephrasing when the surrounding context makes it unambiguous; for example, in Playwright automation context, "custom fixer" should be understood as "custom fixture" when fixtures are supported by the session context.
-
-CALIBRATION EXAMPLES:
-Interviewer: "Do you need Contributor at runtime?" Candidate: "No. Runtime only needs the least-privileged data-plane role required for reads. Contributor is needed only for deployment or management operations that change resources."
-Interviewer: "Have you used ToolX in production?" Candidate: "I haven't used ToolX in production. I understand its core pattern and would validate it first with a small POC covering integration, failure handling, security, and observability."
-Interviewer: "You mentioned code in your DevOps project. Have you used Agile methodology?" Candidate format: normal concise spoken experience answer; never Logic/Complete code.
-Interviewer: "Find the first non-repeating character in a string." Candidate format: Logic plus complete runnable code with inline comments.
-After that code, interviewer: "without StringBuilder." Candidate format: keep the same coding task, explain the changed approach briefly, then provide the complete updated runnable code without StringBuilder.
-Interviewer: "How do you find broken links in Selenium?" Candidate format: concise explanation followed by Code snippet: with the practical link/status validation code.
-After a coding turn, interviewer: "Do you have experience with Xpedition and Capital integration?" Candidate format: normal concise spoken experience answer; never repeat the earlier code.
-Interviewer: "asdf asdf asdf" Candidate: "I’m not sure what you’re asking. Please rephrase the question."`
+const MODE_INSTRUCTIONS = Object.freeze({
+  spoken: `SPOKEN ANSWER: Speak as the candidate, not as a glossary or keyword list. For experience, project, tools, challenges and responsibilities, use concise connected paragraphs with supported concrete mechanics and outcomes. For yes/no, start Yes or No when genuinely binary. For troubleshooting, identify evidence before root cause. For security, explain relevant controls, least privilege and validation. Keep explanations complete but focused.`,
+  code: `CODING ANSWER: Follow the coding contract exactly: Logic:, then Complete code:, full runnable solution with meaningful inline comments, and Sample input: plus matching Sample output:. For narrow SQL query/join requests, the SQL statement itself is complete; do not add CREATE TABLE/INSERT/setup unless asked, but include tiny sample input and output. Respect requested language and constraints; for follow-up modifiers supply the full revised solution, not only a diff. Explain complexity when it materially helps.`,
+  snippet: `IMPLEMENTATION SNIPPET: Give a concise practical explanation, then Code snippet: and usable code. Keep it focused, including relevant imports/setup only if needed to understand or run it. Do not force a full application or sample input/output unless asked.`,
+  diagram: `FLOW DIAGRAM: Output Flow diagram: followed by a multiline Notepad-friendly Unicode diagram with at least three real boxes using ┌ ─ ┐ │ └ ┘ and directional arrows. Show meaningful components, direction and branches; briefly explain the flow if useful. A one-line prose chain is not a diagram.`,
+  multi: `MULTIPLE QUESTIONS: Answer every complete question in the original order. Combine related questions naturally; handle distinct questions separately without skipping the first. If any part requests code, provide usable code for that part. Apply the appropriate code, snippet or diagram contract to that sub-question.`
+});
+function copilotInstructions(responseType) {
+  return `${COPILOT_INSTRUCTIONS}\n\n${MODE_INSTRUCTIONS[responseType] || MODE_INSTRUCTIONS.spoken}\n\n${strictModeInstructions(responseType)}`;
+}
 function strictModeInstructions(responseType) {
   if(responseType==='multi')return 'NON-NEGOTIABLE OUTPUT CONTRACT: The current prompt contains multiple interviewer questions. Cover every question in the original order. Related questions may be merged into one connected explanation; distinct questions must both be answered, with the first concise and the second immediately after it. Never answer only the last question. If a sub-question requests code, include usable code for that sub-question.';
   if(responseType==='code')return 'NON-NEGOTIABLE OUTPUT CONTRACT: This is a coding response. Explanation without usable code is invalid. For a narrow SQL query/join example, the requested SQL statement itself is the complete solution: do not add CREATE TABLE, INSERT, schema/setup/cleanup, or other scaffolding unless explicitly requested; include a tiny Sample input: and matching Sample output:. For other coding tasks, output Logic:, then Complete code:, then the full runnable code with meaningful inline comments. When a complete runnable program is printed, include one Sample input: and matching Sample output:. For a follow-up, include the entire previous solution again after the explanation.';
@@ -1578,9 +1453,7 @@ async function ensureModeConformance({answer,responseType,prompt,model,effort,pr
   try {
     const correction=await providerResponseJson({
       provider,model,
-      instructions:`${COPILOT_INSTRUCTIONS}
-
-${strictModeInstructions(responseType)}`,
+      instructions:copilotInstructions(responseType),
       input:`Produce the required final answer now. The earlier output violated the mandatory ${responseType} format. Do not discuss the violation.
 
 ORIGINAL REQUEST AND CONTEXT:
@@ -1637,9 +1510,7 @@ async function prepareQuestion(email, question, {inputSource='', requestId='', c
   const perf = { requestId:String(requestId||''), clientToBackendMs:Number(clientSentAt)>0?Math.max(0,startedAt-Number(clientSentAt)):null };
   const intentStartedAt = Date.now();
   const session = interviewSessions.get(email);
-  question=stripNonSemanticSpeechFillers(question);
-  question=stripLeadingInterviewLogistics(question) || question;
-  question=stripRepeatedPriorPrompt(session,question);
+  question=normalizeRetrievalQuestionInput(session, question);
   let retrieved = [];
   let embeddingMs = 0, retrievalMs = 0;
   let retrievalMode = 'none';
@@ -1782,9 +1653,7 @@ CEREBRAS QUALITY CALIBRATION:
 - Do not add plausible-but-unsupported technologies, metrics, files, tools or implementation details.
 - For finite concept lists, be complete on the first response when practical.` : '';
     const data = await providerResponseJson({
-      provider:route.provider,model:route.model,instructions:`${COPILOT_INSTRUCTIONS}${cerebrasQuality}
-
-${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,
+      provider:route.provider,model:route.model,instructions:`${copilotInstructions(prepared.responseType)}${cerebrasQuality}`,input:prepared.prompt,
       effort:route.effort,maxTokens:answerTokenBudget(text,false,prepared.responseType)
     });
     let answer=providerOutputText(route.provider,data);
@@ -1851,7 +1720,7 @@ app.post('/prefetch-query', async (req, res) => {
   const session = interviewSessions.get(email);
   if (!session?.chunks?.length) return res.status(204).end();
   try {
-    const canonical = resolveCanonicalQuestion(session, question);
+    const canonical = resolveCanonicalQuestion(session, normalizeRetrievalQuestionInput(session, question));
     const correctedQuestion = canonical.corrected || question;
     const reframedIntent = reframeQuestionIntent(correctedQuestion);
     if (!reframedIntent && isInterviewLogisticsQuestion(correctedQuestion)) return res.status(204).end();
@@ -1915,9 +1784,7 @@ app.post('/ask/stream', async (req, res) => {
     if (!OPENAI_API_KEY) return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for vision'});
     try {
       const visionStart=Date.now();
-      const data=await openAIJson('https://api.openai.com/v1/responses',openAIResponseBody({model:LLM_VISION_EXTRACT_MODEL,instructions:`${COPILOT_INSTRUCTIONS}
-
-${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,effort:'none',verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',maxTokens:answerTokenBudget(text,true,prepared.responseType),stream:false}));
+      const data=await openAIJson('https://api.openai.com/v1/responses',openAIResponseBody({model:LLM_VISION_EXTRACT_MODEL,instructions:copilotInstructions(prepared.responseType),input:prepared.prompt,effort:'none',verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',maxTokens:answerTokenBudget(text,true,prepared.responseType),stream:false}));
       let visionAnswer=outputText(data);
       visionAnswer=(await ensureModeConformance({answer:visionAnswer,responseType:prepared.responseType,prompt:prepared.prompt,model:LLM_DEFAULT_MODEL,effort:LLM_REASONING_EFFORT})).answer;
       if(prepared.session&&visionAnswer)addTurn(prepared.session,`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`,visionAnswer,prepared.retrieved,prepared.responseType);
@@ -1953,7 +1820,7 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,effort:'
 
   if (route.provider==='hybrid') {
     const llmStart=Date.now();
-    const instructions=`${COPILOT_INSTRUCTIONS}\n\n${strictModeInstructions(prepared.responseType)}`;
+    const instructions=copilotInstructions(prepared.responseType);
     const maxTokens=answerTokenBudget(text,false,prepared.responseType);
     const cerebrasController=new AbortController();
     const solController=new AbortController();
@@ -2057,6 +1924,7 @@ ${strictModeInstructions(prepared.responseType)}`,input:prepared.prompt,effort:'
     // Retry once when the provider accepts a request but stalls before producing any text.
     // Normal fast responses are untouched; this only caps the rare 30-60s first-token stalls.
     while (streamAttempt < 2 && firstTokenMs === null) {
+      if (clientClosed || res.destroyed) break;
       streamAttempt++;
       const upstreamController = new AbortController();
       activeUpstreamController = upstreamController;
@@ -2073,9 +1941,8 @@ CEREBRAS QUALITY CALIBRATION:
 - Prefer 1 direct answer plus 2-5 concise explanatory points over broad generic prose.
 - Do not introduce technologies, patterns, metrics, files, pipelines or tools merely because they are plausible.
 - For finite concept lists, be complete on the first response when practical.` : '';
-        const instructions=`${COPILOT_INSTRUCTIONS}${cerebrasQuality}
-
-${strictModeInstructions(prepared.responseType)}`;
+        const instructions=`${copilotInstructions(prepared.responseType)}${cerebrasQuality}`;
+        if (streamAttempt === 1) console.log('[PROMPT SIZE]', JSON.stringify({requestId,model:route.model,instructionsChars:instructions.length,inputChars:String(prepared.prompt||'').length,approximateTotalTokens:Math.ceil((instructions.length+String(prepared.prompt||'').length)/4)}));
         const maxTokens=answerTokenBudget(text,false,prepared.responseType);
         const streamBody=route.provider==='cerebras'
           ? cerebrasChatBody({instructions,input:prepared.prompt,maxTokens,stream:true,effort:route.effort})
@@ -2134,7 +2001,9 @@ ${strictModeInstructions(prepared.responseType)}`;
         break;
       } catch (attemptErr) {
         clearTimeout(firstTokenTimer);
-        const timedOut = upstreamController.signal.aborted && firstTokenMs === null;
+        if (clientClosed || res.destroyed) throw attemptErr;
+        const timedOut = upstreamController.signal.aborted &&
+          upstreamController.signal.reason === 'first-token-timeout' && firstTokenMs === null;
         if (timedOut && streamAttempt < 2) {
           console.warn(`[LLM stream] first-token timeout after ${firstTokenTimeoutMs}ms; retrying once`);
           emit('meta', { model:route.model, modelTier:route.tier, phase:'retry', reason:'provider first-token timeout' });
@@ -2150,14 +2019,10 @@ ${strictModeInstructions(prepared.responseType)}`;
     if(!answer)throw new Error('Provider returned no answer');
     if (!clientClosed && prepared.session && answer) addTurn(prepared.session,hasImage?`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`:prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
     const latency = { ...prepared.latency, providerRequestAtMs, providerHeadersMs, firstProviderDeltaAfterRequestMs, firstTokenMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt, attempts:streamAttempt };
+    console.log('[LATENCY]',JSON.stringify({requestId,model:route.model,retrievalMode:latency.retrievalMode,embeddingMs:latency.embeddingMs,promptReadyMs:latency.promptReadyMs,providerRequestAtMs,providerHeadersMs,firstProviderDeltaAfterRequestMs,firstTokenMs,attempts:streamAttempt}));
     providerServiceTier=providerServiceTier||(route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER);
     const u=providerUsage||{};
     console.log(`[USAGE] ${route.model} type=${prepared.responseType} tier=${providerServiceTier} attempts=${streamAttempt} first=${firstTokenMs}ms total=${latency.totalMs}ms`,JSON.stringify({inTok:u.input_tokens??null,cached:u.input_tokens_details?.cached_tokens??null,cacheWrite:u.input_tokens_details?.cache_write_tokens??null,outTok:u.output_tokens??null,reasoningTok:u.output_tokens_details?.reasoning_tokens??null}));
-    if (OPENAI_PROMPT_CACHE_METRICS && route.provider === 'openai') {
-      const inputTokens = Number(u.input_tokens || 0);
-      const cachedTokens = Number(u.input_tokens_details?.cached_tokens || 0);
-      console.log('[CACHE_PERF]', JSON.stringify({model:route.model,cacheKeyEnabled:OPENAI_PROMPT_CACHE_KEY_ENABLED,cachedTokens,inputTokens,cacheHitPct:inputTokens?Math.round(100*cachedTokens/inputTokens):null,prepareMs:prepared.latency.promptReadyMs,embeddingMs:prepared.latency.embeddingMs,retrievalMs:prepared.latency.retrievalMs,providerHeadersMs,firstProviderDeltaAfterRequestMs,totalMs:latency.totalMs}));
-    }
     emit('meta', { model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, phase:'complete', latency, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})) });
     emit('done', { answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, latency });
   } catch (err) {

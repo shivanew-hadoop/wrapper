@@ -863,7 +863,8 @@ renderAutoSend();
 window.electronAPI.onLLMStream(msg => {
   if (!msg || msg.requestId !== activeStreamRequestId) return;
   if (msg.type === 'delta') {
-    if (!streamHasText) {
+    const isFirstDelta = !streamHasText;
+    if (isFirstDelta) {
       streamedAnswerText = '';
       streamHasText = true;
       if (activeAnswerTurn?.responseElement) activeAnswerTurn.responseElement.textContent = '';
@@ -872,7 +873,8 @@ window.electronAPI.onLLMStream(msg => {
       scrollTurnToTop(activeAnswerTurn);
     }
     // Append each provider delta immediately. Avoid rebuilding the whole answer on every token.
-    appendPlainAnswerDelta(msg.delta || '');
+    if (isFirstDelta) { pendingRenderDelta += String(msg.delta || ''); flushPendingAnswerDelta(); }
+    else appendPlainAnswerDelta(msg.delta || '');
   } else if (msg.type === 'replace') {
     flushPendingAnswerDelta();
     // Once provider text is visible it is immutable. Keep replace only as a legacy
