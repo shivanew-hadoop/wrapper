@@ -999,8 +999,30 @@ function parseMultiQuestionIntent(value) {
   const parts=[...match[2].matchAll(/^Question\s+\d+:\s*(.+)$/gmi)].map(item=>item[1].trim()).filter(Boolean);
   return parts.length>=2?{related:match[1].toUpperCase()==='RELATED',parts}:null;
 }
-function reframeQuestionIntent(rawQuestion) {
+// Ignore discarded conversational lead-ins when a later complete technical request exists.
+// This runs locally and does not change retrieval, provider calls or streaming.
+function keepActionableInterviewRequest(rawQuestion) {
   const raw=normalizeText(rawQuestion);
+  if(!raw)return raw;
+  const pieces=raw.split(/(?<=[.?!])\s+/).map(x=>x.trim()).filter(Boolean);
+  if(pieces.length<2)return raw;
+  const actionable=pieces.filter(part=>/\b(?:what|which|why|how|explain|describe|difference|types|ways|syntax|example|implement|write|show|give|tell me|walk me through)\b/i.test(part)
+    && /\b(?:selenium|waits?|explicit|implicit|fluent|oops?|oop|concepts?|framework|java|test|automation|api|sql|code|syntax|driver|page|object|design|exception|method|class|list|set|map|database|reason)\b/i.test(part));
+  if(!actionable.length)return raw;
+  const last=actionable[actionable.length-1];
+  const lastIndex=pieces.lastIndexOf(last);
+  const earlier=pieces.slice(0,lastIndex);
+  // Only remove earlier pieces that are acknowledgements, abandoned requests or
+  // vague referents; retain genuine distinct questions for the existing multi-Q flow.
+  const discardable=earlier.every(part=>
+    isWeakConversationFragment(part)
+    || /\b(?:yes|yeah|okay|alright|fine|that's fine|i will remove|remove the java)\b/i.test(part)
+    || /\b(?:can you (?:write|extend|change|rewrite) (?:it|that)|specific reason|is there any specific reason)\b/i.test(part)
+       && !/\b(?:selenium|wait|oops?|framework|api|sql|test|automation|java code|syntax)\b/i.test(part));
+  return discardable?pieces.slice(lastIndex).join(' '):raw;
+}
+function reframeQuestionIntent(rawQuestion) {
+  const raw=keepActionableInterviewRequest(rawQuestion);
   if(!raw)return '';
   if(isInterviewerHandoff(raw))return 'INTERVIEWER_HANDOFF: The interviewer is asking whether I have questions for them.';
   const requests=extractMultipleQuestionIntents(raw).filter(item=>!isWeakConversationFragment(item));
@@ -1157,6 +1179,9 @@ function isImplementationSnippetQuestion(prompt) {
   const q=normalizeText(prompt).toLowerCase();
   if(!q)return false;
   // Some interview questions need explanation plus a tiny API/pattern snippet, not a full program.
+  const explicitWaitSyntax=/\b(?:explicit\s+(?:wait|rate|weight)|web\s*driver\s*wait|webdriverwait)\b/.test(q)
+    && /\b(?:write|show|give|provide|syntax|statement|sentence|line|example|snippet|code)\b/.test(q);
+  if(explicitWaitSyntax)return true;
   const brokenLinks=/\b(?:broken|dead)\s+links?\b/.test(q)&&/\b(?:how|find|check|identify|validate|verify|detect|handle|test)\b/.test(q);
   const resourcePattern=/\b(?:try[- ]with[- ]resources?|autocloseable|custom resource)\b/.test(q)&&/\b(?:how|use|create|implement|example|code|coding|close|resource)\b/.test(q);
   return brokenLinks||resourcePattern;
@@ -1324,20 +1349,21 @@ GROUNDING AND TRUTH:
 
 QUESTION AND CONTEXT:
 - REFRAMED CURRENT INTENT controls the current question; RESPONSE MODE controls format. Ignore speech fillers, repeated words, call/audio/network chatter and incidental terms in RAW CURRENT TRANSCRIPT. Silently repair transcription errors only when the context and candidate vocabulary support one interpretation.
-- Explicit new topics override old topics. Use recent history only for pronouns, incomplete follow-ups, modifiers, continuations or when CONTEXTUAL FOLLOW-UP says YES. Preserve requested constraints, count, language, comparisons and question order. Answer all questions in MULTI-QUESTION POLICY.
+- Explicit new topics override old topics. Use recent history only for pronouns, incomplete follow-ups, modifiers, continuations or when CONTEXTUAL FOLLOW-UP says YES. Preserve requested constraints, count, language, comparisons and question order. Answer all genuine complete questions in MULTI-QUESTION POLICY. When a noisy transcript starts with a discarded request, acknowledgement or vague question and ends with a complete technical question, answer only the last actionable technical question; do not say you need details for the discarded part.
 - Coding modifiers such as 'without StringBuilder', 'another way' and 'using loops' inherit the immediately previous coding task and require complete updated code. Do not carry coding format into a new conceptual or experience question.
 
 ANSWER QUALITY:
 - Be accurate, complete for finite standard lists, practical and specific to the exact question. Explain the mechanism, relevant tradeoffs, failure handling or validation when useful; do not pad with generic architecture or speculative details.
 - Follow SPOKEN ANSWER SHAPE, EXAMPLE POLICY, DEPTH and persistent USER INSTRUCTIONS. Examples are optional unless requested; normally use at most one, and never invent a personal project example. Avoid unnecessary repetition, introductions, source commentary and closing offers.
 - Narrow fact: answer in 1-3 sentences. Comparison: direct distinction and concise differences. Experience: natural first-person explanation only where supported, including actual action and outcome. Scenario/troubleshooting: first action, ordered checks, fix and verification. For 'how' questions, explain the actual flow in sequence. Use bullets for genuine lists or steps, otherwise speakable connected sentences.
+- When asked to write a statement, syntax or one line for a specific API (for example explicit wait), show the actual minimal code syntax in the established language rather than a definition. When the transcript contains no clear interview question, use any already supplied captured web/page/screen content as the question context if present; never invent page content or claim to have read an uncaptured page.
 - SPOKEN STYLE CONTRACT (normal interview questions): Use one natural first-person answer, normally 3-5 short sentences and NEVER more than 6 sentences. Start with the answer itself, not a definition or greeting. Prefer 'I', 'we', 'I check', 'I use', 'I verify' where truthful; do not force first person for objective facts. Describe the exact action, relevant technical mechanism, and verification or consequence. No numbered lists, headings, bold labels, boilerplate, repeated question, or closing summary in spoken mode. For a narrow question, 1-2 sentences is enough. Do not pad to reach 6 sentences. Use a single short project example only when requested or needed to answer precisely, and never invent experience. Keep each sentence short and easy to speak aloud. Do not repeat earlier answers or unrelated framework details. If the question has multiple parts, cover all parts concisely. Explicit requests for a longer self-introduction, code, snippets, or diagrams follow their own format and are exempt from the six-sentence spoken limit.
 - Return only the final answer, not analysis, scratch work or reasoning traces.`;
 
 const MODE_INSTRUCTIONS = Object.freeze({
   spoken: `SPOKEN ANSWER: One short conversational paragraph, at most six sentences, usually three to five. Use I/we naturally for actual work, not invented claims. Answer the precise question in the first sentence; for scenarios give actions in execution order, root-cause checks and validation. Keep specific Java/Selenium/TestNG/API/SQL details only when relevant. No bullets, section labels, preambles or repetitive summaries. For a simple concept or yes/no, one to three sentences. An explicitly requested 90-second introduction may be longer.`,
   code: `CODING ANSWER: Follow the coding contract exactly: Logic:, then Complete code:, full runnable solution with meaningful inline comments, and Sample input: plus matching Sample output:. For narrow SQL query/join requests, the SQL statement itself is complete; do not add CREATE TABLE/INSERT/setup unless asked, but include tiny sample input and output. Respect requested language and constraints; for follow-up modifiers supply the full revised solution, not only a diff. Explain complexity when it materially helps.`,
-  snippet: `IMPLEMENTATION SNIPPET: Give a concise practical explanation, then Code snippet: and usable code. Keep it focused, including relevant imports/setup only if needed to understand or run it. Do not force a full application or sample input/output unless asked.`,
+  snippet: `IMPLEMENTATION SNIPPET: Give at most one short practical sentence, then Code snippet: and the exact usable syntax or minimal code. Keep it focused, including relevant imports/setup only if needed to understand or run it. Do not force a full application or sample input/output unless asked.`,
   diagram: `FLOW DIAGRAM: Output Flow diagram: followed by a multiline Notepad-friendly Unicode diagram with at least three real boxes using ┌ ─ ┐ │ └ ┘ and directional arrows. Show meaningful components, direction and branches; briefly explain the flow if useful. A one-line prose chain is not a diagram.`,
   multi: `MULTIPLE QUESTIONS: Answer every complete question in the original order. Combine related questions naturally; handle distinct questions separately without skipping the first. If any part requests code, provide usable code for that part. Apply the appropriate code, snippet or diagram contract to that sub-question.`
 });
