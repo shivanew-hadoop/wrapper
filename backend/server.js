@@ -1266,10 +1266,10 @@ function answerTokenBudget(question, hasImage=false,responseType='') {
   if (responseType==='snippet'||isImplementationSnippetQuestion(q)) return 1600;
   if (responseType==='diagram'||isDiagramQuestion(q)) return 3000;
   if (hasImage || /\b(design|architecture|system design)\b/i.test(q)) return 1800;
-  if (/\b(introduce yourself|tell me about yourself|self[- ]introduction)\b/i.test(q)) return 1000;
-  if (wantsExpandedAnswer(q)) return 1400;
-  if (/\b(what is|what are|difference|compare|why|how|explain|describe|experience|implemented|troubleshoot|debug|flow|pipeline|framework)\b/i.test(q)) return 1000;
-  return 800;
+  if (/\b(introduce yourself|tell me about yourself|self[- ]introduction)\b/i.test(q)) return 850;
+  if (wantsExpandedAnswer(q)) return 1100;
+  if (/\b(what is|what are|difference|compare|why|how|explain|describe|experience|implemented|troubleshoot|debug|flow|pipeline|framework)\b/i.test(q)) return 650;
+  return 500;
 }
 
 function multiQuestionGuidance(intentQuestion) {
@@ -1331,10 +1331,11 @@ ANSWER QUALITY:
 - Be accurate, complete for finite standard lists, practical and specific to the exact question. Explain the mechanism, relevant tradeoffs, failure handling or validation when useful; do not pad with generic architecture or speculative details.
 - Follow SPOKEN ANSWER SHAPE, EXAMPLE POLICY, DEPTH and persistent USER INSTRUCTIONS. Examples are optional unless requested; normally use at most one, and never invent a personal project example. Avoid unnecessary repetition, introductions, source commentary and closing offers.
 - Narrow fact: answer in 1-3 sentences. Comparison: direct distinction and concise differences. Experience: natural first-person explanation only where supported, including actual action and outcome. Scenario/troubleshooting: first action, ordered checks, fix and verification. For 'how' questions, explain the actual flow in sequence. Use bullets for genuine lists or steps, otherwise speakable connected sentences.
+- SPOKEN STYLE CONTRACT (normal interview questions): Use one natural first-person answer, normally 3-5 short sentences and NEVER more than 6 sentences. Start with the answer itself, not a definition or greeting. Prefer 'I', 'we', 'I check', 'I use', 'I verify' where truthful; do not force first person for objective facts. Describe the exact action, relevant technical mechanism, and verification or consequence. No numbered lists, headings, bold labels, boilerplate, repeated question, or closing summary in spoken mode. For a narrow question, 1-2 sentences is enough. Do not pad to reach 6 sentences. Use a single short project example only when requested or needed to answer precisely, and never invent experience. Keep each sentence short and easy to speak aloud. Do not repeat earlier answers or unrelated framework details. If the question has multiple parts, cover all parts concisely. Explicit requests for a longer self-introduction, code, snippets, or diagrams follow their own format and are exempt from the six-sentence spoken limit.
 - Return only the final answer, not analysis, scratch work or reasoning traces.`;
 
 const MODE_INSTRUCTIONS = Object.freeze({
-  spoken: `SPOKEN ANSWER: Speak as the candidate, not as a glossary or keyword list. For experience, project, tools, challenges and responsibilities, use concise connected paragraphs with supported concrete mechanics and outcomes. For yes/no, start Yes or No when genuinely binary. For troubleshooting, identify evidence before root cause. For security, explain relevant controls, least privilege and validation. Keep explanations complete but focused.`,
+  spoken: `SPOKEN ANSWER: One short conversational paragraph, at most six sentences, usually three to five. Use I/we naturally for actual work, not invented claims. Answer the precise question in the first sentence; for scenarios give actions in execution order, root-cause checks and validation. Keep specific Java/Selenium/TestNG/API/SQL details only when relevant. No bullets, section labels, preambles or repetitive summaries. For a simple concept or yes/no, one to three sentences. An explicitly requested 90-second introduction may be longer.`,
   code: `CODING ANSWER: Follow the coding contract exactly: Logic:, then Complete code:, full runnable solution with meaningful inline comments, and Sample input: plus matching Sample output:. For narrow SQL query/join requests, the SQL statement itself is complete; do not add CREATE TABLE/INSERT/setup unless asked, but include tiny sample input and output. Respect requested language and constraints; for follow-up modifiers supply the full revised solution, not only a diff. Explain complexity when it materially helps.`,
   snippet: `IMPLEMENTATION SNIPPET: Give a concise practical explanation, then Code snippet: and usable code. Keep it focused, including relevant imports/setup only if needed to understand or run it. Do not force a full application or sample input/output unless asked.`,
   diagram: `FLOW DIAGRAM: Output Flow diagram: followed by a multiline Notepad-friendly Unicode diagram with at least three real boxes using ┌ ─ ┐ │ └ ┘ and directional arrows. Show meaningful components, direction and branches; briefly explain the flow if useful. A one-line prose chain is not a diagram.`,
