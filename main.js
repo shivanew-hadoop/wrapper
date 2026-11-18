@@ -74,7 +74,7 @@ function saveSetupDefaults(payload) {
       userInstructions:String(payload?.userInstructions||''),
       yearsExperience:payload?.yearsExperience,
       role:String(payload?.role||''),
-      answerProvider:['openai','terra','luna','cerebras'].includes(String(payload?.answerProvider||'openai'))?String(payload?.answerProvider||'openai'):'openai',
+      answerProvider:['openai','terra','luna','cerebras','deepseek'].includes(String(payload?.answerProvider||'openai'))?String(payload?.answerProvider||'openai'):'openai',
       savedAt:Date.now()
     };
     fs.writeFileSync(setupDefaultsPath(), safeStorage.encryptString(JSON.stringify(compact)), {mode:0o600});
@@ -455,7 +455,7 @@ ipcMain.handle('prepare-context', async (_, payload) => {
         userInstructions: String(payload.userInstructions || ''),
         yearsExperience: payload.yearsExperience,
         role: String(payload.role || ''),
-        answerProvider: ['openai','terra','luna','cerebras'].includes(String(payload.answerProvider || 'openai')) ? String(payload.answerProvider || 'openai') : 'openai'
+        answerProvider: ['openai','terra','luna','cerebras','deepseek'].includes(String(payload.answerProvider || 'openai')) ? String(payload.answerProvider || 'openai') : 'openai'
       })
     });
     const data = await res.json().catch(() => ({}));

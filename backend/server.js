@@ -15,6 +15,10 @@ const PORT = Number(process.env.PORT || 8080);
 const DEEPGRAM_API_KEY = String(process.env.DEEPGRAM_API_KEY || '').trim();
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const CEREBRAS_API_KEY = String(process.env.CEREBRAS_API_KEY || '').trim();
+// DeepSeek is an independent text-answer provider. Keep OpenAI for RAG embeddings, profile and vision.
+const DEEPSEEK_API_KEY = String(process.env.DEEPSEEK_API_KEY || '').trim();
+const DEEPSEEK_MODEL = String(process.env.DEEPSEEK_MODEL || 'deepseek-chat').trim();
+const DEEPSEEK_API_BASE = String(process.env.DEEPSEEK_API_BASE || 'https://api.deepseek.com').trim().replace(/\/+$/, '');
 // Cerebras selection is intentionally pinned to OpenAI GPT-OSS 120B.
 // Do not allow an old Railway CEREBRAS_MODEL value to silently route this option to another model.
 const CEREBRAS_MODEL = 'gpt-oss-120b';
@@ -77,6 +81,7 @@ else {
   console.log('[BOOT] DEEPGRAM_API_KEY length:', DEEPGRAM_API_KEY.length);
 }
 console.log('[BOOT] OPENAI_API_KEY present:', !!OPENAI_API_KEY, '(Sol + embeddings + vision)');
+console.log('[BOOT] DEEPSEEK_API_KEY present:', !!DEEPSEEK_API_KEY, '| model:', DEEPSEEK_MODEL);
 console.log('[BOOT] CEREBRAS_API_KEY present:', !!CEREBRAS_API_KEY, '| model:', CEREBRAS_MODEL);
 console.log('[BOOT] LLM provider: OpenAI ->', LLM_DEFAULT_MODEL, '| profile:', LLM_PROFILE_MODEL, '| vision:', LLM_VISION_EXTRACT_MODEL, '| embedding:', EMBEDDING_MODEL, '| dims:', EMBEDDING_DIMENSIONS);
 console.log('[BOOT] OpenAI service tier:', OPENAI_SERVICE_TIER, '| reasoning effort:', LLM_REASONING_EFFORT);
@@ -279,11 +284,38 @@ async function cerebrasJson({instructions='',input='',maxTokens=420,effort=CEREB
   if(!response.ok)throw new Error(data?.error?.message||`Cerebras request failed (${response.status})`);
   return data;
 }
+// Chat Completions adapter: no OpenAI-only reasoning_effort/service_tier fields.
+function deepseekChatBody({instructions='',input='',maxTokens=420,stream=false}) {
+  return {
+    model:DEEPSEEK_MODEL,
+    messages:[{role:'system',content:String(instructions||'')},{role:'user',content:typeof input==='string'?input:JSON.stringify(input)}],
+    stream:!!stream,
+    max_tokens:maxTokens
+  };
+}
+async function deepseekJson({instructions='',input='',maxTokens=420}) {
+  if(!DEEPSEEK_API_KEY)throw new Error('DEEPSEEK_API_KEY missing on backend');
+  const response=await fetch(`${DEEPSEEK_API_BASE}/chat/completions`,{
+    method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${DEEPSEEK_API_KEY}`},
+    body:JSON.stringify(deepseekChatBody({instructions,input,maxTokens}))
+  });
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(data?.error?.message||`DeepSeek request failed (${response.status})`);
+  return data;
+}
+function isChatProvider(provider){return provider==='cerebras'||provider==='deepseek';}
+function providerServiceTierFor(provider){return provider==='deepseek'?'standard':provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER;}
+function providerStreamUrl(provider){return provider==='deepseek'?`${DEEPSEEK_API_BASE}/chat/completions`:provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:'https://api.openai.com/v1/responses';}
+function providerApiKey(provider){return provider==='deepseek'?DEEPSEEK_API_KEY:provider==='cerebras'?CEREBRAS_API_KEY:OPENAI_API_KEY;}
+function providerStreamBody(provider,{instructions,input,maxTokens,effort,model,verbosity}){
+  return provider==='deepseek'?deepseekChatBody({instructions,input,maxTokens,stream:true}):provider==='cerebras'?cerebrasChatBody({instructions,input,maxTokens,stream:true,effort}):openAIResponseBody({model,instructions,input,effort,maxTokens,verbosity,stream:true});
+}
 async function providerResponseJson({provider='openai',model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY}) {
+  if(provider==='deepseek') return deepseekJson({instructions,input,maxTokens});
   if(provider==='cerebras') return cerebrasJson({instructions,input,maxTokens,effort});
   return openAIResponseJson({model,instructions,input,effort,maxTokens,verbosity});
 }
-function providerOutputText(provider,data){ return provider==='cerebras' ? cerebrasOutputText(data) : outputText(data); }
+function providerOutputText(provider,data){ return isChatProvider(provider) ? cerebrasOutputText(data) : outputText(data); }
 async function embedTexts(texts) {
   if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY missing on backend');
   const clean = texts.map(t => String(t || '').slice(0, 12000));
@@ -999,25 +1031,8 @@ function parseMultiQuestionIntent(value) {
   const parts=[...match[2].matchAll(/^Question\s+\d+:\s*(.+)$/gmi)].map(item=>item[1].trim()).filter(Boolean);
   return parts.length>=2?{related:match[1].toUpperCase()==='RELATED',parts}:null;
 }
-// Local transcript cleanup: discard conversational lead-ins only when a later
-// complete technical question is present. No network requests or streaming changes.
-function focusTechnicalQuestion(rawQuestion) {
-  const raw = normalizeText(rawQuestion);
-  if (!raw) return raw;
-  const parts = raw.split(/(?<=[.?!])\s+/).map(x => x.trim()).filter(Boolean);
-  if (parts.length < 2) return raw;
-  const technical = /\b(?:selenium|explicit wait|implicit wait|webdriverwait|java|testng|api|sql|framework|oops?|oop|encapsulation|inheritance|polymorphism|abstraction|list|set|map|loops?|exception|automation|code|syntax)\b/i;
-  const question = /\b(?:what|which|why|how|explain|describe|types|ways|syntax|example|implement|write|show|give|difference)\b/i;
-  const last = parts.findLastIndex(p => technical.test(p) && question.test(p));
-  if (last <= 0) return raw;
-  const lead = parts.slice(0, last);
-  const filler = /^(?:yes|yeah|okay|ok|alright|fine|that's fine|sure|right|thank you)[.!?]?$/i;
-  const vague = /\b(?:give me the code|i can share|i will remove|remove the java|can you write (?:it|that)|can you extend (?:it|that)|need the specific|specific reason|i can give you)\b/i;
-  if (!lead.every(p => filler.test(p) || vague.test(p))) return raw;
-  return parts.slice(last).join(' ');
-}
 function reframeQuestionIntent(rawQuestion) {
-  const raw=focusTechnicalQuestion(rawQuestion);
+  const raw=normalizeText(rawQuestion);
   if(!raw)return '';
   if(isInterviewerHandoff(raw))return 'INTERVIEWER_HANDOFF: The interviewer is asking whether I have questions for them.';
   const requests=extractMultipleQuestionIntents(raw).filter(item=>!isWeakConversationFragment(item));
@@ -1174,7 +1189,6 @@ function isImplementationSnippetQuestion(prompt) {
   const q=normalizeText(prompt).toLowerCase();
   if(!q)return false;
   // Some interview questions need explanation plus a tiny API/pattern snippet, not a full program.
-  if (/\b(?:explicit\s+(?:wait|rate|weight)|web\s*driver\s*wait|webdriverwait)\b/.test(q) && /\b(?:write|show|give|provide|syntax|statement|sentence|line|example|snippet|code)\b/.test(q)) return true;
   const brokenLinks=/\b(?:broken|dead)\s+links?\b/.test(q)&&/\b(?:how|find|check|identify|validate|verify|detect|handle|test)\b/.test(q);
   const resourcePattern=/\b(?:try[- ]with[- ]resources?|autocloseable|custom resource)\b/.test(q)&&/\b(?:how|use|create|implement|example|code|coding|close|resource)\b/.test(q);
   return brokenLinks||resourcePattern;
@@ -1284,10 +1298,10 @@ function answerTokenBudget(question, hasImage=false,responseType='') {
   if (responseType==='snippet'||isImplementationSnippetQuestion(q)) return 1600;
   if (responseType==='diagram'||isDiagramQuestion(q)) return 3000;
   if (hasImage || /\b(design|architecture|system design)\b/i.test(q)) return 1800;
-  if (/\b(introduce yourself|tell me about yourself|self[- ]introduction)\b/i.test(q)) return 1000;
-  if (wantsExpandedAnswer(q)) return 1400;
-  if (/\b(what is|what are|difference|compare|why|how|explain|describe|experience|implemented|troubleshoot|debug|flow|pipeline|framework)\b/i.test(q)) return 1000;
-  return 800;
+  if (/\b(introduce yourself|tell me about yourself|self[- ]introduction)\b/i.test(q)) return 850;
+  if (wantsExpandedAnswer(q)) return 1100;
+  if (/\b(what is|what are|difference|compare|why|how|explain|describe|experience|implemented|troubleshoot|debug|flow|pipeline|framework)\b/i.test(q)) return 650;
+  return 500;
 }
 
 function multiQuestionGuidance(intentQuestion) {
@@ -1349,13 +1363,11 @@ ANSWER QUALITY:
 - Be accurate, complete for finite standard lists, practical and specific to the exact question. Explain the mechanism, relevant tradeoffs, failure handling or validation when useful; do not pad with generic architecture or speculative details.
 - Follow SPOKEN ANSWER SHAPE, EXAMPLE POLICY, DEPTH and persistent USER INSTRUCTIONS. Examples are optional unless requested; normally use at most one, and never invent a personal project example. Avoid unnecessary repetition, introductions, source commentary and closing offers.
 - Narrow fact: answer in 1-3 sentences. Comparison: direct distinction and concise differences. Experience: natural first-person explanation only where supported, including actual action and outcome. Scenario/troubleshooting: first action, ordered checks, fix and verification. For 'how' questions, explain the actual flow in sequence. Use bullets for genuine lists or steps, otherwise speakable connected sentences.
-- Ignore abandoned or vague conversational fragments when a later complete technical question is present. Never print offers to ask for code, missing reasons, or more details when the technical request can be answered directly.
-- For distinct concepts such as List, Set, Map, OOP pillars or loop types, put each concept on a separate line, with a compact explanation. Keep ordinary spoken answers concise (normally 3-5 sentences, at most 6), but code requests may be longer.
-- For explicit-wait syntax or requests to write a statement, output the actual minimal usable Java/Selenium syntax, not just an explanation. When no clear question is present, use already captured screen/page context if available, without inventing unseen content or adding new network requests.
+- SPOKEN STYLE CONTRACT (normal interview questions): Use one natural first-person answer, normally 3-5 short sentences and NEVER more than 6 sentences. Start with the answer itself, not a definition or greeting. Prefer 'I', 'we', 'I check', 'I use', 'I verify' where truthful; do not force first person for objective facts. Describe the exact action, relevant technical mechanism, and verification or consequence. No numbered lists, headings, bold labels, boilerplate, repeated question, or closing summary in spoken mode. For a narrow question, 1-2 sentences is enough. Do not pad to reach 6 sentences. Use a single short project example only when requested or needed to answer precisely, and never invent experience. Keep each sentence short and easy to speak aloud. Do not repeat earlier answers or unrelated framework details. If the question has multiple parts, cover all parts concisely. Explicit requests for a longer self-introduction, code, snippets, or diagrams follow their own format and are exempt from the six-sentence spoken limit.
 - Return only the final answer, not analysis, scratch work or reasoning traces.`;
 
 const MODE_INSTRUCTIONS = Object.freeze({
-  spoken: `SPOKEN ANSWER: Speak as the candidate, not as a glossary or keyword list. For experience, project, tools, challenges and responsibilities, use concise connected paragraphs with supported concrete mechanics and outcomes. For yes/no, start Yes or No when genuinely binary. For troubleshooting, identify evidence before root cause. For security, explain relevant controls, least privilege and validation. Keep explanations complete but focused.`,
+  spoken: `SPOKEN ANSWER: One short conversational paragraph, at most six sentences, usually three to five. Use I/we naturally for actual work, not invented claims. Answer the precise question in the first sentence; for scenarios give actions in execution order, root-cause checks and validation. Keep specific Java/Selenium/TestNG/API/SQL details only when relevant. No bullets, section labels, preambles or repetitive summaries. For a simple concept or yes/no, one to three sentences. An explicitly requested 90-second introduction may be longer.`,
   code: `CODING ANSWER: Follow the coding contract exactly: Logic:, then Complete code:, full runnable solution with meaningful inline comments, and Sample input: plus matching Sample output:. For narrow SQL query/join requests, the SQL statement itself is complete; do not add CREATE TABLE/INSERT/setup unless asked, but include tiny sample input and output. Respect requested language and constraints; for follow-up modifiers supply the full revised solution, not only a diff. Explain complexity when it materially helps.`,
   snippet: `IMPLEMENTATION SNIPPET: Give a concise practical explanation, then Code snippet: and usable code. Keep it focused, including relevant imports/setup only if needed to understand or run it. Do not force a full application or sample input/output unless asked.`,
   diagram: `FLOW DIAGRAM: Output Flow diagram: followed by a multiline Notepad-friendly Unicode diagram with at least three real boxes using ┌ ─ ┐ │ └ ┘ and directional arrows. Show meaningful components, direction and branches; briefly explain the flow if useful. A one-line prose chain is not a diagram.`,
@@ -1496,6 +1508,7 @@ function selectAnswerRoute(_question, prepared=null, _options={}) {
   // The user explicitly chooses the live answer provider on Prepare Interview.
   // No automatic routing/classifier is introduced, so latency and answer flow remain deterministic.
   const selected=String(prepared?.session?.answerProvider||'openai');
+  if(selected==='deepseek') return {provider:'deepseek',model:DEEPSEEK_MODEL,effort:'none',tier:'deepseek-chat',reason:'user-selected-deepseek'};
   if(selected==='cerebras') return {provider:'cerebras',model:CEREBRAS_MODEL,effort:CEREBRAS_REASONING_EFFORT,tier:'cerebras',reason:'user-selected-cerebras-gpt-oss-120b'};
   if(selected==='terra') return {provider:'openai',model:OPENAI_TERRA_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-terra-fast',reason:'user-selected-openai-terra-fast'};
   if(selected==='luna') return {provider:'openai',model:OPENAI_LUNA_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-luna-fast',reason:'user-selected-openai-luna-fast'};
@@ -1592,8 +1605,8 @@ async function prepareQuestion(email, question, {inputSource='', requestId='', c
   perf.promptTokenEstimate = Math.ceil(perf.promptChars / 4);
   return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, intentQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt, ...perf } };
 }
-app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, terraModel:OPENAI_TERRA_MODEL, lunaModel:OPENAI_LUNA_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',options:['openai','terra','luna','cerebras']}, embeddingModel:EMBEDDING_MODEL }));
-app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, openaiConfigured:!!OPENAI_API_KEY, cerebrasConfigured:!!CEREBRAS_API_KEY, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT }));
+app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, deepseekModel:DEEPSEEK_MODEL, terraModel:OPENAI_TERRA_MODEL, lunaModel:OPENAI_LUNA_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',options:['openai','terra','luna','cerebras','deepseek']}, embeddingModel:EMBEDDING_MODEL }));
+app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, openaiConfigured:!!OPENAI_API_KEY, cerebrasConfigured:!!CEREBRAS_API_KEY, deepseekConfigured:!!DEEPSEEK_API_KEY, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT }));
 
 app.post('/validate-license', (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
@@ -1610,7 +1623,8 @@ app.post('/prepare-context', async (req, res) => {
   const yearsExperience=(rawYears===null||rawYears===undefined||String(rawYears).trim()==='')?null:Number(rawYears);
   const role = normalizeText(req.body.role || '').slice(0,160);
   const requestedProvider=String(req.body.answerProvider || 'openai').trim().toLowerCase();
-  const answerProvider=['openai','terra','luna','cerebras'].includes(requestedProvider)?requestedProvider:'openai';
+  const answerProvider=['openai','terra','luna','cerebras','deepseek'].includes(requestedProvider)?requestedProvider:'openai';
+  if(answerProvider==='deepseek'&&!DEEPSEEK_API_KEY)return res.status(500).json({ok:false,error:'DEEPSEEK_API_KEY missing on backend for selected model'});
   if(answerProvider==='cerebras'&&!CEREBRAS_API_KEY)return res.status(500).json({ok:false,error:'CEREBRAS_API_KEY missing on backend for selected model'});
   if((answerProvider==='openai'||answerProvider==='terra'||answerProvider==='luna')&&!OPENAI_API_KEY)return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for selected model'});
   if (yearsExperience!==null && (!Number.isFinite(yearsExperience) || yearsExperience < 0 || yearsExperience > 60)) return res.status(400).json({ ok:false, error:'yearsExperience must be between 0 and 60 when provided' });
@@ -1641,7 +1655,7 @@ app.post('/prepare-context', async (req, res) => {
       stats:{ resumeChars:resumeText.length, jdChars:jdText.length, chunkCount:chunks.length, parseMs, summaryMs, embeddingMs }
     });
     console.log(`[RAG] Prepared ${email}: ${chunks.length} chunks in ${Date.now()-t0}ms`);
-    return res.json({ ok:true, answerProvider, answerModel:answerProvider==='cerebras'?CEREBRAS_MODEL:(answerProvider==='terra'?OPENAI_TERRA_MODEL:(answerProvider==='luna'?OPENAI_LUNA_MODEL:LLM_DEFAULT_MODEL)), chunkCount:chunks.length, profile:{ yearsExperience:resolvedYears, targetRole:resolvedRole, primarySkills:(profile.primarySkills || []).slice(0,12), jdProvided:!!jdText }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
+    return res.json({ ok:true, answerProvider, answerModel:answerProvider==='deepseek'?DEEPSEEK_MODEL:(answerProvider==='cerebras'?CEREBRAS_MODEL:(answerProvider==='terra'?OPENAI_TERRA_MODEL:(answerProvider==='luna'?OPENAI_LUNA_MODEL:LLM_DEFAULT_MODEL))), chunkCount:chunks.length, profile:{ yearsExperience:resolvedYears, targetRole:resolvedRole, primarySkills:(profile.primarySkills || []).slice(0,12), jdProvided:!!jdText }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
   } catch (err) {
     console.error('[RAG] Prepare error:', err.message);
     return res.status(500).json({ ok:false, error:err.message || 'Context preparation failed' });
@@ -1666,7 +1680,7 @@ app.post('/ask', async (req, res) => {
     if (prepared.rejection) return res.json({ ok:true, answer:prepared.rejection==='NO_ANSWER_REQUIRED'?'':prepared.rejection, model:'local-guard', modelTier:'local', contextPrepared:!!prepared.session, retrieved:[], latency:{...prepared.latency, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt} });
     const route = selectAnswerRoute(text, prepared);
     const llmStart = Date.now();
-    const cerebrasQuality = route.provider==='cerebras' ? `
+    const cerebrasQuality = isChatProvider(route.provider) ? `
 
 CEREBRAS QUALITY CALIBRATION:
 - Match the maturity, relevance and technical precision of a strong senior-engineer interview answer.
@@ -1681,7 +1695,7 @@ CEREBRAS QUALITY CALIBRATION:
     answer=(await ensureModeConformance({answer,responseType:prepared.responseType,prompt:prepared.prompt,model:route.model,effort:route.effort,provider:route.provider})).answer;
     if (prepared.session && answer) addTurn(prepared.session,prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
     const latency = { embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, retrievalMode:prepared.latency.retrievalMode, promptReadyMs:prepared.latency.promptReadyMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt };
-    const providerServiceTier=route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:String(data?.service_tier||OPENAI_SERVICE_TIER);
+    const providerServiceTier=route.provider==='deepseek'?'standard':route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:String(data?.service_tier||OPENAI_SERVICE_TIER);
     console.log(`[LLM] ${email} model=${route.model} modelTier=${route.tier} serviceTier=${providerServiceTier} total=${latency.totalMs}ms embed=${latency.embeddingMs}ms retrieve=${latency.retrievalMs}ms mode=${prepared.latency.retrievalMode} llm=${latency.llmMs}ms`);
     return res.json({ ok:true, answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, contextPrepared:!!prepared.session, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})), latency });
   } catch (err) {
@@ -1828,7 +1842,7 @@ app.post('/ask/stream', async (req, res) => {
   let activeUpstreamController = null;
   res.on('close', () => { clientClosed = true; try { activeUpstreamController?.abort('client-disconnected'); } catch (_) {} });
   const emit = (event, data) => { if (!clientClosed && !res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
-  emit('meta', { model:route.model, modelTier:route.tier, serviceTierRequested:route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER, routeReason:route.reason, phase:'retrieval', contextPrepared:!!prepared.session, embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, promptReadyMs:prepared.latency.promptReadyMs, retrievalMode:prepared.latency.retrievalMode });
+  emit('meta', { model:route.model, modelTier:route.tier, serviceTierRequested:providerServiceTierFor(route.provider), routeReason:route.reason, phase:'retrieval', contextPrepared:!!prepared.session, embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, promptReadyMs:prepared.latency.promptReadyMs, retrievalMode:prepared.latency.retrievalMode });
 
   if (prepared.rejection) {
     const latency = { ...prepared.latency, firstTokenMs:Date.now()-prepared.latency.startedAt, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt, attempts:0 };
@@ -1953,7 +1967,7 @@ app.post('/ask/stream', async (req, res) => {
       const firstTokenTimer = setTimeout(() => upstreamController.abort('first-token-timeout'), firstTokenTimeoutMs);
       let upstream;
       try {
-        const cerebrasQuality = route.provider==='cerebras' ? `
+        const cerebrasQuality = isChatProvider(route.provider) ? `
 
 CEREBRAS QUALITY CALIBRATION:
 - Match the maturity, relevance and technical precision of a strong senior-engineer interview answer. Do not compensate for uncertainty with extra high-level architecture or invented implementation details.
@@ -1965,12 +1979,10 @@ CEREBRAS QUALITY CALIBRATION:
         const instructions=`${copilotInstructions(prepared.responseType)}${cerebrasQuality}`;
         if (streamAttempt === 1) console.log('[PROMPT SIZE]', JSON.stringify({requestId,model:route.model,instructionsChars:instructions.length,inputChars:String(prepared.prompt||'').length,approximateTotalTokens:Math.ceil((instructions.length+String(prepared.prompt||'').length)/4)}));
         const maxTokens=answerTokenBudget(text,false,prepared.responseType);
-        const streamBody=route.provider==='cerebras'
-          ? cerebrasChatBody({instructions,input:prepared.prompt,maxTokens,stream:true,effort:route.effort})
-          : openAIResponseBody({model:route.model,instructions,input:prepared.prompt,effort:route.effort,maxTokens,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',stream:true});
-        const upstreamUrl=route.provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:'https://api.openai.com/v1/responses';
-        const upstreamKey=route.provider==='cerebras'?CEREBRAS_API_KEY:OPENAI_API_KEY;
-        if(!upstreamKey)throw new Error(route.provider==='cerebras'?'CEREBRAS_API_KEY missing on backend':'OPENAI_API_KEY missing on backend');
+        const streamBody=providerStreamBody(route.provider,{instructions,input:prepared.prompt,maxTokens,effort:route.effort,model:route.model,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium'});
+        const upstreamUrl=providerStreamUrl(route.provider);
+        const upstreamKey=providerApiKey(route.provider);
+        if(!upstreamKey)throw new Error(`${route.provider.toUpperCase()}_API_KEY missing on backend`);
         providerRequestAtMs = Date.now() - prepared.latency.startedAt;
         const providerFetchStartedAt = Date.now();
         upstream = await fetch(upstreamUrl, {
@@ -1982,7 +1994,7 @@ CEREBRAS QUALITY CALIBRATION:
         if (!upstream.ok) {
           clearTimeout(firstTokenTimer);
           const data = await upstream.json().catch(() => ({}));
-          throw new Error(data?.error?.message || `${route.provider==='cerebras'?'Cerebras':'OpenAI'} request failed (${upstream.status})`);
+          throw new Error(data?.error?.message || `${route.provider==='deepseek'?'DeepSeek':route.provider==='cerebras'?'Cerebras':'OpenAI'} request failed (${upstream.status})`);
         }
         const reader = upstream.body.getReader();
         const decoder = new TextDecoder();
@@ -2000,7 +2012,7 @@ CEREBRAS QUALITY CALIBRATION:
             if (!raw || raw === '[DONE]') continue;
             let evt; try { evt = JSON.parse(raw); } catch (_) { continue; }
             const eventType=String(evt?.type||'');
-            const delta=route.provider==='cerebras'
+            const delta=isChatProvider(route.provider)
               ? String(evt?.choices?.[0]?.delta?.content||'')
               : (eventType==='response.output_text.delta' ? String(evt?.delta||'') : '');
             if (delta) {
@@ -2012,7 +2024,7 @@ CEREBRAS QUALITY CALIBRATION:
               answer += delta;
               emit('delta', { delta });
             }
-            if (eventType==='error' || evt?.error) throw new Error(evt?.error?.message || evt?.message || `${route.provider==='cerebras'?'Cerebras':'OpenAI'} stream error`);
+            if (eventType==='error' || evt?.error) throw new Error(evt?.error?.message || evt?.message || `${route.provider==='deepseek'?'DeepSeek':route.provider==='cerebras'?'Cerebras':'OpenAI'} stream error`);
             if (route.provider==='openai' && eventType==='response.completed' && evt?.response?.service_tier) providerServiceTier=String(evt.response.service_tier);
             if (route.provider==='openai' && eventType==='response.completed' && evt?.response?.usage) providerUsage=evt.response.usage;
             if (route.provider==='openai' && eventType==='response.failed') throw new Error(evt?.response?.error?.message || 'OpenAI response failed');
@@ -2041,7 +2053,7 @@ CEREBRAS QUALITY CALIBRATION:
     if (!clientClosed && prepared.session && answer) addTurn(prepared.session,hasImage?`[Captured window${captureSource?`: ${captureSource}`:''}] ${prepared.intentQuestion||text}`:prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
     const latency = { ...prepared.latency, providerRequestAtMs, providerHeadersMs, firstProviderDeltaAfterRequestMs, firstTokenMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt, attempts:streamAttempt };
     console.log('[LATENCY]',JSON.stringify({requestId,model:route.model,retrievalMode:latency.retrievalMode,embeddingMs:latency.embeddingMs,promptReadyMs:latency.promptReadyMs,providerRequestAtMs,providerHeadersMs,firstProviderDeltaAfterRequestMs,firstTokenMs,attempts:streamAttempt}));
-    providerServiceTier=providerServiceTier||(route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER);
+    providerServiceTier=providerServiceTier||(providerServiceTierFor(route.provider));
     const u=providerUsage||{};
     console.log(`[USAGE] ${route.model} type=${prepared.responseType} tier=${providerServiceTier} attempts=${streamAttempt} first=${firstTokenMs}ms total=${latency.totalMs}ms`,JSON.stringify({inTok:u.input_tokens??null,cached:u.input_tokens_details?.cached_tokens??null,cacheWrite:u.input_tokens_details?.cache_write_tokens??null,outTok:u.output_tokens??null,reasoningTok:u.output_tokens_details?.reasoning_tokens??null}));
     emit('meta', { model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, phase:'complete', latency, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})) });
