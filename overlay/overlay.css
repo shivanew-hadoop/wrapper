@@ -1143,7 +1143,3 @@ body { font-family: Arial, "Segoe UI", sans-serif; }
   overflow-x: auto;
   tab-size: 4;
 }
-
-/* Readable concept-per-line presentation; no change to pane sizing or stream path. */
-.qaResponse .answerLine + .answerLine { margin-top: 3px; }
-.qaResponse .answerBullet + .answerBullet { margin-top: 4px; }
