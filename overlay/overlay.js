@@ -83,8 +83,22 @@ function inlineAnswerMarkup(value) {
   return escapeAnswerHtml(value).replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
 }
 
+// Display-only segmentation for named technical concepts. No network calls, no
+// changes to streamed tokens or saved answer text; preserves code fences.
+function separateInlineConcepts(text) {
+  const names = '(?:ArrayList|LinkedList|HashMap|HashSet|TreeMap|TreeSet|List|Set|Map|Queue|Encapsulation|Inheritance|Polymorphism|Abstraction|for\s+loop|while\s+loop|do[ -]while\s+loop|enhanced\s+for\s+loop)';
+  const pattern = new RegExp('([;.]?\\s+)(?=(' + names + ')\\s*[:–-]\\s+)', 'gi');
+  let inFence = false;
+  return String(text || '').split('\n').map(line => {
+    if (/^\s*```/.test(line)) { inFence = !inFence; return line; }
+    if (inFence || /^\s{2,}|^\s*(?:\/\/|\*|#)/.test(line)) return line;
+    // Only split inline labelled concepts; ordinary prose remains untouched.
+    return line.replace(pattern, '\n');
+  }).join('\n');
+}
+
 function richAnswerHtml(text) {
-  const clean = String(text || '')
+  const clean = separateInlineConcepts(text)
     .replace(/⟦(?:Resume|JD)\s*·\s*[^⟧]+⟧/g, '')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n');
