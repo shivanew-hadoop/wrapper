@@ -261,46 +261,66 @@ function cerebrasReasoningEffort(effort=CEREBRAS_REASONING_EFFORT) {
   const value=String(effort||CEREBRAS_REASONING_EFFORT).trim().toLowerCase();
   return ['low','medium','high'].includes(value) ? value : CEREBRAS_REASONING_EFFORT;
 }
-// Cerebras-only calibration: concise instructions with deterministic question intent.
-// No second model request; Sol, DeepSeek, RAG and client contracts are unchanged.
-function cerebrasIntentHint(question, responseType, context='') {
-  const q=String(question||'').toLowerCase();
-  const contextTail=String(context||'').toLowerCase().slice(-3500);
-  const eksFollowup=/\b(basic syntax|some syntax|add.*syntax|write.*code|terraform syntax)\b/.test(q) && /\b(eks|aws_eks_cluster|kubernetes cluster)\b/.test(contextTail);
-  if (/\b(terraform|tfstate|\.tf|infrastructure as code)\b/.test(q) && /\b(simultaneous|concurrent|two engineers|same infrastructure|same state|locking|lock)\b/.test(q))
-    return 'TERRAFORM_CONCURRENCY: discuss remote state, native S3 use_lockfile locking, serialized CI/CD applies, safe unlock and separate-state collisions. Never interpret as ETL concurrency.';
-  // Spoken transcripts may mention writing code before the final question asks for an approach.
-  // Give the latest explicit instruction precedence instead of keyword-counting the whole turn.
-  if (/\b(eks|kubernetes cluster)\b/.test(q) || eksFollowup) {
-    if (/\b(approach|how (?:would|will|are) you (?:proceed|start)|first.*approach)\b/.test(q) &&
-        !/\b(now|then|next)\b.{0,30}\b(write|show|add)\b/.test(q))
-      return 'EKS_APPROACH: give ordered provider/backend, VPC/public-private subnets/routes/NAT, IAM, EKS, managed node group, terraform plan/apply and kubectl verification. No code unless the latest request explicitly asks for code.';
-    if (/\b(basic syntax|some syntax|small snippet|add.*syntax|write.*code|notepad)\b/.test(q))
-      return 'EKS_BASIC_SYNTAX: provide a compact Terraform provider, VPC, two private subnets, aws_eks_cluster and aws_eks_node_group with inline comments; explain referenced IAM roles and networking must be defined separately. Never fabricate terraform apply results.';
+// Shared interview-quality policy for the two chat-completions providers only.
+// Sol/OpenAI prompts, streaming protocol, STT, RAG retrieval and UI remain unchanged.
+function interviewTopic(q, context='') {
+  const text=String(q||'').toLowerCase();
+  const recent=String(context||'').toLowerCase();
+  // Speech recognition commonly renders "Terraform" as "data home".
+  const terraform=/\bterraform\b|\btfstate\b|\b\.tf\b|\bterraform apply\b/.test(text)
+    || (/\bdata home\b/.test(text) && /\bterraform\b/.test(recent));
+  if(terraform && /\b(two engineers?|simultaneous|concurrent|same infrastructure|same state|locking|lock|at the same time)\b/.test(text))
+    return 'TERRAFORM CONCURRENCY: Two engineers running terraform apply against the same state risk lock contention, conflicting plans, and state corruption. Explain S3 remote state with use_lockfile=true, one approved CI/CD apply per state, separate environment state keys, and cautious force-unlock only after verifying no active run. This is NOT a data pipeline concurrency question.';
+  if(terraform && /\b(dev|stage|staging|prod|production|environment|modules?)\b/.test(text))
+    return 'TERRAFORM ENVIRONMENTS: reusable modules; separate dev/stage/prod root directories and backend state keys; native S3 use_lockfile=true; versioning, IAM isolation, tfvars and approved CI/CD applies. Do not recommend deprecated DynamoDB locking as the default.';
+  if(/\b(eks|kubernetes cluster)\b/.test(text) || (/\b(syntax|snippet|code)\b/.test(text)&&/\beks\b/.test(recent))) {
+    if(/\b(syntax|snippet|write code|show code|basic code)\b/.test(text))return 'EKS BASIC SYNTAX: show concise HCL provider, VPC, two private subnets, EKS cluster and managed node group, with meaningful inline comments. Identify IAM roles, routing and security groups as required additional resources; never invent apply output.';
+    return 'EKS APPROACH: explain VPC, 2 AZs, private/public subnets, NAT/routing, IAM, cluster, managed node group, terraform validate/plan/apply, kubectl verification. No code unless explicitly requested.';
   }
-  if (/\b(spark|pyspark)\b/.test(q) && /\b(skew|slow|performance|hours|minutes|degrad)\b/.test(q))
-    return 'SPARK_DIAGNOSIS: compare Spark History Server stage/task duration, shuffle read and spills, skewed-key frequency, AQE skew join, executor capacity, then verify baseline runtime.';
-  if (/\b(cpu thrott|throttling)\b/.test(q) && /\b(kubernetes|pod|container|peak|latency)\b/.test(q))
-    return 'K8S_THROTTLING: distinguish CFS quota throttling from node saturation; inspect Prometheus throttled periods, requests/limits, HPA, node headroom; validate P95/P99.';
-  if (/\b(terraform)\b/.test(q) && /\b(dev|stage|prod|environment|module)\b/.test(q))
-    return 'TERRAFORM_ENVIRONMENTS: reusable versioned modules, isolated environment roots and state keys, tfvars, IAM boundaries, PR plan and approved apply.';
-  if (responseType==='code') return 'CODE: honor exact requested scope; executable code with meaningful inline comments. No fabricated outputs.';
+  if(/\b(spark|pyspark|ispac|apache spark)\b/.test(text)&&/\b(skew|slow|performance|hours|minutes|degrad|500 gb|three hours)\b/.test(text))
+    return 'SPARK PERFORMANCE: compare baseline and slow runs in Spark History Server: stages, task distribution, shuffle, spills, GC and input file sizes; confirm skew using key frequencies; tune AQE/skew joins or partitioning only after evidence; rerun and verify SLA. Do not discuss streaming checkpoints for a batch job without evidence.';
+  if(/\b(cpu thrott|throttling)\b/.test(text)&&/\b(kubernetes|pods?|containers?|peak|latency)\b/.test(text))
+    return 'KUBERNETES CPU: distinguish CPU CFS quota throttling from node CPU saturation; inspect throttled-period ratio, kubectl top, requests/limits, HPA and node autoscaler; load-test and compare p95/p99. Do not recommend terraform apply -target for routine scaling.';
+  if(/\b(highly available|high availability|disaster recovery|millions of events)\b/.test(text))
+    return 'AWS HA/DR: answer the NEW architecture question only: Kinesis ingestion, S3 durable raw zone, scalable Spark/Glue/EMR processing, checkpoints/idempotency, Multi-AZ managed services, cross-region DR, RPO/RTO and failover tests. Do NOT continue previous Spark skew discussion.';
+  if(/\b(department|departments|sensitive customer|only.*records|row.level|column.level)\b/.test(text))
+    return 'AWS DATA ACCESS: enforce department-level row filtering and sensitive-column restrictions with Lake Formation data filters and IAM least privilege; verify both allowed and denied access. Do not invent unsupported SQL GRANT syntax or use unrelated GCP DLP.';
+  if(/\b(production issue|real.world|incident|sla breach|pipeline fails|pipeline fills)\b/.test(text))
+    return 'PRODUCTION INCIDENT: explain detection, impact/containment, root cause from logs/metrics, minimal safe remediation, replay/idempotency, SLA verification and postmortem. Never fabricate a personal incident or measured metrics absent resume evidence.';
   return '';
 }
-function cerebrasQualityInstructions(responseType, question='', context='') {
-  const hint=cerebrasIntentHint(question,responseType,context);
+function chatQualityInstructions(responseType, question='', context='') {
+  const topic=interviewTopic(question,context);
   const spoken=responseType==='spoken'||responseType==='multi';
-  return `You are the candidate answering the CURRENT interviewer question. Use retrieved resume facts only for personal experience; never invent ownership, metrics or incidents. JD is not evidence of experience. Ignore speech fillers and use previous context only for genuine follow-ups.
-${hint ? `SPECIFIC INTENT: ${hint}\n` : ''}Answer the exact request, not a nearby topic. Begin with one direct, natural sentence. Be technically specific: name relevant commands, metrics, configuration and failure mechanisms; order diagnosis, fix and verification for troubleshooting. Avoid generic advice, repeated points, unnecessary architecture, greetings and invented production stories.
-${spoken ? (CEREBRAS_ANSWER_STYLE==='points' ? 'FORMAT: 3–5 compact numbered technical points after the direct sentence when the question merits steps; at most six spoken lines for ordinary questions. Short facts need only 1–2 sentences. Do not force bullets for introductions or yes/no answers.' : 'FORMAT: concise natural first-person paragraph, maximum six sentences.') : 'FORMAT: follow requested code, snippet or diagram scope exactly. For code include useful inline comments; do not add scaffolding unless requested.'}
-Output final answer only. Do not expose reasoning.`;
+  return `Answer as a senior engineer in a live interview. The LAST complete interviewer question controls the topic and requested output; earlier clauses are background only. If the latest question changes subjects, discard previous-topic advice. Use previous conversation only to resolve an actual pronoun/follow-up. Ignore acknowledgments and STT fillers.
+${topic ? `QUESTION-SPECIFIC GUIDANCE: ${topic}\n` : ''}Start with a direct 1–2 sentence answer. Follow with 3–5 short, concrete technical points only when useful. Prefer real commands, checks, failure mechanisms and validation over lists of tools. Do not mix clouds or unrelated technologies. Never claim personal production experience, numbers or outcomes unless supported by the provided resume. Never invent logs, commands' output or deployments. Avoid unsafe targeted Terraform applies and outdated DynamoDB state-locking recommendations; prefer native S3 lockfiles where supported.
+${spoken ? 'Keep the answer concise and naturally speakable, ordinarily 5–7 lines; prioritize accuracy over filling a fixed count.' : 'Honor the exact requested code/diagram scope, include concise inline comments for code and do not generate unrelated scaffolding.'}
+Output only the answer; no internal reasoning.`;
 }
-// Avoid the general spoken no-bullets contract conflicting with the Cerebras
-// point-wise format. Other providers continue using copilotInstructions unchanged.
 function providerInterviewInstructions(provider,responseType,question='',context='') {
-  return provider==='cerebras'
-    ? cerebrasQualityInstructions(responseType,question,context)
+  return provider==='cerebras'||provider==='deepseek'
+    ? chatQualityInstructions(responseType,question,context)
     : copilotInstructions(responseType);
+}
+// Compact the provider input without changing how the shared prompt or retrieval is built.
+// Keep resume/JD evidence and the current question, but exclude old answers and
+// conflicting legacy formatting policies for Cerebras and DeepSeek.
+function providerInterviewInput(provider,prepared) {
+  if(provider!=='cerebras'&&provider!=='deepseek')return prepared.prompt;
+  const prompt=String(prepared.prompt||'');
+  const section=(start,end)=>{
+    const i=prompt.indexOf(start);if(i<0)return '';
+    const tail=prompt.slice(i+start.length);
+    const j=end?tail.indexOf(end):-1;
+    return (j>=0?tail.slice(0,j):tail).trim();
+  };
+  const profile=section('CANDIDATE PROFILE\n','\n\nJOB ALIGNMENT').slice(0,1100);
+  const evidence=section('RETRIEVED EVIDENCE\n','\n\nRECENT INTERVIEW CONTEXT').slice(0,2500);
+  const latest=String(prepared.intentQuestion||'').trim();
+  const raw=String(prepared.correctedQuestion||'').trim();
+  const previous=prepared.followupInfo?.isFollowup ? String(prepared.followupInfo.resolvedQuestion||'').slice(0,550) : '';
+  const userPreferences=section('USER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n','\n\nINPUT SOURCE').slice(0,450);
+  return `CURRENT INTERVIEWER QUESTION (highest priority):\n${latest}\n${raw!==latest?`RAW STT FOR DISAMBIGUATION ONLY:\n${raw.slice(-950)}\n`:''}${previous?`GENUINE FOLLOW-UP CONTEXT:\n${previous}\n`:''}${profile?`RESUME PROFILE (personal claims require evidence):\n${profile}\n`:''}${evidence&&evidence!=='No prepared evidence matched.'?`RETRIEVED RESUME EVIDENCE:\n${evidence}\n`:''}${userPreferences?`PRESENTATION PREFERENCES:\n${userPreferences}\n`:''}Answer only the current question.`;
 }
 function cerebrasAnswerBudget(question, responseType, baseBudget) {
   // Reasoning tokens count toward the Cerebras completion cap. A 500–650-token
@@ -1734,7 +1754,7 @@ app.post('/ask', async (req, res) => {
     const llmStart = Date.now();
     const instructions=providerInterviewInstructions(route.provider,prepared.responseType,prepared.intentQuestion||text,prepared.prompt);
     const data = await providerResponseJson({
-      provider:route.provider,model:route.model,instructions,input:prepared.prompt,
+      provider:route.provider,model:route.model,instructions,input:providerInterviewInput(route.provider,prepared),
       effort:route.effort,maxTokens:route.provider==='cerebras'?cerebrasAnswerBudget(text,prepared.responseType,answerTokenBudget(text,false,prepared.responseType)):answerTokenBudget(text,false,prepared.responseType)
     });
     let answer=providerOutputText(route.provider,data);
@@ -1915,7 +1935,7 @@ app.post('/ask/stream', async (req, res) => {
 
     const streamProvider=async(provider, controller, onDelta)=>{
       const body=provider==='cerebras'
-        ? cerebrasChatBody({instructions,input:prepared.prompt,maxTokens,stream:true,effort:HYBRID_CEREBRAS_REASONING_EFFORT})
+        ? cerebrasChatBody({instructions,input:providerInterviewInput(provider,prepared),maxTokens,stream:true,effort:HYBRID_CEREBRAS_REASONING_EFFORT})
         : openAIResponseBody({model:LLM_DEFAULT_MODEL,instructions,input:prepared.prompt,effort:LLM_REASONING_EFFORT,maxTokens,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium',stream:true});
       const url=provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:'https://api.openai.com/v1/responses';
       const key=provider==='cerebras'?CEREBRAS_API_KEY:OPENAI_API_KEY;
@@ -2016,7 +2036,7 @@ app.post('/ask/stream', async (req, res) => {
         const instructions=providerInterviewInstructions(route.provider,prepared.responseType,prepared.intentQuestion||text,prepared.prompt);
         if (streamAttempt === 1) console.log('[PROMPT SIZE]', JSON.stringify({requestId,model:route.model,instructionsChars:instructions.length,inputChars:String(prepared.prompt||'').length,approximateTotalTokens:Math.ceil((instructions.length+String(prepared.prompt||'').length)/4)}));
         const maxTokens=route.provider==='cerebras'?cerebrasAnswerBudget(text,prepared.responseType,answerTokenBudget(text,false,prepared.responseType)):answerTokenBudget(text,false,prepared.responseType);
-        const streamBody=providerStreamBody(route.provider,{instructions,input:prepared.prompt,maxTokens,effort:route.effort,model:route.model,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium'});
+        const streamBody=providerStreamBody(route.provider,{instructions,input:providerInterviewInput(route.provider,prepared),maxTokens,effort:route.effort,model:route.model,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium'});
         const upstreamUrl=providerStreamUrl(route.provider);
         const upstreamKey=providerApiKey(route.provider);
         if(!upstreamKey)throw new Error(`${route.provider.toUpperCase()}_API_KEY missing on backend`);
