@@ -25,6 +25,10 @@ const CEREBRAS_MODEL = 'gpt-oss-120b';
 const CEREBRAS_REASONING_EFFORT = ['low','medium','high'].includes(String(process.env.CEREBRAS_REASONING_EFFORT || 'medium').trim().toLowerCase())
   ? String(process.env.CEREBRAS_REASONING_EFFORT || 'medium').trim().toLowerCase()
   : 'medium';
+// Cerebras-only answer calibration; other providers keep their existing behavior.
+const CEREBRAS_ANSWER_STYLE = ['points','paragraph'].includes(String(process.env.CEREBRAS_ANSWER_STYLE || 'points').trim().toLowerCase())
+  ? String(process.env.CEREBRAS_ANSWER_STYLE || 'points').trim().toLowerCase() : 'points';
+const CEREBRAS_SPOKEN_TOKEN_BUDGET = Math.min(1600, Math.max(500, Number(process.env.CEREBRAS_SPOKEN_TOKEN_BUDGET || 900) || 900));
 const CEREBRAS_API_BASE = String(process.env.CEREBRAS_API_BASE || 'https://api.cerebras.ai/v1').trim().replace(/\/+$/, '');
 const CEREBRAS_SERVICE_TIER = String(process.env.CEREBRAS_SERVICE_TIER || 'default').trim();
 const HYBRID_CEREBRAS_REASONING_EFFORT = String(process.env.HYBRID_CEREBRAS_REASONING_EFFORT || 'medium').trim().toLowerCase();
@@ -256,6 +260,30 @@ function cerebrasOutputText(data) {
 function cerebrasReasoningEffort(effort=CEREBRAS_REASONING_EFFORT) {
   const value=String(effort||CEREBRAS_REASONING_EFFORT).trim().toLowerCase();
   return ['low','medium','high'].includes(value) ? value : CEREBRAS_REASONING_EFFORT;
+}
+// Applied only to Cerebras. This keeps the same candidate grounding and question
+// routing as Sol, but makes the output short, structured, and easy to speak.
+function cerebrasQualityInstructions(responseType) {
+  const spoken = responseType === 'spoken' || responseType === 'multi';
+  return `\n\nCEREBRAS INTERVIEW ANSWER CONTRACT (CEREBRAS ONLY):
+- Answer the REFRAMED CURRENT INTENT first. Do not answer the previous topic unless the current question explicitly follows it.
+- Treat RETRIEVED EVIDENCE as the only authority for candidate experience. Never invent employer, cloud, production ownership, results or incidents. If unsupported, briefly distinguish conceptual knowledge from hands-on work.
+- Give the same practical precision expected of a strong GPT Sol interview answer: mechanism, concrete commands/configuration or ordered diagnostic checks when relevant, and a clear verification step.
+- Do not dump all available technologies or repeat the question. Avoid introductions, motivational phrases, speculative stories, generic runbooks and unrequested architecture.
+- If the question is a narrow fact, answer in one or two sentences. For comparisons, state the main distinction before details. For troubleshooting, order checks from symptom to root cause to verification.
+- Preserve all explicit user format requirements and all code/snippet/diagram contracts; never shorten working code to satisfy spoken length.
+${spoken ? (CEREBRAS_ANSWER_STYLE === 'points'
+  ? '- FORMAT: Start with one short direct-answer sentence. Then use 2–4 concise numbered points for mechanisms, steps or comparisons when useful. Maximum 6 short spoken lines overall. If the interviewer only acknowledges or closes a topic, reply briefly or do not force a technical answer. No headings or final summary.'
+  : '- FORMAT: Use one concise first-person conversational paragraph, 3–5 short sentences, maximum 6 sentences. No bullets or headings.')
+  : '- FORMAT: Follow the existing response-mode contract exactly; use bullets only where they improve clarity.'}
+- Final answer only. Do not expose hidden reasoning.`;
+}
+function cerebrasAnswerBudget(question, responseType, baseBudget) {
+  // Reasoning tokens count toward the Cerebras completion cap. A 500–650-token
+  // ceiling can produce an empty visible answer when reasoning is enabled.
+  if (responseType === 'spoken' || responseType === 'multi')
+    return Math.max(Number(baseBudget) || 0, CEREBRAS_SPOKEN_TOKEN_BUDGET);
+  return baseBudget;
 }
 function cerebrasChatBody({instructions='',input='',maxTokens=420,stream=false,effort=CEREBRAS_REASONING_EFFORT}) {
   // Cerebras exposes OpenAI GPT-OSS 120B through its OpenAI-compatible Chat Completions API.
@@ -1606,7 +1634,7 @@ async function prepareQuestion(email, question, {inputSource='', requestId='', c
   return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, intentQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt, ...perf } };
 }
 app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, deepseekModel:DEEPSEEK_MODEL, terraModel:OPENAI_TERRA_MODEL, lunaModel:OPENAI_LUNA_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',options:['openai','terra','luna','cerebras','deepseek']}, embeddingModel:EMBEDDING_MODEL }));
-app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, openaiConfigured:!!OPENAI_API_KEY, cerebrasConfigured:!!CEREBRAS_API_KEY, deepseekConfigured:!!DEEPSEEK_API_KEY, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT }));
+app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, cerebrasAnswerStyle:CEREBRAS_ANSWER_STYLE, cerebrasReasoningEffort:CEREBRAS_REASONING_EFFORT, openaiConfigured:!!OPENAI_API_KEY, cerebrasConfigured:!!CEREBRAS_API_KEY, deepseekConfigured:!!DEEPSEEK_API_KEY, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT }));
 
 app.post('/validate-license', (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
@@ -1680,16 +1708,10 @@ app.post('/ask', async (req, res) => {
     if (prepared.rejection) return res.json({ ok:true, answer:prepared.rejection==='NO_ANSWER_REQUIRED'?'':prepared.rejection, model:'local-guard', modelTier:'local', contextPrepared:!!prepared.session, retrieved:[], latency:{...prepared.latency, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt} });
     const route = selectAnswerRoute(text, prepared);
     const llmStart = Date.now();
-    const cerebrasQuality = isChatProvider(route.provider) ? `
-
-CEREBRAS QUALITY CALIBRATION:
-- Match the maturity, relevance and technical precision of a strong senior-engineer interview answer.
-- Current-question intent outranks prior-turn context; do not inherit the previous topic unless this is an explicit follow-up.
-- Do not add plausible-but-unsupported technologies, metrics, files, tools or implementation details.
-- For finite concept lists, be complete on the first response when practical.` : '';
+    const cerebrasQuality = route.provider === 'cerebras' ? cerebrasQualityInstructions(prepared.responseType) : '';
     const data = await providerResponseJson({
       provider:route.provider,model:route.model,instructions:`${copilotInstructions(prepared.responseType)}${cerebrasQuality}`,input:prepared.prompt,
-      effort:route.effort,maxTokens:answerTokenBudget(text,false,prepared.responseType)
+      effort:route.effort,maxTokens:route.provider==='cerebras'?cerebrasAnswerBudget(text,prepared.responseType,answerTokenBudget(text,false,prepared.responseType)):answerTokenBudget(text,false,prepared.responseType)
     });
     let answer=providerOutputText(route.provider,data);
     answer=(await ensureModeConformance({answer,responseType:prepared.responseType,prompt:prepared.prompt,model:route.model,effort:route.effort,provider:route.provider})).answer;
@@ -1967,18 +1989,10 @@ app.post('/ask/stream', async (req, res) => {
       const firstTokenTimer = setTimeout(() => upstreamController.abort('first-token-timeout'), firstTokenTimeoutMs);
       let upstream;
       try {
-        const cerebrasQuality = isChatProvider(route.provider) ? `
-
-CEREBRAS QUALITY CALIBRATION:
-- Match the maturity, relevance and technical precision of a strong senior-engineer interview answer. Do not compensate for uncertainty with extra high-level architecture or invented implementation details.
-- Current-question intent outranks prior-turn context. Answer only the scope actually asked.
-- For experience questions, use first-person details only when RETRIEVED EVIDENCE supports them; otherwise keep the technical explanation generic and truthful.
-- Prefer 1 direct answer plus 2-5 concise explanatory points over broad generic prose.
-- Do not introduce technologies, patterns, metrics, files, pipelines or tools merely because they are plausible.
-- For finite concept lists, be complete on the first response when practical.` : '';
+        const cerebrasQuality = route.provider === 'cerebras' ? cerebrasQualityInstructions(prepared.responseType) : '';
         const instructions=`${copilotInstructions(prepared.responseType)}${cerebrasQuality}`;
         if (streamAttempt === 1) console.log('[PROMPT SIZE]', JSON.stringify({requestId,model:route.model,instructionsChars:instructions.length,inputChars:String(prepared.prompt||'').length,approximateTotalTokens:Math.ceil((instructions.length+String(prepared.prompt||'').length)/4)}));
-        const maxTokens=answerTokenBudget(text,false,prepared.responseType);
+        const maxTokens=route.provider==='cerebras'?cerebrasAnswerBudget(text,prepared.responseType,answerTokenBudget(text,false,prepared.responseType)):answerTokenBudget(text,false,prepared.responseType);
         const streamBody=providerStreamBody(route.provider,{instructions,input:prepared.prompt,maxTokens,effort:route.effort,model:route.model,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium'});
         const upstreamUrl=providerStreamUrl(route.provider);
         const upstreamKey=providerApiKey(route.provider);
