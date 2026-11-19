@@ -263,38 +263,52 @@ function cerebrasReasoningEffort(effort=CEREBRAS_REASONING_EFFORT) {
 }
 // Shared interview-quality policy for the two chat-completions providers only.
 // Sol/OpenAI prompts, streaming protocol, STT, RAG retrieval and UI remain unchanged.
+// Quality v4: targeted, deterministic guardrails for the two chat providers.
+// No extra model call; the OpenAI/Sol prompt and route are left intact.
 function interviewTopic(q, context='') {
   const text=String(q||'').toLowerCase();
   const recent=String(context||'').toLowerCase();
-  // Speech recognition commonly renders "Terraform" as "data home".
-  const terraform=/\bterraform\b|\btfstate\b|\b\.tf\b|\bterraform apply\b/.test(text)
-    || (/\bdata home\b/.test(text) && /\bterraform\b/.test(recent));
-  if(terraform && /\b(two engineers?|simultaneous|concurrent|same infrastructure|same state|locking|lock|at the same time)\b/.test(text))
-    return 'TERRAFORM CONCURRENCY: Two engineers running terraform apply against the same state risk lock contention, conflicting plans, and state corruption. Explain S3 remote state with use_lockfile=true, one approved CI/CD apply per state, separate environment state keys, and cautious force-unlock only after verifying no active run. This is NOT a data pipeline concurrency question.';
-  if(terraform && /\b(dev|stage|staging|prod|production|environment|modules?)\b/.test(text))
-    return 'TERRAFORM ENVIRONMENTS: reusable modules; separate dev/stage/prod root directories and backend state keys; native S3 use_lockfile=true; versioning, IAM isolation, tfvars and approved CI/CD applies. Do not recommend deprecated DynamoDB locking as the default.';
-  if(/\b(eks|kubernetes cluster)\b/.test(text) || (/\b(syntax|snippet|code)\b/.test(text)&&/\beks\b/.test(recent))) {
-    if(/\b(syntax|snippet|write code|show code|basic code)\b/.test(text))return 'EKS BASIC SYNTAX: show concise HCL provider, VPC, two private subnets, EKS cluster and managed node group, with meaningful inline comments. Identify IAM roles, routing and security groups as required additional resources; never invent apply output.';
-    return 'EKS APPROACH: explain VPC, 2 AZs, private/public subnets, NAT/routing, IAM, cluster, managed node group, terraform validate/plan/apply, kubectl verification. No code unless explicitly requested.';
+  const explicitGcp=/\b(gcp|google cloud|bigquery|cloud dlp)\b/.test(text);
+  const explicitAzure=/\b(azure|synapse|adls)\b/.test(text);
+  const explicitAws=/\b(aws|amazon|lake formation|glue|redshift|emr|s3|kinesis)\b/.test(text);
+  const awsContext=explicitAws||(!explicitGcp&&!explicitAzure&&/\baws\b/.test(recent));
+  // Speech recognition often transcribes Terraform as "data home" in a Terraform discussion.
+  const terraform=/\bterraform\b|\btfstate\b|\b\.tf\b/.test(text)
+    || (/\bdata home\b/.test(text)&&/\bterraform\b/.test(recent));
+  if(terraform&&/\b(two engineers?|simultaneous|concurrent|same infrastructure|same state|locking|lock|at the same time)\b/.test(text))
+    return 'TERRAFORM CONCURRENCY: Treat noisy "data home" as Terraform in this context. Two simultaneous applies against the same state cause lock contention and possibly conflicting changes if locking is bypassed. Use remote S3 state with use_lockfile=true, serialized approved CI applies, separate state keys, and verify the active holder before force-unlock. Do not recommend checking terraform state list to detect a lock, or hardcode an assumed lockfile path.';
+  if(terraform&&/\b(ci\/cd|cicd|pipeline|pipe|validate.*deploy|production deployment|integrat.*jenkins|integrat.*gitlab)\b/.test(text))
+    return 'TERRAFORM CI/CD: fmt, init, validate, lint/security scan, plan against the TARGET environment, review the saved plan artifact, require protected production approval, then apply that SAME plan with serialized access to its S3 state (use_lockfile=true). Do not claim a saved plan guarantees zero drift; fail and replan if stale. Avoid grep-based deletion detection and arbitrary skip-check exemptions.';
+  if(terraform&&/\b(dev|stage|staging|prod|production|environment|modules?)\b/.test(text))
+    return 'TERRAFORM ENVIRONMENTS: reusable modules, separate dev/stage/prod root modules, distinct backend state keys, version pinning, tfvars and CI approvals. Use native S3 state locking with use_lockfile=true on supported Terraform versions. S3 backend blocks cannot interpolate variables, locals or path functions: use literal backend values or terraform init -backend-config for each environment. Do not claim encrypt=true alone enables locking. Do not recommend DynamoDB locking as the default.';
+  if(/\b(eks|kubernetes cluster)\b/.test(text)||(/\b(syntax|snippet|code)\b/.test(text)&&/\beks\b/.test(recent))) {
+    if(/\b(syntax|snippet|write code|show code|basic code)\b/.test(text))return 'EKS BASIC SYNTAX: concise HCL provider, VPC/subnet references, EKS cluster and managed node group with meaningful inline comments. Mark omitted IAM roles, routing and security groups as prerequisites; never invent successful apply output.';
+    return 'EKS APPROACH: VPC, two AZs, private/public subnets, NAT/routing, IAM, cluster, managed node group, terraform validate/plan/apply and kubectl verification. No code unless requested.';
   }
   if(/\b(spark|pyspark|ispac|apache spark)\b/.test(text)&&/\b(skew|slow|performance|hours|minutes|degrad|500 gb|three hours)\b/.test(text))
-    return 'SPARK PERFORMANCE: compare baseline and slow runs in Spark History Server: stages, task distribution, shuffle, spills, GC and input file sizes; confirm skew using key frequencies; tune AQE/skew joins or partitioning only after evidence; rerun and verify SLA. Do not discuss streaming checkpoints for a batch job without evidence.';
+    return 'SPARK PERFORMANCE: compare fast vs slow History Server runs by stage/task durations, shuffle, spills, GC, file counts and executor changes; confirm skew using max/median task time and key-frequency counts. AQE skew join handling or key salting can address hot keys. Repartitioning directly on the same hot key does NOT distribute that key across reducers. Check join plan and validate with the original SLA. Do not introduce streaming settings for an unconfirmed batch job.';
   if(/\b(cpu thrott|throttling)\b/.test(text)&&/\b(kubernetes|pods?|containers?|peak|latency)\b/.test(text))
-    return 'KUBERNETES CPU: distinguish CPU CFS quota throttling from node CPU saturation; inspect throttled-period ratio, kubectl top, requests/limits, HPA and node autoscaler; load-test and compare p95/p99. Do not recommend terraform apply -target for routine scaling.';
+    return 'KUBERNETES CPU: distinguish CFS CPU quota throttling from saturated nodes. Measure rate(container_cpu_cfs_throttled_periods_total[5m]) / rate(container_cpu_cfs_periods_total[5m]) with matching pod/container labels, compare to CPU usage and node capacity, inspect requests/limits. If limit throttling with node headroom, adjust CPU LIMIT (not merely request); if node pressure, tune requests/HPA and node autoscaler. Validate p95/p99 under load; no routine terraform apply -target.';
   if(/\b(highly available|high availability|disaster recovery|millions of events)\b/.test(text))
-    return 'AWS HA/DR: answer the NEW architecture question only: Kinesis ingestion, S3 durable raw zone, scalable Spark/Glue/EMR processing, checkpoints/idempotency, Multi-AZ managed services, cross-region DR, RPO/RTO and failover tests. Do NOT continue previous Spark skew discussion.';
-  if(/\b(department|departments|sensitive customer|only.*records|row.level|column.level)\b/.test(text))
-    return 'AWS DATA ACCESS: enforce department-level row filtering and sensitive-column restrictions with Lake Formation data filters and IAM least privilege; verify both allowed and denied access. Do not invent unsupported SQL GRANT syntax or use unrelated GCP DLP.';
-  if(/\b(production issue|real.world|incident|sla breach|pipeline fails|pipeline fills)\b/.test(text))
-    return 'PRODUCTION INCIDENT: explain detection, impact/containment, root cause from logs/metrics, minimal safe remediation, replay/idempotency, SLA verification and postmortem. Never fabricate a personal incident or measured metrics absent resume evidence.';
+    return 'AWS HA/DR: focus ONLY on the current architecture question. Use Kinesis throughput-based capacity (not an invented shards-per-event ratio), durable S3 raw zone, Glue/EMR processing, checkpointing and idempotency, appropriate multi-AZ design, cross-region replicated raw data and tested DR with measurable RPO/RTO. Kinesis is regional; S3 CRR is asynchronous and does not itself guarantee a fixed RPO. Do not claim Route 53 automatically fails over Kinesis stream endpoints, or invent AWS CLI flags and automatic multi-AZ EMR clusters.';
+  if(/\b(department|departments|sensitive customer|only.*records|row.level|column.level|credit)\b/.test(text))
+    return awsContext&&!explicitGcp&&!explicitAzure
+      ? 'AWS DEPARTMENT ACCESS: In this AWS discussion use Lake Formation data filters for row-level department restrictions and column exclusions, IAM least privilege, Glue catalog/Lake Formation permissions, and controlled Redshift row-level security/masking only if Redshift is the query engine. Deny raw S3 access and verify positive AND negative tests. Do not switch to BigQuery/GCP, use invented SQL GRANT syntax, or treat S3 prefixes alone as row-level security.'
+      : 'DEPARTMENT DATA ACCESS: Stay on the explicitly requested cloud/warehouse. Restrict rows by department, mask/hide sensitive columns, deny raw access and verify both allowed and denied queries. Do not mix provider-specific policies, APIs or state backends.';
+  if(/\b(governance|least privilege|security|iam polic|pii)\b/.test(text))
+    return awsContext&&!explicitGcp&&!explicitAzure
+      ? 'AWS GOVERNANCE: lead with AWS IAM least privilege per workload, scoped S3/KMS/Lake Formation permissions, encryption, CloudTrail/Access Analyzer verification and CI policy checks. Mention other clouds only if specifically asked. Do not claim a named employer, deployment, incident, or production metric without resume evidence; avoid nonsensical DynamoDB "versioning" for S3 state locks.'
+      : 'CLOUD SECURITY: prioritize the cloud named by the interviewer; enforce least privilege, scoped data access, encryption and audit. Do not mix incompatible cloud APIs or invent first-person project facts.';
+  if(/\b(production issue|real.world|incident|sla breach|pipeline fails|pipeline fills|troubleshoot.*production)\b/.test(text))
+    return 'PRODUCTION INCIDENT: distinguish a request for a REAL personal incident from a hypothetical. For a personal example, only assert employer, exact root cause, numbers, SLA and actions that are explicitly supported by retrieved resume evidence; otherwise give a clearly labelled representative approach without claiming it happened. Cover alert/impact, containment, logs/metrics to establish root cause, safe fix, idempotent replay, verification and postmortem. Do not assume skew or OOM before checking evidence; do not recommend blindly overwriting S3 outputs or arbitrary terraform apply -target.';
   return '';
 }
 function chatQualityInstructions(responseType, question='', context='') {
   const topic=interviewTopic(question,context);
   const spoken=responseType==='spoken'||responseType==='multi';
-  return `Answer as a senior engineer in a live interview. The LAST complete interviewer question controls the topic and requested output; earlier clauses are background only. If the latest question changes subjects, discard previous-topic advice. Use previous conversation only to resolve an actual pronoun/follow-up. Ignore acknowledgments and STT fillers.
-${topic ? `QUESTION-SPECIFIC GUIDANCE: ${topic}\n` : ''}Start with a direct 1–2 sentence answer. Follow with 3–5 short, concrete technical points only when useful. Prefer real commands, checks, failure mechanisms and validation over lists of tools. Do not mix clouds or unrelated technologies. Never claim personal production experience, numbers or outcomes unless supported by the provided resume. Never invent logs, commands' output or deployments. Avoid unsafe targeted Terraform applies and outdated DynamoDB state-locking recommendations; prefer native S3 lockfiles where supported.
-${spoken ? 'Keep the answer concise and naturally speakable, ordinarily 5–7 lines; prioritize accuracy over filling a fixed count.' : 'Honor the exact requested code/diagram scope, include concise inline comments for code and do not generate unrelated scaffolding.'}
+  return `Answer as a senior engineer in a live interview. Answer the LATEST complete interviewer request; earlier speech and prior answers are only context for true follow-ups. An explicit cloud or technology in the current question overrides history. Ignore acknowledgments and STT fillers.
+${topic?`CURRENT-QUESTION TECHNICAL CHECKS: ${topic}\n`:''}Give a direct 1–2 sentence answer, then 3–5 concise, technically specific points when useful. Prefer root-cause evidence, exact relevant metrics, safe implementation and verification. Never combine unrelated cloud platforms or unrelated prior questions. Do not fabricate personal experience, employer-specific work, incident metrics, CLI flags, API capabilities or deployment outcomes. Use retrieved resume facts for first-person claims; if unsupported, describe a realistic approach without falsely claiming it happened. Do not treat a guessed metric threshold as an established SLA.
+${spoken?'Keep it speakable, ordinarily 5–7 short lines; correctness beats length.':'Honor the actual code/diagram scope; use meaningful inline code comments and no unrelated scaffolding.'}
 Output only the answer; no internal reasoning.`;
 }
 function providerInterviewInstructions(provider,responseType,question='',context='') {
@@ -302,9 +316,8 @@ function providerInterviewInstructions(provider,responseType,question='',context
     ? chatQualityInstructions(responseType,question,context)
     : copilotInstructions(responseType);
 }
-// Compact the provider input without changing how the shared prompt or retrieval is built.
-// Keep resume/JD evidence and the current question, but exclude old answers and
-// conflicting legacy formatting policies for Cerebras and DeepSeek.
+// The prepared evidence stays available, but old candidate answers and legacy
+// formatting instructions are excluded from both chat-completions providers.
 function providerInterviewInput(provider,prepared) {
   if(provider!=='cerebras'&&provider!=='deepseek')return prepared.prompt;
   const prompt=String(prepared.prompt||'');
@@ -315,12 +328,14 @@ function providerInterviewInput(provider,prepared) {
     return (j>=0?tail.slice(0,j):tail).trim();
   };
   const profile=section('CANDIDATE PROFILE\n','\n\nJOB ALIGNMENT').slice(0,1100);
-  const evidence=section('RETRIEVED EVIDENCE\n','\n\nRECENT INTERVIEW CONTEXT').slice(0,2500);
+  const evidence=section('RETRIEVED EVIDENCE\n','\n\nRECENT INTERVIEW CONTEXT').slice(0,3000);
   const latest=String(prepared.intentQuestion||'').trim();
   const raw=String(prepared.correctedQuestion||'').trim();
-  const previous=prepared.followupInfo?.isFollowup ? String(prepared.followupInfo.resolvedQuestion||'').slice(0,550) : '';
+  const previous=prepared.followupInfo?.isFollowup?String(prepared.followupInfo.resolvedQuestion||'').slice(0,450):'';
   const userPreferences=section('USER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n','\n\nINPUT SOURCE').slice(0,450);
-  return `CURRENT INTERVIEWER QUESTION (highest priority):\n${latest}\n${raw!==latest?`RAW STT FOR DISAMBIGUATION ONLY:\n${raw.slice(-950)}\n`:''}${previous?`GENUINE FOLLOW-UP CONTEXT:\n${previous}\n`:''}${profile?`RESUME PROFILE (personal claims require evidence):\n${profile}\n`:''}${evidence&&evidence!=='No prepared evidence matched.'?`RETRIEVED RESUME EVIDENCE:\n${evidence}\n`:''}${userPreferences?`PRESENTATION PREFERENCES:\n${userPreferences}\n`:''}Answer only the current question.`;
+  // Only use current-question evidence and the current interview topic for personal claims.
+  // Do not supply unrelated older answers as examples to imitate.
+  return `CURRENT INTERVIEWER QUESTION (highest priority):\n${latest}\n${raw!==latest?`RAW STT FOR DISAMBIGUATION ONLY:\n${raw.slice(-950)}\n`:''}${previous?`GENUINE FOLLOW-UP CONTEXT:\n${previous}\n`:''}${profile?`RESUME PROFILE (personal claims require evidence):\n${profile}\n`:''}${evidence&&evidence!=='No prepared evidence matched.'?`RETRIEVED RESUME EVIDENCE:\n${evidence}\n`:''}${userPreferences?`PRESENTATION PREFERENCES:\n${userPreferences}\n`:''}Answer only the current question. If asked for personal experience, do not invent a specific incident when resume evidence lacks it.`;
 }
 function cerebrasAnswerBudget(question, responseType, baseBudget) {
   // Reasoning tokens count toward the Cerebras completion cap. A 500–650-token
