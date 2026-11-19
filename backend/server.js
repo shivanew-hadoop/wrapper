@@ -261,22 +261,46 @@ function cerebrasReasoningEffort(effort=CEREBRAS_REASONING_EFFORT) {
   const value=String(effort||CEREBRAS_REASONING_EFFORT).trim().toLowerCase();
   return ['low','medium','high'].includes(value) ? value : CEREBRAS_REASONING_EFFORT;
 }
-// Applied only to Cerebras. This keeps the same candidate grounding and question
-// routing as Sol, but makes the output short, structured, and easy to speak.
-function cerebrasQualityInstructions(responseType) {
-  const spoken = responseType === 'spoken' || responseType === 'multi';
-  return `\n\nCEREBRAS INTERVIEW ANSWER CONTRACT (CEREBRAS ONLY):
-- Answer the REFRAMED CURRENT INTENT first. Do not answer the previous topic unless the current question explicitly follows it.
-- Treat RETRIEVED EVIDENCE as the only authority for candidate experience. Never invent employer, cloud, production ownership, results or incidents. If unsupported, briefly distinguish conceptual knowledge from hands-on work.
-- Give the same practical precision expected of a strong GPT Sol interview answer: mechanism, concrete commands/configuration or ordered diagnostic checks when relevant, and a clear verification step.
-- Do not dump all available technologies or repeat the question. Avoid introductions, motivational phrases, speculative stories, generic runbooks and unrequested architecture.
-- If the question is a narrow fact, answer in one or two sentences. For comparisons, state the main distinction before details. For troubleshooting, order checks from symptom to root cause to verification.
-- Preserve all explicit user format requirements and all code/snippet/diagram contracts; never shorten working code to satisfy spoken length.
-${spoken ? (CEREBRAS_ANSWER_STYLE === 'points'
-  ? '- FORMAT: Start with one short direct-answer sentence. Then use 2–4 concise numbered points for mechanisms, steps or comparisons when useful. Maximum 6 short spoken lines overall. If the interviewer only acknowledges or closes a topic, reply briefly or do not force a technical answer. No headings or final summary.'
-  : '- FORMAT: Use one concise first-person conversational paragraph, 3–5 short sentences, maximum 6 sentences. No bullets or headings.')
-  : '- FORMAT: Follow the existing response-mode contract exactly; use bullets only where they improve clarity.'}
-- Final answer only. Do not expose hidden reasoning.`;
+// Cerebras-only calibration: concise instructions with deterministic question intent.
+// No second model request; Sol, DeepSeek, RAG and client contracts are unchanged.
+function cerebrasIntentHint(question, responseType, context='') {
+  const q=String(question||'').toLowerCase();
+  const contextTail=String(context||'').toLowerCase().slice(-3500);
+  const eksFollowup=/\b(basic syntax|some syntax|add.*syntax|write.*code|terraform syntax)\b/.test(q) && /\b(eks|aws_eks_cluster|kubernetes cluster)\b/.test(contextTail);
+  if (/\b(terraform|tfstate|\.tf|infrastructure as code)\b/.test(q) && /\b(simultaneous|concurrent|two engineers|same infrastructure|same state|locking|lock)\b/.test(q))
+    return 'TERRAFORM_CONCURRENCY: discuss remote state, native S3 use_lockfile locking, serialized CI/CD applies, safe unlock and separate-state collisions. Never interpret as ETL concurrency.';
+  // Spoken transcripts may mention writing code before the final question asks for an approach.
+  // Give the latest explicit instruction precedence instead of keyword-counting the whole turn.
+  if (/\b(eks|kubernetes cluster)\b/.test(q) || eksFollowup) {
+    if (/\b(approach|how (?:would|will|are) you (?:proceed|start)|first.*approach)\b/.test(q) &&
+        !/\b(now|then|next)\b.{0,30}\b(write|show|add)\b/.test(q))
+      return 'EKS_APPROACH: give ordered provider/backend, VPC/public-private subnets/routes/NAT, IAM, EKS, managed node group, terraform plan/apply and kubectl verification. No code unless the latest request explicitly asks for code.';
+    if (/\b(basic syntax|some syntax|small snippet|add.*syntax|write.*code|notepad)\b/.test(q))
+      return 'EKS_BASIC_SYNTAX: provide a compact Terraform provider, VPC, two private subnets, aws_eks_cluster and aws_eks_node_group with inline comments; explain referenced IAM roles and networking must be defined separately. Never fabricate terraform apply results.';
+  }
+  if (/\b(spark|pyspark)\b/.test(q) && /\b(skew|slow|performance|hours|minutes|degrad)\b/.test(q))
+    return 'SPARK_DIAGNOSIS: compare Spark History Server stage/task duration, shuffle read and spills, skewed-key frequency, AQE skew join, executor capacity, then verify baseline runtime.';
+  if (/\b(cpu thrott|throttling)\b/.test(q) && /\b(kubernetes|pod|container|peak|latency)\b/.test(q))
+    return 'K8S_THROTTLING: distinguish CFS quota throttling from node saturation; inspect Prometheus throttled periods, requests/limits, HPA, node headroom; validate P95/P99.';
+  if (/\b(terraform)\b/.test(q) && /\b(dev|stage|prod|environment|module)\b/.test(q))
+    return 'TERRAFORM_ENVIRONMENTS: reusable versioned modules, isolated environment roots and state keys, tfvars, IAM boundaries, PR plan and approved apply.';
+  if (responseType==='code') return 'CODE: honor exact requested scope; executable code with meaningful inline comments. No fabricated outputs.';
+  return '';
+}
+function cerebrasQualityInstructions(responseType, question='', context='') {
+  const hint=cerebrasIntentHint(question,responseType,context);
+  const spoken=responseType==='spoken'||responseType==='multi';
+  return `You are the candidate answering the CURRENT interviewer question. Use retrieved resume facts only for personal experience; never invent ownership, metrics or incidents. JD is not evidence of experience. Ignore speech fillers and use previous context only for genuine follow-ups.
+${hint ? `SPECIFIC INTENT: ${hint}\n` : ''}Answer the exact request, not a nearby topic. Begin with one direct, natural sentence. Be technically specific: name relevant commands, metrics, configuration and failure mechanisms; order diagnosis, fix and verification for troubleshooting. Avoid generic advice, repeated points, unnecessary architecture, greetings and invented production stories.
+${spoken ? (CEREBRAS_ANSWER_STYLE==='points' ? 'FORMAT: 3–5 compact numbered technical points after the direct sentence when the question merits steps; at most six spoken lines for ordinary questions. Short facts need only 1–2 sentences. Do not force bullets for introductions or yes/no answers.' : 'FORMAT: concise natural first-person paragraph, maximum six sentences.') : 'FORMAT: follow requested code, snippet or diagram scope exactly. For code include useful inline comments; do not add scaffolding unless requested.'}
+Output final answer only. Do not expose reasoning.`;
+}
+// Avoid the general spoken no-bullets contract conflicting with the Cerebras
+// point-wise format. Other providers continue using copilotInstructions unchanged.
+function providerInterviewInstructions(provider,responseType,question='',context='') {
+  return provider==='cerebras'
+    ? cerebrasQualityInstructions(responseType,question,context)
+    : copilotInstructions(responseType);
 }
 function cerebrasAnswerBudget(question, responseType, baseBudget) {
   // Reasoning tokens count toward the Cerebras completion cap. A 500–650-token
@@ -1708,9 +1732,9 @@ app.post('/ask', async (req, res) => {
     if (prepared.rejection) return res.json({ ok:true, answer:prepared.rejection==='NO_ANSWER_REQUIRED'?'':prepared.rejection, model:'local-guard', modelTier:'local', contextPrepared:!!prepared.session, retrieved:[], latency:{...prepared.latency, llmMs:0, totalMs:Date.now()-prepared.latency.startedAt} });
     const route = selectAnswerRoute(text, prepared);
     const llmStart = Date.now();
-    const cerebrasQuality = route.provider === 'cerebras' ? cerebrasQualityInstructions(prepared.responseType) : '';
+    const instructions=providerInterviewInstructions(route.provider,prepared.responseType,prepared.intentQuestion||text,prepared.prompt);
     const data = await providerResponseJson({
-      provider:route.provider,model:route.model,instructions:`${copilotInstructions(prepared.responseType)}${cerebrasQuality}`,input:prepared.prompt,
+      provider:route.provider,model:route.model,instructions,input:prepared.prompt,
       effort:route.effort,maxTokens:route.provider==='cerebras'?cerebrasAnswerBudget(text,prepared.responseType,answerTokenBudget(text,false,prepared.responseType)):answerTokenBudget(text,false,prepared.responseType)
     });
     let answer=providerOutputText(route.provider,data);
@@ -1989,8 +2013,7 @@ app.post('/ask/stream', async (req, res) => {
       const firstTokenTimer = setTimeout(() => upstreamController.abort('first-token-timeout'), firstTokenTimeoutMs);
       let upstream;
       try {
-        const cerebrasQuality = route.provider === 'cerebras' ? cerebrasQualityInstructions(prepared.responseType) : '';
-        const instructions=`${copilotInstructions(prepared.responseType)}${cerebrasQuality}`;
+        const instructions=providerInterviewInstructions(route.provider,prepared.responseType,prepared.intentQuestion||text,prepared.prompt);
         if (streamAttempt === 1) console.log('[PROMPT SIZE]', JSON.stringify({requestId,model:route.model,instructionsChars:instructions.length,inputChars:String(prepared.prompt||'').length,approximateTotalTokens:Math.ceil((instructions.length+String(prepared.prompt||'').length)/4)}));
         const maxTokens=route.provider==='cerebras'?cerebrasAnswerBudget(text,prepared.responseType,answerTokenBudget(text,false,prepared.responseType)):answerTokenBudget(text,false,prepared.responseType);
         const streamBody=providerStreamBody(route.provider,{instructions,input:prepared.prompt,maxTokens,effort:route.effort,model:route.model,verbosity:prepared.responseType==='spoken'?LLM_VERBOSITY:'medium'});
