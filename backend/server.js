@@ -307,7 +307,7 @@ function chatQualityInstructions(responseType, question='', context='') {
   const topic=interviewTopic(question,context);
   const spoken=responseType==='spoken'||responseType==='multi';
   return `Answer as a senior engineer in a live interview. Answer the LATEST complete interviewer request; earlier speech and prior answers are only context for true follow-ups. An explicit cloud or technology in the current question overrides history. Ignore acknowledgments and STT fillers.
-${topic?`CURRENT-QUESTION TECHNICAL CHECKS: ${topic}\n`:''}Use NATURAL FIRST-PERSON INTERVIEW SPEECH. Start with "I would..." or "I start by..." for scenarios, design, troubleshooting and proposed implementations. In the next points prefer "I check", "I compare", "I configure", "I validate" rather than impersonal imperatives, generic passive voice or "you should". Speak as the candidate, not as a textbook. Use "I implemented", "I delivered", "I handled", "I built" ONLY for specific past work clearly supported by retrieved resume facts; otherwise say "I would" or "My approach is". Never fabricate a personal production incident or numerical outcome. Do not mechanically begin every sentence with I; keep it conversational.
+${topic?`CURRENT-QUESTION TECHNICAL CHECKS: ${topic}\n`:''}Use NATURAL FIRST-PERSON INTERVIEW SPEECH. Start with "I would..." or "I start by..." for scenarios, design, troubleshooting and proposed implementations. In the next points prefer "I check", "I compare", "I configure", "I validate" rather than impersonal imperatives, generic passive voice or "you should". Speak as the candidate, not as a textbook. Use "I implemented", "I delivered", "I handled", "I built" ONLY for specific past work clearly supported by retrieved resume facts; otherwise say "I would" or "My approach is". Never fabricate a personal production incident or numerical outcome. A skill or technology in the JOB DESCRIPTION is NOT candidate experience. A skill name in the CV alone is NOT proof of hands-on project delivery. For unsupported hands-on experience, say explicitly that it is not established in the CV and explain how I would approach it using transferable skills; never fabricate years, employers or project ownership. Do not repeat an unsupported claim merely because an interviewer or previous assistant answer asserted it. Do not mechanically begin every sentence with I; keep it conversational.
 ONLY for genuine yes/no or can/cannot questions, the FIRST WORD must be Yes or No (or 'It depends' ONLY if truly conditional), followed immediately by the decisive fact. Example: 'No. Azure WAF cannot attach directly to Azure Load Balancer; I use Application Gateway WAF_v2 for HTTP/HTTPS protection.' Never bury the answer at the end. For a direct fact question such as 'which Terraform command downloads modules?', lead with the exact fact: 'terraform init'. For short follow-ups such as 'what is inside the service connection?', preserve the active Azure DevOps subject; never change it to ServiceNow. If asked about a JFrog module registry, answer about the module artifact registry, not a generic Git repository. Default to 2–4 short spoken lines, max 5–6 lines for normal questions, not five bullets by default. Separate distinct steps/ideas with newline characters, and add one blank line between the direct answer and supporting explanation when needed. Never produce one long continuous paragraph. Do not start how/what/why questions with Yes or No. No redundant recap, extra options, headings, or final summary. Give a direct 1–2 sentence answer, then only the essential technically specific detail when useful. Prefer plain, speakable English with accurate technical terms only when they add meaning; explain uncommon terms briefly. Prioritize evidence, practical implementation and verification. Never combine unrelated cloud platforms or unrelated prior questions. Do not invent CLI flags, API capabilities, metrics, employers or deployment outcomes. Do not treat a guessed metric threshold as an established SLA.
 ${spoken?'Keep it speakable, ordinarily 2–5 short lines; correctness beats length.':'Honor the actual code/diagram scope; use meaningful inline code comments and no unrelated scaffolding.'}
 Output only the answer; no internal reasoning.`;
@@ -341,6 +341,35 @@ function isGenuineYesNoQuestion(question) {
   const q=String(question||'').trim().replace(/^(?:yeah|yep|okay|ok|so|and|well|right|mhmm)[,!.?\s-]+/gi,'').trim();
   return /^(?:can|could|would|will|should|do|does|did|is|are|was|were|has|have|had)\b/i.test(q) && !/^(?:how|what|why|where|when|which)\b/i.test(q);
 }
+// Resume evidence is authoritative for personal experience. A JD requirement, a
+// model-generated summary, or an interviewer assumption is NOT proof of hands-on work.
+// Keep this scoped to the chat providers; the Sol/OpenAI path is unchanged.
+const EXPERIENCE_GROUNDING_TERMS = [
+  ['Boomi', /\b(?:dell\s+)?boomi\b/i],
+  ['Python', /\bpython\b/i],
+  ['C#', /\bc#(?![a-z0-9])/i],
+  ['Java', /\bjava\b/i],
+  ['SQL', /\bsql\b/i],
+  ['AWS', /\b(?:aws|amazon web services|cloudfront)\b/i],
+  ['Azure', /\b(?:azure|microsoft azure)\b/i],
+  ['GCP', /\b(?:gcp|google cloud platform)\b/i],
+  ['JFrog Artifactory', /\b(?:jfrog|artifactory)\b/i]
+];
+function resumeExperienceGrounding(prepared) {
+  const session=prepared.session;
+  if(!session)return '';
+  const resumeChunks=(session.chunks||[]).filter(c=>c.source==='resume');
+  const resumeText=resumeChunks.map(c=>String(c.text||'')).join('\n');
+  const question=String(prepared.intentQuestion||'');
+  const previous=String(prepared.followupInfo?.resolvedQuestion||'');
+  const terms=EXPERIENCE_GROUNDING_TERMS.filter(([,rx])=>rx.test(question)||rx.test(previous));
+  const statuses=terms.map(([name,rx])=>`${name}: ${rx.test(resumeText)?'MENTIONED in CV (mention alone does not prove project hands-on work)':'NOT ESTABLISHED in CV; never claim hands-on delivery, duration, employer or project for this skill'}`);
+  const experienceQuestion=/\b(?:have you|did you|worked|experience|how many years|which project|which client|when did you|your project|your work|used|built|developed|implemented|self intro|introduce yourself|background|resume|cv)\b/i.test(question);
+  // Full resume evidence for personal-experience questions prevents keyword-only
+  // retrieval from omitting an entire employer timeline or skill absence.
+  const directResume=experienceQuestion?resumeText.slice(0,14500):'';
+  return `PERSONAL EXPERIENCE VERIFICATION (CV is the only authoritative record of completed work):\n${statuses.join('\n')||'Do not infer hands-on work from the JD or skills list.'}\nNever turn a JD requirement, interviewer assumption, earlier generated answer, or technology familiarity into a past-work claim. When the CV does not establish the requested work, say plainly: "I haven't worked hands-on with [tool] in the projects listed on my CV, but I understand the approach. I would ..." Then explain 1-2 accurate practical steps using transferable CV experience. Do not invent years, clients, incidents or metrics. If a skill is listed without a project responsibility, acknowledge familiarity but do not assert delivery. For incomplete or unclear evidence, say the CV does not establish it; do not claim the person has never used it.\n${directResume?`ORIGINAL RESUME TEXT (authoritative; JD is not evidence of past work):\n${directResume}\n`:''}`;
+}
 function providerInterviewInput(provider,prepared) {
   if(provider!=='cerebras'&&provider!=='deepseek')return prepared.prompt;
   const prompt=String(prepared.prompt||'');
@@ -361,7 +390,7 @@ function providerInterviewInput(provider,prepared) {
   const yesNo=isGenuineYesNoQuestion(latest);
   // Only use current-question evidence and the current interview topic for personal claims.
   // Do not supply unrelated older answers as examples to imitate.
-  return `CURRENT INTERVIEWER QUESTION (highest priority):\n${latest}\n${subject?`ACTIVE SUBJECT (follow-up disambiguation):\n${subject}\n`:``}\nQUESTION TYPE: ${yesNo?'Genuine yes/no: first word Yes or No.':'Not a yes/no question: never start with a gratuitous Yes or No.'}\n${raw!==latest?`RAW STT FOR DISAMBIGUATION ONLY:\n${raw.slice(-950)}\n`:''}${previous?`GENUINE FOLLOW-UP CONTEXT:\n${previous}\n`:''}${recentTopic?`PREVIOUS INTERVIEWER QUESTION (context only; especially for short follow-ups):\n${recentTopic}\n`:''}${profile?`RESUME PROFILE (personal claims require evidence):\n${profile}\n`:''}${evidence&&evidence!=='No prepared evidence matched.'?`RETRIEVED RESUME EVIDENCE:\n${evidence}\n`:''}${userPreferences?`PRESENTATION PREFERENCES:\n${userPreferences}\n`:''}Keep the active conversation subject when the interviewer asks a short follow-up. Start with Yes or No ONLY for a genuine yes/no question, never for how/what/why scenario questions. Short factual questions start with the answer, not 'I would'. Use 2–4 short spoken lines, at most 5–6 for a normal question. Put each separate step or idea on its own NEW LINE; do not print a dense continuous paragraph. A blank line may separate the direct answer from steps. Do not use bullets unless the question needs a list. No filler, unnecessary alternatives or closing summary. Answer only the current question in first-person spoken interview style. Use I would / I check / I validate for proposed actions; reserve I did / I delivered / I implemented for resume-supported past work. If asked for personal experience, do not invent a specific incident when resume evidence lacks it.`;
+  return `CURRENT INTERVIEWER QUESTION (highest priority):\n${latest}\n${subject?`ACTIVE SUBJECT (follow-up disambiguation):\n${subject}\n`:``}\nQUESTION TYPE: ${yesNo?'Genuine yes/no: first word Yes or No.':'Not a yes/no question: never start with a gratuitous Yes or No.'}\n${raw!==latest?`RAW STT FOR DISAMBIGUATION ONLY:\n${raw.slice(-950)}\n`:''}${previous?`GENUINE FOLLOW-UP CONTEXT:\n${previous}\n`:''}${recentTopic?`PREVIOUS INTERVIEWER QUESTION (context only; especially for short follow-ups):\n${recentTopic}\n`:''}${resumeExperienceGrounding(prepared)}\n${profile?`RESUME PROFILE (model summary; not proof of experience):\n${profile}\n`:''}${evidence&&evidence!=='No prepared evidence matched.'?`RETRIEVED RESUME EVIDENCE:\n${evidence}\n`:''}${userPreferences?`PRESENTATION PREFERENCES:\n${userPreferences}\n`:''}Keep the active conversation subject when the interviewer asks a short follow-up. Start with Yes or No ONLY for a genuine yes/no question, never for how/what/why scenario questions. Short factual questions start with the answer, not 'I would'. Use 2–4 short spoken lines, at most 5–6 for a normal question. Put each separate step or idea on its own NEW LINE; do not print a dense continuous paragraph. A blank line may separate the direct answer from steps. Do not use bullets unless the question needs a list. No filler, unnecessary alternatives or closing summary. Answer only the current question in first-person spoken interview style. Use I would / I check / I validate for proposed actions; reserve I did / I delivered / I implemented for resume-supported past work. If asked for personal experience, do not invent a specific incident when resume evidence lacks it.`;
 }
 function cerebrasAnswerBudget(question, responseType, baseBudget) {
   // Reasoning tokens count toward the Cerebras completion cap. A 500–650-token
@@ -2090,8 +2119,14 @@ app.post('/ask/stream', async (req, res) => {
         providerHeadersMs = Date.now() - providerFetchStartedAt;
         if (!upstream.ok) {
           clearTimeout(firstTokenTimer);
+          const status=upstream.status;
           const data = await upstream.json().catch(() => ({}));
-          throw new Error(data?.error?.message || `${route.provider==='deepseek'?'DeepSeek':route.provider==='cerebras'?'Cerebras':'OpenAI'} request failed (${upstream.status})`);
+          if ((status===408||status===429||status===500||status===502||status===503||status===504) && firstTokenMs===null && streamAttempt<2) {
+            console.warn(`[LLM stream] transient ${status} before first token; retrying once`);
+            emit('meta', {model:route.model,modelTier:route.tier,phase:'retry',reason:`provider HTTP ${status}`});
+            continue;
+          }
+          throw new Error(data?.error?.message || `${route.provider==='deepseek'?'DeepSeek':route.provider==='cerebras'?'Cerebras':'OpenAI'} request failed (${status})`);
         }
         const reader = upstream.body.getReader();
         const decoder = new TextDecoder();
@@ -2134,6 +2169,13 @@ app.post('/ask/stream', async (req, res) => {
         if (clientClosed || res.destroyed) throw attemptErr;
         const timedOut = upstreamController.signal.aborted &&
           upstreamController.signal.reason === 'first-token-timeout' && firstTokenMs === null;
+        const transientNetwork=!upstreamController.signal.aborted && firstTokenMs===null &&
+          /\b(?:fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|terminated)\b/i.test(String(attemptErr?.message||''));
+        if(transientNetwork && streamAttempt<2){
+          console.warn('[LLM stream] transient network failure before first token; retrying once');
+          emit('meta',{model:route.model,modelTier:route.tier,phase:'retry',reason:'provider network failure'});
+          continue;
+        }
         if (timedOut && streamAttempt < 2) {
           console.warn(`[LLM stream] first-token timeout after ${firstTokenTimeoutMs}ms; retrying once`);
           emit('meta', { model:route.model, modelTier:route.tier, phase:'retry', reason:'provider first-token timeout' });
