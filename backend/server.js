@@ -308,8 +308,8 @@ function chatQualityInstructions(responseType, question='', context='') {
   const spoken=responseType==='spoken'||responseType==='multi';
   return `Answer as a senior engineer in a live interview. Answer the LATEST complete interviewer request; earlier speech and prior answers are only context for true follow-ups. An explicit cloud or technology in the current question overrides history. Ignore acknowledgments and STT fillers.
 ${topic?`CURRENT-QUESTION TECHNICAL CHECKS: ${topic}\n`:''}Use NATURAL FIRST-PERSON INTERVIEW SPEECH. Start with "I would..." or "I start by..." for scenarios, design, troubleshooting and proposed implementations. In the next points prefer "I check", "I compare", "I configure", "I validate" rather than impersonal imperatives, generic passive voice or "you should". Speak as the candidate, not as a textbook. Use "I implemented", "I delivered", "I handled", "I built" ONLY for specific past work clearly supported by retrieved resume facts; otherwise say "I would" or "My approach is". Never fabricate a personal production incident or numerical outcome. Do not mechanically begin every sentence with I; keep it conversational.
-Give a direct 1–2 sentence answer, then 3–5 concise, technically specific points when useful. Prefer plain, speakable English with accurate technical terms only when they add meaning; explain uncommon terms briefly. Prioritize evidence, practical implementation and verification. Never combine unrelated cloud platforms or unrelated prior questions. Do not invent CLI flags, API capabilities, metrics, employers or deployment outcomes. Do not treat a guessed metric threshold as an established SLA.
-${spoken?'Keep it speakable, ordinarily 5–7 short lines; correctness beats length.':'Honor the actual code/diagram scope; use meaningful inline code comments and no unrelated scaffolding.'}
+For a yes/no or can/cannot question, the FIRST WORD must be Yes or No (or 'It depends' ONLY if truly conditional), followed immediately by the decisive fact. Example: 'No. Azure WAF cannot attach directly to Azure Load Balancer; I use Application Gateway WAF_v2 for HTTP/HTTPS protection.' Never bury the answer at the end. For a direct fact question such as 'which Terraform command downloads modules?', lead with the exact fact: 'terraform init'. For short follow-ups such as 'what is inside the service connection?', preserve the active Azure DevOps subject; never change it to ServiceNow. If asked about a JFrog module registry, answer about the module artifact registry, not a generic Git repository. Default to 2–4 short spoken sentences, max 5–6 lines for normal questions, not five bullets by default. No redundant recap, extra options, headings, or final summary. Give a direct 1–2 sentence answer, then only the essential technically specific detail when useful. Prefer plain, speakable English with accurate technical terms only when they add meaning; explain uncommon terms briefly. Prioritize evidence, practical implementation and verification. Never combine unrelated cloud platforms or unrelated prior questions. Do not invent CLI flags, API capabilities, metrics, employers or deployment outcomes. Do not treat a guessed metric threshold as an established SLA.
+${spoken?'Keep it speakable, ordinarily 2–5 short lines; correctness beats length.':'Honor the actual code/diagram scope; use meaningful inline code comments and no unrelated scaffolding.'}
 Output only the answer; no internal reasoning.`;
 }
 function providerInterviewInstructions(provider,responseType,question='',context='') {
@@ -333,10 +333,11 @@ function providerInterviewInput(provider,prepared) {
   const latest=String(prepared.intentQuestion||'').trim();
   const raw=String(prepared.correctedQuestion||'').trim();
   const previous=prepared.followupInfo?.isFollowup?String(prepared.followupInfo.resolvedQuestion||'').slice(0,450):'';
+  const recentTopic=prepared.session?.turns?.length?String(prepared.session.turns[prepared.session.turns.length-1].question||'').slice(0,400):'';
   const userPreferences=section('USER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n','\n\nINPUT SOURCE').slice(0,450);
   // Only use current-question evidence and the current interview topic for personal claims.
   // Do not supply unrelated older answers as examples to imitate.
-  return `CURRENT INTERVIEWER QUESTION (highest priority):\n${latest}\n${raw!==latest?`RAW STT FOR DISAMBIGUATION ONLY:\n${raw.slice(-950)}\n`:''}${previous?`GENUINE FOLLOW-UP CONTEXT:\n${previous}\n`:''}${profile?`RESUME PROFILE (personal claims require evidence):\n${profile}\n`:''}${evidence&&evidence!=='No prepared evidence matched.'?`RETRIEVED RESUME EVIDENCE:\n${evidence}\n`:''}${userPreferences?`PRESENTATION PREFERENCES:\n${userPreferences}\n`:''}Answer only the current question in first-person spoken interview style. Use I would / I check / I validate for proposed actions; reserve I did / I delivered / I implemented for resume-supported past work. If asked for personal experience, do not invent a specific incident when resume evidence lacks it.`;
+  return `CURRENT INTERVIEWER QUESTION (highest priority):\n${latest}\n${raw!==latest?`RAW STT FOR DISAMBIGUATION ONLY:\n${raw.slice(-950)}\n`:''}${previous?`GENUINE FOLLOW-UP CONTEXT:\n${previous}\n`:''}${recentTopic?`PREVIOUS INTERVIEWER QUESTION (context only; especially for short follow-ups):\n${recentTopic}\n`:''}${profile?`RESUME PROFILE (personal claims require evidence):\n${profile}\n`:''}${evidence&&evidence!=='No prepared evidence matched.'?`RETRIEVED RESUME EVIDENCE:\n${evidence}\n`:''}${userPreferences?`PRESENTATION PREFERENCES:\n${userPreferences}\n`:''}Keep the active conversation subject when the interviewer asks a short follow-up. Yes/no questions start with Yes or No before any first-person explanation. Short factual questions start with the answer, not 'I would'. Use at most 5–6 short lines, normally 2–4. No filler, unnecessary alternatives or closing summary. Answer only the current question in first-person spoken interview style. Use I would / I check / I validate for proposed actions; reserve I did / I delivered / I implemented for resume-supported past work. If asked for personal experience, do not invent a specific incident when resume evidence lacks it.`;
 }
 function cerebrasAnswerBudget(question, responseType, baseBudget) {
   // Reasoning tokens count toward the Cerebras completion cap. A 500–650-token
@@ -898,7 +899,7 @@ function fallbackProfile(resumeText, jdText, yearsExperience, role) {
     targetRole:inferredRole, yearsExperience:inferredYears
   };
 }
-async function generateStructuredProfile(resumeText, jdText, yearsExperience, role) {
+async function generateStructuredProfile(resumeText, jdText, yearsExperience, role, answerProvider='openai') {
   const fallback = fallbackProfile(resumeText, jdText, yearsExperience, role);
   const suppliedYears=Number.isFinite(yearsExperience)?yearsExperience:null;
   const deterministicYears=suppliedYears===null?inferYearsExperienceFromResume(resumeText):suppliedYears;
@@ -908,8 +909,8 @@ async function generateStructuredProfile(resumeText, jdText, yearsExperience, ro
   const inferredResumeRole=(!role&&!explicitResumeRole&&!explicitJdRole&&!normalizeText(jdText))?inferRoleFromSkills(resumeText,''):'';
   const deterministicRole=role||explicitResumeRole||explicitJdRole||inferredJdRole||inferredResumeRole;
   try {
-    const data = await openAIResponseJson({
-      model:LLM_PROFILE_MODEL,
+    const data = await (isChatProvider(answerProvider) ? providerResponseJson({provider:answerProvider, model:answerProvider==='deepseek'?DEEPSEEK_MODEL:CEREBRAS_MODEL, instructions:'Extract a grounded candidate profile from resume and job description. Return one valid JSON object only; no markdown.', input:`RESUME\n${resumeText.slice(0,30000)}\nJOB DESCRIPTION\n${jdText.slice(0,24000)}\nReturn JSON fields candidateSummary, jdSummary, primarySkills, projectHighlights, domainVocabulary, targetRole, yearsExperience. Do not invent experience.`, maxTokens:1800}) : openAIResponseJson({
+      model:answerProvider==='terra'?OPENAI_TERRA_MODEL:answerProvider==='luna'?OPENAI_LUNA_MODEL:LLM_PROFILE_MODEL,
       instructions:'Create a compact interview-grounding profile. Return JSON only, no markdown. Never invent project facts. Respect the deterministic resume/JD role and experience extraction supplied in the prompt; use model inference only to fill genuinely unresolved profile fields.',
       input:`Years of experience supplied by user: ${suppliedYears===null?'not supplied':suppliedYears}
 Deterministic resume timeline years: ${Number.isFinite(deterministicYears)?deterministicYears:'not resolved'}
@@ -927,8 +928,8 @@ ${jdText ? jdText.slice(0, 24000) : 'Not provided. Use resume-only grounding.'}
 
 Return JSON with keys candidateSummary (max 1800 chars), jdSummary (max 1200 chars; empty string when no JD), primarySkills (array max 25), projectHighlights (array max 8), domainVocabulary (array max 60 of exact technology/product/framework/domain terms appearing in the resume or JD, preserving canonical spelling such as LangGraph, LangChain, Kubernetes), targetRole, yearsExperience. For yearsExperience, use a supplied value when present; otherwise prefer the deterministic resume timeline value above and only infer from resume dates if it was unresolved. For targetRole, use this exact priority: supplied role; explicit CV role/title; explicit JD job title/role/position/job-description-for title; if the JD exists but has no explicit title, infer one concise canonical job title from the JD responsibilities/requirements; only when there is no useful JD, infer from the resume. targetRole must be a job title only (normally 2-6 words, maximum 9), never a sentence, summary, requirement, company description, or slash-separated list. Do not replace an explicit CV title with a JD title.`,
       effort:'low', maxTokens:2600, responseFormat:{type:'json_object'}
-    });
-    const raw = outputText(data);
+    }));
+    const raw = isChatProvider(answerProvider)?providerOutputText(answerProvider,data):outputText(data);
     const start = raw.indexOf('{'), end = raw.lastIndexOf('}');
     const parsed = JSON.parse(start >= 0 && end > start ? raw.slice(start, end + 1) : raw);
     const rawParsedYears=parsed.yearsExperience;
@@ -1663,7 +1664,7 @@ async function prepareQuestion(email, question, {inputSource='', requestId='', c
       retrieved = retrievalResultCache.get(retrievalCacheKey).map(c => ({...c}));
       retrievalMode = 'retrieval-cache';
       perf.retrievalCacheHit = true;
-    } else if (canUseFastLexical(session, retrievalQuery)) {
+    } else if (isChatProvider(session.answerProvider) || canUseFastLexical(session, retrievalQuery)) {
       const r0 = Date.now();
       retrieved = retrieveChunksLexical(session, retrievalQuery);
       retrievalMs = Date.now() - r0;
@@ -1705,8 +1706,6 @@ app.post('/validate-license', (req, res) => {
 
 app.post('/prepare-context', async (req, res) => {
   const email = requireLicensedRequest(req, res); if (!email) return;
-  if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:'OPENAI_API_KEY missing on backend' });
-  if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:'OPENAI_API_KEY missing on backend' });
   const rawYears=req.body.yearsExperience;
   const yearsExperience=(rawYears===null||rawYears===undefined||String(rawYears).trim()==='')?null:Number(rawYears);
   const role = normalizeText(req.body.role || '').slice(0,160);
@@ -1726,16 +1725,18 @@ app.post('/prepare-context', async (req, res) => {
     const parseMs = Date.now() - t0;
 
     const summaryStart = Date.now();
-    const profile = await generateStructuredProfile(resumeText, jdText, yearsExperience, role);
+    const profile = await generateStructuredProfile(resumeText, jdText, yearsExperience, role, answerProvider);
     const summaryMs = Date.now() - summaryStart;
     const resolvedYears=Number.isFinite(profile.yearsExperience)?profile.yearsExperience:(Number.isFinite(yearsExperience)?yearsExperience:null);
     const resolvedRole=normalizeText(profile.targetRole || role || '').slice(0,160);
 
     const chunks = [...semanticChunks(resumeText, 'resume'), ...(jdText?semanticChunks(jdText, 'jd'):[])];
     const embeddingStart = Date.now();
-    const vectors = await embedTexts(chunks.map(c => `${c.source}: ${c.section}\n${c.text}`));
-    if (vectors.length !== chunks.length) throw new Error('Embedding count did not match document chunks');
-    chunks.forEach((c,i) => { c.embedding = vectors[i]; });
+    if (!isChatProvider(answerProvider)) {
+      const vectors = await embedTexts(chunks.map(c => `${c.source}: ${c.section}\n${c.text}`));
+      if (vectors.length !== chunks.length) throw new Error('Embedding count did not match document chunks');
+      chunks.forEach((c,i) => { c.embedding = vectors[i]; });
+    } // DeepSeek/Cerebras use local lexical retrieval; never bill OpenAI embeddings.
     const embeddingMs = Date.now() - embeddingStart;
 
     interviewSessions.set(email, {
@@ -1761,7 +1762,6 @@ app.post('/ask', async (req, res) => {
   const text = normalizeStructuredText(req.body.text || '');
   if (!email || !text) return res.status(400).json({ ok:false, error:'email and text are required' });
   const license = isLicenseValid(email); if (!license.ok) return res.status(401).json({ ok:false, error:license.reason || 'Invalid license' });
-  if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:'OPENAI_API_KEY missing on backend' });
   if (text.length > 12000) return res.status(400).json({ ok:false, error:'Transcript input too long' });
   try {
     const prepared = await prepareQuestion(email, text);
