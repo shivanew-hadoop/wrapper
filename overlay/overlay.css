@@ -1143,3 +1143,19 @@ body { font-family: Arial, "Segoe UI", sans-serif; }
   overflow-x: auto;
   tab-size: 4;
 }
+
+/* v14.9.22: wrap code within the visible answer panel; never require horizontal scrolling. */
+.qaResponse .answerCodeEditor {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: hidden !important;
+  overflow-y: visible;
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  tab-size: 2;
+  padding: .55em .65em;
+}
+.qaResponse .answerCodeEditor code { white-space: inherit; overflow-wrap: anywhere; }
