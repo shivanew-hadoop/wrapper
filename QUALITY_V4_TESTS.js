@@ -1,5 +1,5 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
-const src=fs.readFileSync(__dirname+'/Topper-v14.7.15-Memory-Bold/backend/server.js','utf8');
+const src=fs.readFileSync(__dirname+'/backend/server.js','utf8');
 const start=src.indexOf('function interviewTopic('),end=src.indexOf('function cerebrasAnswerBudget(',start);
 const ctx={copilotInstructions:()=> 'OPENAI ORIGINAL'};vm.createContext(ctx);vm.runInContext(src.slice(start,end),ctx);
 const cases=[

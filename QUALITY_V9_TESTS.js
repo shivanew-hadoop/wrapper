@@ -1,6 +1,6 @@
 const fs=require('fs');const vm=require('vm');const assert=require('assert');
 const source=fs.readFileSync(__dirname+'/backend/server.js','utf8');
-const block=source.slice(source.indexOf('function chatProviderQuestionFocus('),source.indexOf('function cerebrasAnswerBudget('));
+const block=source.slice(source.indexOf('function interviewPrecisionFocus('),source.indexOf('function cerebrasAnswerBudget('));
 const sandbox={};vm.createContext(sandbox);
 vm.runInContext(block.replace(/function providerInterviewInput\(provider,prepared\) \{[\s\S]*$/,''),sandbox);
 const focus=sandbox.chatProviderQuestionFocus;
