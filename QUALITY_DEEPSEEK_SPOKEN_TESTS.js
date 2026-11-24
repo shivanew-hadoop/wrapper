@@ -1,0 +1,15 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const source=fs.readFileSync(__dirname+'/backend/server.js','utf8');
+const start=source.indexOf('function deepseekSpokenInput('),end=source.indexOf('function providerInterviewInput(',start);
+const ctx={};vm.createContext(ctx);vm.runInContext(source.slice(start,end),ctx);
+const make=(q,prior=[],domain='pharma healthcare')=>({correctedQuestion:q,session:{profile:{candidateSummary:domain},turns:prior.map(question=>({question,answer:'UNTRUSTED OLD ANSWER'})),chunks:[]},retrieved:[{source:'resume',text:'Actual project'},{source:'jd',text:'Target skill'}]});
+const run=(...args)=>ctx.deepseekSpokenInput(make(...args));
+assert(run('dark videos? Mhmm. What about dashboards?',['DAG delay and subscription']).startsWith('LATEST INTERVIEWER SPEECH (answer only the substantive request):\nMhmm. What about dashboards?'));
+assert(run('Like in the former domain, GPOs?',['pharma revenue leakage']).includes('pharma domain, Group Purchasing Organizations (GPOs)'));
+assert(run('Windows Group Policy GPOs?').includes('Windows Group Policy GPOs?'));
+assert(run('GPOs?',[],'Windows administration').includes('\nGPOs?\n'));
+const ai=run('How will you implement it?',['How will agentic AI replace dashboards?']);
+assert(ai.includes('How will agentic AI replace dashboards?'));assert(!ai.includes('UNTRUSTED OLD ANSWER'));
+assert(ai.includes('RESUME PROJECT EVIDENCE:\n: Actual project'));assert(ai.includes('JD TARGET ONLY (not experience):\nTarget skill'));
+assert(source.includes("provider==='deepseek'&&prepared.responseType==='spoken'"));
+console.log('PASS: DeepSeek spoken context, domain disambiguation, evidence separation and provider scope');

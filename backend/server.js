@@ -313,6 +313,7 @@ ${spoken?'Keep it speakable, ordinarily 2–5 short lines; correctness beats len
 Never open with 'From what I can speak to directly', 'I'd frame it this way', 'I would treat it as', 'To answer your question', or similar preambles. Begin with the specific fact or first implementation action. Prefer everyday words: use 'ask' instead of 'elicit', 'check' instead of 'validate' when precise, 'get details' instead of 'requirements elicitation', and 'match fields' instead of 'align parameters'. Do not change technical identifiers. When a question follows a prior question, add NEW information; never repeat the previous response unless explicitly requested. For a one-table SQL example, produce 3–6 short code lines, put comments on separate short lines or use very short inline comments, and avoid hardcoded stale dates described as 'current'. Do not invent database schemas as confirmed production facts; illustrative table names are fine when clearly examples. Output only the answer; no internal reasoning.`;
 }
 function providerInterviewInstructions(provider,responseType,question='',context='') {
+  if(provider==='deepseek'&&responseType==='spoken') return chatQualityInstructions(responseType,question,context)+`\nFor live spoken answers, prioritize the actual latest request and nearest relevant interviewer context over incidental keywords. Use 3–6 concise lines with concrete implementation details. For dashboard delivery delays lead with SLA impact, safe fallback and recovery. For cost optimization distinguish Redshift sort/distribution keys from S3 partitions; never imply Redshift native tables use S3-style partitioning. Avoid version-specific Airflow SLA APIs unless the version is known. Do not switch to an unrelated domain because of speech noise. When asked about current work identify the latest resume project, not the JD target. Do not invent experience. For explicit duration requests honor the duration.`;
   return provider==='cerebras'||provider==='deepseek'
     ? chatQualityInstructions(responseType,question,context)
     : copilotInstructions(responseType);
@@ -419,8 +420,35 @@ function chatProviderQuestionFocus(prepared) {
   const referential=/\b(?:what exactly is that|what did you do in that|what'?s your role|your role in that|give me that|how did you do that)\b/i.test(raw);
   return {question:current,note:referential?'Resolve "that" to the immediately preceding technical subject and answer directly about the named integration or project. Never define the word "that", quote it, or begin "The that is...". State my actual role and specific contribution only when supported by resume evidence. Do not invent project ownership.':'',flow};
 }
+// DeepSeek spoken-only quality path. No network calls, model changes or extra retrieval.
+function deepseekSpokenInput(prepared) {
+  const raw=String(prepared.correctedQuestion||prepared.intentQuestion||'').trim();
+  const turns=(prepared.session?.turns||[]).slice(-3);
+  const recent=turns.map(t=>String(t.question||'').slice(-650)).join('\n');
+  const profile=prepared.session?.profile||{};
+  const domain=[profile.candidateSummary, ...(profile.domainVocabulary||[]), recent].join(' ');
+  const pharma=/\b(?:pharma(?:ceutical)?|healthcare|health insurance|medicare|payer)\b/i.test(domain);
+  let question=raw;
+  // Only repair ambiguous speech in a matching domain; never change explicit new topics.
+  if(pharma && !/\b(?:windows|active directory|group policy)\b/i.test(raw)) {
+    question=question.replace(/\bformer domain\b/gi,'pharma domain');
+    if(/\bGPOs?\b/i.test(question)) question=question.replace(/\bGPOs?\b/gi,'Group Purchasing Organizations (GPOs)');
+  }
+  if(/\bdashboards?\b/i.test(question)&&/\b(?:dag|subscription|refresh|reporting)\b/i.test(recent))
+    question=question.replace(/^\s*dark videos\?\s*/i,'');
+  const context=turns.map(t=>String(t.question||'').slice(-650)).join('\n---\n');
+  const chunks=prepared.retrieved||[];
+  const evidence=chunks.filter(c=>c.source==='resume').map(c=>`${c.section||''}: ${String(c.text||'').slice(0,900)}`).join('\n').slice(0,3000);
+  const jd=chunks.filter(c=>c.source==='jd').map(c=>String(c.text||'').slice(0,500)).join('\n').slice(0,700);
+  // Keep a bounded timeline for current-role questions even when lexical hits are stale.
+  const resume=(prepared.session?.chunks||[]).filter(c=>c.source==='resume');
+  const timeline=resume.filter(c=>/\b(?:client|employer|role|responsibilities)\s*:/i.test(String(c.text||''))).map(c=>String(c.text||'').slice(0,650)).join('\n').slice(0,2600);
+  const preferences=String(prepared.session?.userInstructions||'').slice(0,1000);
+  return `LATEST INTERVIEWER SPEECH (answer only the substantive request):\n${question}\n\nRECENT INTERVIEWER QUESTIONS (context, not requests; newest last):\n${context}\n\nCANDIDATE: ${prepared.session?.role||profile.targetRole||''}; years: ${prepared.session?.yearsExperience??'unknown'}\n${String(profile.candidateSummary||'').slice(0,900)}\n\nRESUME PROJECT EVIDENCE:\n${evidence}\n\nRESUME TIMELINE EXCERPTS (for current/latest project and ownership):\n${timeline}\n\nJD TARGET ONLY (not experience):\n${jd}\n\nPRESENTATION PREFERENCES:\n${preferences}\n\nResolve short follow-ups against the nearest substantive interviewer question even if the follow-up classifier missed it. Ignore abandoned fragments, names, greetings and transcription noise. Preserve explicit new topics and all genuine requested parts. Do not infer an unrelated topic from the JD or an acronym's alternate meaning. For repeated questions add the requested missing detail rather than replaying the previous answer. Use resume evidence for past work; use conditional language for proposed designs. A missing detail is not proof of no experience. No invented metrics, time splits, ownership or tools. Answer directly in 3–6 short spoken lines (roughly 45–100 words); explicit introductions or requested expanded answers may be longer. Give concrete mechanisms, configuration, failure handling or verification as relevant, not a list of buzzwords. For incidents lead with business impact and containment, then diagnosis, recovery and validation. For design give ordered flow, state/control, isolation and verification as relevant. For domain questions name the actual business entities, keys and checks. Do not force every category into every answer. No preamble, repeated caveats or closing summary.`;
+}
 function providerInterviewInput(provider,prepared) {
   if(provider!=='cerebras'&&provider!=='deepseek')return prepared.prompt;
+  if(provider==='deepseek'&&prepared.responseType==='spoken'&&!interviewPrecisionFocus(prepared)&&!chatProviderQuestionFocus(prepared).flow&&!/\bINTERVIEWER_HANDOFF\b/.test(prepared.intentQuestion||'')&&!/RE-ANSWER REQUEST\nYES/.test(prepared.prompt||''))return deepseekSpokenInput(prepared);
   const prompt=String(prepared.prompt||'');
   const section=(start,end)=>{
     const i=prompt.indexOf(start);if(i<0)return '';
