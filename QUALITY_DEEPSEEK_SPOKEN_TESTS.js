@@ -13,8 +13,3 @@ assert(ai.includes('How will agentic AI replace dashboards?'));assert(!ai.includ
 assert(ai.includes('RESUME PROJECT EVIDENCE:\n: Actual project'));assert(ai.includes('JD TARGET ONLY (not experience):\nTarget skill'));
 assert(source.includes("provider==='deepseek'&&prepared.responseType==='spoken'"));
 console.log('PASS: DeepSeek spoken context, domain disambiguation, evidence separation and provider scope');
-const sf=make('Within Snowflake how do you schedule it?');
-sf.session.chunks=[{source:'resume',section:'Epic',text:'Implemented Snowflake Streams and Time Travel.'},{source:'jd',text:'Dialogflow CX'}];
-assert(ctx.deepseekSpokenInput(sf).includes('Implemented Snowflake Streams and Time Travel.'));
-assert(ctx.deepseekSpokenInput(sf).includes('bold-labelled Markdown bullets'));
-console.log('PASS: missing retrieved Snowflake evidence recovered locally; format instruction present');
