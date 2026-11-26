@@ -18,6 +18,8 @@ const CEREBRAS_API_KEY = String(process.env.CEREBRAS_API_KEY || '').trim();
 // DeepSeek is an independent text-answer provider. Keep OpenAI for RAG embeddings, profile and vision.
 const DEEPSEEK_API_KEY = String(process.env.DEEPSEEK_API_KEY || '').trim();
 const DEEPSEEK_MODEL = String(process.env.DEEPSEEK_MODEL || 'deepseek-chat').trim();
+// GPT-4o is an extra chat-completions route that reuses the DeepSeek spoken prompts unchanged.
+const GPT4O_MODEL = String(process.env.GPT4O_MODEL || 'gpt-4o').trim();
 const DEEPSEEK_API_BASE = String(process.env.DEEPSEEK_API_BASE || 'https://api.deepseek.com').trim().replace(/\/+$/, '');
 // Cerebras selection is intentionally pinned to OpenAI GPT-OSS 120B.
 // Do not allow an old Railway CEREBRAS_MODEL value to silently route this option to another model.
@@ -268,6 +270,12 @@ function cerebrasReasoningEffort(effort=CEREBRAS_REASONING_EFFORT) {
 function interviewTopic(q, context='') {
   const text=String(q||'').toLowerCase();
   const recent=String(context||'').toLowerCase();
+  // MCP is optional: speech-to-text often drops the word "with" ("tool calling only MCP").
+  if(/\btool[- ]?(?:calling|use)\b/.test(text)&&/\b(?:only|just|without|mandatory|must|required|necessary|need)\b/.test(text)&&/\b(?:mcp|model context protocol)\b/.test(text))
+    return 'TOOL CALLING vs MCP: the interviewer asks whether MCP is required. Start with "No": MCP is optional. Native tool calling works without it: define the function with a Pydantic args schema or LangChain @tool, register it with bind_tools(), the model returns tool_calls (name, args, id), and LangGraph ToolNode (or a conditional edge to an executor node) runs them and returns a ToolMessage with the same tool_call_id. MCP is a standard way to expose tools from separate servers so several agents or apps can discover and reuse them; I pick MCP for shared, centrally owned tools and native calling for app-specific functions. Never say MCP is the only path.';
+  // Rollout status and user counts are rarely in a resume: keep one consistent, non-invented position.
+  if((/\b(?:in (?:the )?production|production yet|live yet|is it live|deployment phase|go[- ]?live|pilot)\b/.test(text)&&/\b(?:chat ?bot|bot|agent|application|app|solution|system|project|this|it)\b/.test(text))||/\b(?:anticipated|expected|number of|how many)\b.{0,25}\busers\b/.test(text))
+    return 'PROJECT STATUS: unless the resume states it, whether the system is live, in UAT, a pilot or a phased rollout, and the user count, are NOT known. Do not say "it is live" or "it is a pilot". Say it was built for production use and name two real controls the resume lists (evaluation or CI quality gates, tracing, access control, availability objective); for rollout stage or users say who the users are, what I would size on (concurrent sessions, peak requests, token and API limits) and that I would confirm the exact number with the business owners. Keep this same position in every later answer.';
   const explicitGcp=/\b(gcp|google cloud|bigquery|cloud dlp)\b/.test(text);
   const explicitAzure=/\b(azure|synapse|adls)\b/.test(text);
   const explicitAws=/\b(aws|amazon|lake formation|glue|redshift|emr|s3|kinesis)\b/.test(text);
@@ -312,21 +320,25 @@ ONLY for genuine yes/no or can/cannot questions, the FIRST WORD must be Yes or N
 ${spoken?'Keep it speakable, ordinarily 2–5 short lines; correctness beats length.':'Honor the actual code/diagram scope; use meaningful inline code comments and no unrelated scaffolding.'}
 Never open with 'From what I can speak to directly', 'I'd frame it this way', 'I would treat it as', 'To answer your question', or similar preambles. Begin with the specific fact or first implementation action. Prefer everyday words: use 'ask' instead of 'elicit', 'check' instead of 'validate' when precise, 'get details' instead of 'requirements elicitation', and 'match fields' instead of 'align parameters'. Do not change technical identifiers. When a question follows a prior question, add NEW information; never repeat the previous response unless explicitly requested. For a one-table SQL example, produce 3–6 short code lines, put comments on separate short lines or use very short inline comments, and avoid hardcoded stale dates described as 'current'. Do not invent database schemas as confirmed production facts; illustrative table names are fine when clearly examples. Output only the answer; no internal reasoning.`;
 }
-// DeepSeek-only spoken rules: ChatGPT-style labelled bullets, answer-the-layer-asked,
-// no denial of CV-listed tools, no CV/JD talk in speech. Prompt text only; no extra calls.
+// Spoken-answer rules shared by the DeepSeek and GPT-4o chat routes: plain format, plain words with real
+// technical terms, consistency across turns, no denial of CV-listed tools, no CV/JD talk. Prompt text only.
 const DEEPSEEK_SPOKEN_RULES=`
-DEEPSEEK ANSWER FORMAT (overrides any earlier format rule that conflicts): Speak as the candidate in first person with "I" (I would / I configure / I check / I validate); avoid "we". Lead with 1–2 lines that directly answer in practical production terms. For architecture, data-flow, pipeline, orchestration, scheduling, data-model, configuration, step-by-step, RAG-pipeline and "walk me through" questions, follow with 4–6 bullets, each on its own line as "- **Label:** one specific detail" (Label = short main heading such as Sources, Ingestion, Landing zone, Transformation, Indexing, Serving, Trigger, Permissions, Monitoring; max 22 words per bullet), then at most one closing line on my ownership or how I validate it. Simple factual, yes/no, behavioural and wrap-up questions: 2–4 plain lines, no bullets. Introductions and requested long answers: short natural paragraphs, no bullets. Bulleted answers run about 70–120 words. Bold only the bullet labels. Prefer current managed approaches over legacy ones when relevant.
-ANSWER THE LAYER ASKED: use the nearest interviewer questions to decide the layer. In an ingestion/storage/cloud-infrastructure thread (sources, landing zone, S3, Lambda, Snowflake), "orchestration", "separate", "bucketing", "history" and "design" mean data-pipeline scheduling, S3 bucket/prefix layout, retention and table design (Databricks Jobs, EventBridge, Step Functions, Airflow, Snowflake Tasks), NOT LangChain/agent orchestration or the RAG index. Move to the RAG/LLM layer only when asked. If one speech holds several distinct questions, answer each in order under its own bold label, newest last; never answer only the last. Never echo speech-recognition artifacts (counting "one, two, three", "next scale", "or something like that", fillers, mishears) as headings or content.
-CV-LISTED TOOLS (anything in the CV-LISTED TOOLS block, e.g. S3, Lambda, Snowflake, Databricks, Kendra, Redshift): never say "I haven't worked hands-on" about them. Give the concrete design with "I would" or "my design" and do not invent project names, counts, dates or incidents that the resume evidence lacks; one short phrase like "that's the layout I'd standardize on" is enough. Say "I haven't used X hands-on" only for a tool absent from both the resume evidence and the CV-LISTED TOOLS, then give the closest transferable experience in one or two lines.
-NEVER mention the CV, resume, JD, job description or target role in the spoken answer, never compare the CV with the job, and never volunteer gaps or what is "not in the CV" unless the interviewer directly asks about that exact tool.`;
+DEEPSEEK ANSWER FORMAT (overrides conflicting format rules): first person "I" ("we" only for team work the resume describes). Open with 1–2 plain lines that answer exactly what was asked. DEFAULT is 3–5 short spoken lines with NO bullets and NO headings. Use bullets only for a real sequence or set of 3+ parts (architecture, data flow, step-by-step implementation, RAG pipeline, tool-calling or state walkthrough): 3–5 plain bullets ("- I do X ..."), max 20 words each; add a bold label ("- **Ingestion:** ...") only when the interviewer asks for stages, components or services one by one. Yes/no, status, opinion, behavioural, introduction and wrap-up answers are plain lines, never bullets or labels. About 60–110 words. No stock closing "I validate by..." line; add a check only when asked about testing, reliability or debugging, and make it specific.
+PLAIN WORDS, REAL TERMS: everyday interview words (use, check, set up, send, store, fix), not "leverage", "utilize", "robust", "seamless", "holistic", "facilitate". Name the real technical terms the question needs: exact library calls, config names, services, flags from the resume's stack (agent stack examples: StateGraph, add_messages reducer, checkpointer with thread_id, interrupt() for approval, bind_tools() with ToolNode, ToolMessage tool_call_id, Pydantic model_validate, idempotency keys, bounded retries, OpenTelemetry spans, RAGAS metrics, hybrid search with semantic reranker). One to three exact names per answer, only real APIs, never an invented method or flag.
+STAY CONSISTENT: EARLIER ANSWERS (if present) are what I already told the interviewer; never contradict or repeat them. Facts the resume does not state (live vs pilot, user counts, rollout dates, exact model versions, team size, names, percentages) are never stated as fact: say it was built for production use with the controls the resume names, give platform and model family without a version, say I'd confirm the figure, and keep that position in later answers. Never say I wasn't involved in my own listed employer's work.
+INTENT: "Can we do X only/just with Y?" or "is Y required?" asks whether Y is mandatory; speech-to-text drops words like "with", so read it as an interviewer means it. If a screen capture and a spoken question arrive together, answer the spoken question on its own and solve the screen problem only if asked; never merge them or turn a remark about my years of experience or the job into my topic. For coding, implement every stated requirement literally and in order (attributes, method names, printing inside the method when asked, exact headings and columns) with a short inline comment per statement; re-read the requirements before finishing.
+LAYER: in an ingestion/storage/cloud thread (sources, landing zone, S3, Lambda, Snowflake), "orchestration", "separate", "bucketing", "history", "design" mean pipeline scheduling, S3 layout, retention and table design (Databricks Jobs, EventBridge, Step Functions, Airflow, Snowflake Tasks), NOT LangChain/agent orchestration or the RAG index; move to the RAG/LLM layer only when asked. Answer every distinct question in one speech in order, newest last. Never echo speech-recognition noise ("one, two, three", "next scale", "or something like that", fillers) as content.
+CV-LISTED TOOLS block: never say "I haven't worked hands-on" about those (e.g. S3, Lambda, Snowflake, Databricks); give the concrete design with "I would"/"my design" and no invented projects, counts, dates or incidents. Say "I haven't used X hands-on" only for a tool absent from both resume evidence and that block, then give the closest transferable experience in one or two lines.
+NEVER mention the CV, resume, JD or target role in speech, never compare CV with job, never volunteer gaps unless the interviewer asks about that exact tool.`;
+function sharesDeepseekPrompts(provider){return provider==='deepseek'||provider==='gpt4o';}
 function providerInterviewInstructions(provider,responseType,question='',context='') {
-  if(provider==='deepseek'&&responseType==='spoken') return chatQualityInstructions(responseType,question,context)
+  if(sharesDeepseekPrompts(provider)&&responseType==='spoken') return chatQualityInstructions(responseType,question,context)
     .replace('not five bullets by default.','')
     .replace('No redundant recap, extra options, headings, or final summary.','No redundant recap, extra options or final summary.')
     .replace("Keep it speakable, ordinarily 2–5 short lines; correctness beats length.",'Keep it speakable; correctness beats length.')
     .replace('say explicitly that it is not established in the CV and explain how I would approach it','say naturally that I have not used it hands-on and explain how I would approach it')
     +DEEPSEEK_SPOKEN_RULES+`\nFor live spoken answers, prioritize the actual latest request and nearest relevant interviewer context over incidental keywords. Give concrete implementation details in the DEEPSEEK ANSWER FORMAT. For dashboard delivery delays lead with SLA impact, safe fallback and recovery. For cost optimization distinguish Redshift sort/distribution keys from S3 partitions; never imply Redshift native tables use S3-style partitioning. Avoid version-specific Airflow SLA APIs unless the version is known. Do not switch to an unrelated domain because of speech noise. When asked about current work identify the latest resume project, not the JD target. Do not invent experience. For explicit duration requests honor the duration.`;
-  return provider==='cerebras'||provider==='deepseek'
+  return provider==='cerebras'||sharesDeepseekPrompts(provider)
     ? chatQualityInstructions(responseType,question,context)
     : copilotInstructions(responseType);
 }
@@ -443,6 +455,10 @@ function deepseekSpokenInput(prepared) {
   // Deterministic speech repairs for common data-platform terms (no model call).
   const fixStt=t=>String(t||'').replace(/\bs\s*three\b/gi,'S3').replace(/\bsnow\s*pipe\b/gi,'Snowpipe').replace(/\bnext scale\b/gi,'next stage');
   let question=fixStt(raw);
+  // A screen capture and pending speech arrive in one string: keep them apart so they are not merged.
+  let screen='';
+  const splitAt=question.indexOf('--- SPOKEN QUESTION / FOLLOW-UP ---');
+  if(splitAt>=0){screen=question.slice(0,splitAt).trim().slice(0,2200);question=question.slice(splitAt+'--- SPOKEN QUESTION / FOLLOW-UP ---'.length).trim()||question;}
   // Only repair ambiguous speech in a matching domain; never change explicit new topics.
   if(pharma && !/\b(?:windows|active directory|group policy)\b/i.test(raw)) {
     question=question.replace(/\bformer domain\b/gi,'pharma domain');
@@ -460,11 +476,13 @@ function deepseekSpokenInput(prepared) {
   // Tools the CV lists (skills table / environment lines): stops false "never worked with S3/Lambda/Snowflake" denials.
   const listedTools=resume.filter(c=>/\b(?:cloud platforms|data engineering|environment\s*:)/i.test(String(c.text||''))).map(c=>String(c.text||'').slice(0,450)).join('\n').slice(0,900);
   const preferences=String(prepared.session?.userInstructions||'').slice(0,1000);
-  return `LATEST INTERVIEWER SPEECH (answer only the substantive request):\n${question}\n\nRECENT INTERVIEWER QUESTIONS (context, not requests; newest last):\n${context}\n\nCANDIDATE: ${prepared.session?.role||profile.targetRole||''}; years: ${prepared.session?.yearsExperience??'unknown'}\n${String(profile.candidateSummary||'').slice(0,900)}\n\nRESUME PROJECT EVIDENCE:\n${evidence}\n\nRESUME TIMELINE EXCERPTS (for current/latest project and ownership):\n${timeline}\n\nCV-LISTED TOOLS (candidate's own skills/environment; never deny these):\n${listedTools}\n\nJD TARGET ONLY (not experience):\n${jd}\n\nPRESENTATION PREFERENCES:\n${preferences}\n\nResolve short follow-ups against the nearest substantive interviewer question even if the follow-up classifier missed it. Ignore abandoned fragments, names, greetings and transcription noise. Preserve explicit new topics and all genuine requested parts. Do not infer an unrelated topic from the JD or an acronym's alternate meaning. For repeated questions add the requested missing detail rather than replaying the previous answer. Use resume evidence for past work; use conditional language for proposed designs. A missing detail is not proof of no experience. No invented metrics, time splits, ownership or tools. Answer in the DEEPSEEK ANSWER FORMAT: direct 1–2 lines, then labelled "- **Label:** detail" bullets for flow/design/how-to questions (plain 2–4 lines otherwise), roughly 60–120 words; explicit introductions or requested expanded answers may be longer. Answer the data/infrastructure layer when the thread is about ingestion, S3, Lambda or Snowflake; answer every distinct question in the speech in order; never mention the CV, resume or JD. Give concrete mechanisms, configuration, failure handling or verification as relevant, not a list of buzzwords. For incidents lead with business impact and containment, then diagnosis, recovery and validation. For design give ordered flow, state/control, isolation and verification as relevant. For domain questions name the actual business entities, keys and checks. Do not force every category into every answer. No preamble, repeated caveats or closing summary.`;
+  // Last two answers already given (bounded) so rollout status, models and ownership stay consistent. Not resume evidence.
+  const priorAnswers=turns.slice(-2).map(t=>`Q: ${String(t.question||'').replace(/\s+/g,' ').slice(-160)}\nA: ${String(t.answer||'').replace(/\s+/g,' ').slice(0,420)}`).filter(x=>!/\nA: $/.test(x)).join('\n').slice(0,1000);
+  return `LATEST INTERVIEWER SPEECH (answer only the substantive request):\n${question}${screen?`\n\nSCREEN CAPTURE (a separate problem on screen; solve it only if the speech asks, otherwise ignore it):\n${screen}`:''}${priorAnswers?`\n\nEARLIER ANSWERS ALREADY GIVEN (stay consistent, never repeat; not resume evidence):\n${priorAnswers}`:''}\n\nRECENT INTERVIEWER QUESTIONS (context, not requests; newest last):\n${context}\n\nCANDIDATE: ${prepared.session?.role||profile.targetRole||''}; years: ${prepared.session?.yearsExperience??'unknown'}\n${String(profile.candidateSummary||'').slice(0,900)}\n\nRESUME PROJECT EVIDENCE:\n${evidence}\n\nRESUME TIMELINE EXCERPTS (for current/latest project and ownership):\n${timeline}\n\nCV-LISTED TOOLS (candidate's own skills/environment; never deny these):\n${listedTools}\n\nJD TARGET ONLY (not experience):\n${jd}\n\nPRESENTATION PREFERENCES:\n${preferences}\n\nResolve short follow-ups against the nearest substantive interviewer question even if the follow-up classifier missed it. Ignore abandoned fragments, names, greetings and transcription noise. Preserve explicit new topics and all genuine requested parts. Do not infer an unrelated topic from the JD or an acronym's alternate meaning. For repeated questions add the requested missing detail rather than replaying the previous answer. Use resume evidence for past work; use conditional language for proposed designs. A missing detail is not proof of no experience. No invented metrics, time splits, ownership or tools. Answer in the DEEPSEEK ANSWER FORMAT: direct 1–2 lines, plain 3–5 lines by default, bullets only for a real multi-part sequence, about 60–110 words; explicit introductions or requested expanded answers may be longer. Use everyday words plus the real technical terms. Stay consistent with EARLIER ANSWERS and never state unknown rollout status, user counts or model versions as fact. Answer the data/infrastructure layer when the thread is about ingestion, S3, Lambda or Snowflake; answer every distinct question in the speech in order; never mention the CV, resume or JD. Give concrete mechanisms, configuration, failure handling or verification as relevant, not a list of buzzwords. For incidents lead with business impact and containment, then diagnosis, recovery and validation. For design give ordered flow, state/control, isolation and verification as relevant. For domain questions name the actual business entities, keys and checks. Do not force every category into every answer. No preamble, repeated caveats or closing summary.`;
 }
 function providerInterviewInput(provider,prepared) {
-  if(provider!=='cerebras'&&provider!=='deepseek')return prepared.prompt;
-  if(provider==='deepseek'&&prepared.responseType==='spoken'&&!interviewPrecisionFocus(prepared)&&!chatProviderQuestionFocus(prepared).flow&&!/\bINTERVIEWER_HANDOFF\b/.test(prepared.intentQuestion||'')&&!/RE-ANSWER REQUEST\nYES/.test(prepared.prompt||''))return deepseekSpokenInput(prepared);
+  if(provider!=='cerebras'&&provider!=='deepseek'&&provider!=='gpt4o')return prepared.prompt;
+  if((provider==='deepseek'||provider==='gpt4o')&&prepared.responseType==='spoken'&&!interviewPrecisionFocus(prepared)&&!chatProviderQuestionFocus(prepared).flow&&!/\bINTERVIEWER_HANDOFF\b/.test(prepared.intentQuestion||'')&&!/RE-ANSWER REQUEST\nYES/.test(prepared.prompt||''))return deepseekSpokenInput(prepared);
   const prompt=String(prepared.prompt||'');
   const section=(start,end)=>{
     const i=prompt.indexOf(start);if(i<0)return '';
@@ -548,14 +566,33 @@ async function deepseekJson({instructions='',input='',maxTokens=420}) {
   if(!response.ok)throw new Error(data?.error?.message||`DeepSeek request failed (${response.status})`);
   return data;
 }
-function isChatProvider(provider){return provider==='cerebras'||provider==='deepseek';}
-function providerServiceTierFor(provider){return provider==='deepseek'?'standard':provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER;}
-function providerStreamUrl(provider){return provider==='deepseek'?`${DEEPSEEK_API_BASE}/chat/completions`:provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:'https://api.openai.com/v1/responses';}
-function providerApiKey(provider){return provider==='deepseek'?DEEPSEEK_API_KEY:provider==='cerebras'?CEREBRAS_API_KEY:OPENAI_API_KEY;}
+// GPT-4o: OpenAI Chat Completions with the same messages, token ceiling and streaming shape as DeepSeek.
+function gpt4oChatBody({instructions='',input='',maxTokens=420,stream=false}) {
+  const body={model:GPT4O_MODEL,messages:[{role:'system',content:String(instructions||'')},{role:'user',content:typeof input==='string'?input:JSON.stringify(input)}],stream:!!stream};
+  if(Number.isFinite(maxTokens)&&maxTokens>0)body.max_tokens=maxTokens;
+  return body;
+}
+async function gpt4oJson({instructions='',input='',maxTokens=420}) {
+  if(!OPENAI_API_KEY)throw new Error('OPENAI_API_KEY missing on backend');
+  const response=await fetch('https://api.openai.com/v1/chat/completions',{
+    method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${OPENAI_API_KEY}`},
+    body:JSON.stringify(gpt4oChatBody({instructions,input,maxTokens}))
+  });
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(data?.error?.message||`GPT-4o request failed (${response.status})`);
+  return data;
+}
+function chatModelFor(provider){return provider==='deepseek'?DEEPSEEK_MODEL:provider==='gpt4o'?GPT4O_MODEL:CEREBRAS_MODEL;}
+function providerLabel(provider){return provider==='deepseek'?'DeepSeek':provider==='gpt4o'?'GPT-4o':provider==='cerebras'?'Cerebras':'OpenAI';}
+function isChatProvider(provider){return provider==='cerebras'||provider==='deepseek'||provider==='gpt4o';}
+function providerServiceTierFor(provider){return (provider==='deepseek'||provider==='gpt4o')?'standard':provider==='cerebras'?CEREBRAS_SERVICE_TIER:OPENAI_SERVICE_TIER;}
+function providerStreamUrl(provider){return provider==='gpt4o'?'https://api.openai.com/v1/chat/completions':provider==='deepseek'?`${DEEPSEEK_API_BASE}/chat/completions`:provider==='cerebras'?`${CEREBRAS_API_BASE}/chat/completions`:'https://api.openai.com/v1/responses';}
+function providerApiKey(provider){return provider==='gpt4o'?OPENAI_API_KEY:provider==='deepseek'?DEEPSEEK_API_KEY:provider==='cerebras'?CEREBRAS_API_KEY:OPENAI_API_KEY;}
 function providerStreamBody(provider,{instructions,input,maxTokens,effort,model,verbosity}){
-  return provider==='deepseek'?deepseekChatBody({instructions,input,maxTokens,stream:true}):provider==='cerebras'?cerebrasChatBody({instructions,input,maxTokens,stream:true,effort}):openAIResponseBody({model,instructions,input,effort,maxTokens,verbosity,stream:true});
+  return provider==='gpt4o'?gpt4oChatBody({instructions,input,maxTokens,stream:true}):provider==='deepseek'?deepseekChatBody({instructions,input,maxTokens,stream:true}):provider==='cerebras'?cerebrasChatBody({instructions,input,maxTokens,stream:true,effort}):openAIResponseBody({model,instructions,input,effort,maxTokens,verbosity,stream:true});
 }
 async function providerResponseJson({provider='openai',model=LLM_DEFAULT_MODEL,instructions='',input='',effort=LLM_REASONING_EFFORT,maxTokens=420,verbosity=LLM_VERBOSITY}) {
+  if(provider==='gpt4o') return gpt4oJson({instructions,input,maxTokens});
   if(provider==='deepseek') return deepseekJson({instructions,input,maxTokens});
   if(provider==='cerebras') return cerebrasJson({instructions,input,maxTokens,effort});
   return openAIResponseJson({model,instructions,input,effort,maxTokens,verbosity});
@@ -842,12 +879,17 @@ function normalizeRoleTitle(value) {
   text=text.split(/\s+(?:responsible\s+for|who\s+will|to\s+join|to\s+work|with\s+experience\s+in|having\s+experience\s+in|for\s+our\s+team)\b/i)[0].trim();
   const words=text.split(/\s+/).filter(Boolean);
   if(words.length>9)text=words.slice(0,9).join(' ');
+  // ALL-CAPS CV headings ("AI ENGINEER") become readable titles; acronyms stay upper-case.
+  if(/[A-Z]/.test(text)&&text===text.toUpperCase()){
+    const keep=new Set(['AI','ML','QA','BI','SRE','SDET','AWS','GCP','NLP','LLM','API','ETL','UI','UX','IT','SQL','.NET']);
+    text=text.toLowerCase().replace(/[a-z.#+]+/g,w=>{const u=w.toUpperCase();return u==='GENAI'?'GenAI':u==='DEVOPS'?'DevOps':keep.has(u)?u:w[0].toUpperCase()+w.slice(1);});
+  }
   return text.slice(0,100);
 }
 function explicitRolePattern() {
   // Keep the match constrained to normal job-title vocabulary so a role field cannot
   // accidentally become a long sentence from a resume/JD heading or summary line.
-  return /\b(?:(?:senior|sr\.?|lead|principal|staff|associate|junior|jr\.?|technical|solution|solutions|cloud|azure|aws|java|python|\.net|dotnet|full[- ]?stack|backend|front[- ]?end|data|analytics|business\s+intelligence|bi|power\s*bi|devops|sre|site\s+reliability|qa|quality\s+assurance|test|automation|machine\s+learning|ml|ai|react|angular|software|application|systems?|platform)\s+){0,5}(?:engineer|developer|architect|tester|analyst|consultant|lead|manager|specialist|administrator)\b|\b(?:sdet|software\s+engineer|software\s+developer|solution\s+architect|solutions\s+architect|data\s+engineer|data\s+scientist|devops\s+engineer|qa\s+engineer|automation\s+engineer|test\s+engineer|technical\s+lead|team\s+lead|business\s+analyst|data\s+analyst)\b/i;
+  return /\b(?:(?:senior|sr\.?|lead|principal|staff|associate|junior|jr\.?|technical|solution|solutions|cloud|azure|aws|java|python|\.net|dotnet|full[- ]?stack|backend|front[- ]?end|data|analytics|business\s+intelligence|bi|power\s*bi|devops|sre|site\s+reliability|qa|quality\s+assurance|test|automation|machine\s+learning|ml|ai|react|angular|software|application|systems?|platform|forward[- ]?deployed|enterprise|applied|research|generative|gen\s*ai|genai|conversational|agentic|nlp|llm|mlops|deep\s+learning|computer\s+vision|big\s+data|etl|database|security|integration|api|product|customer|implementation)\s+){0,6}(?:engineer|developer|architect|tester|analyst|consultant|scientist|lead|manager|specialist|administrator)\b|\b(?:sdet|software\s+engineer|software\s+developer|solution\s+architect|solutions\s+architect|data\s+engineer|data\s+scientist|devops\s+engineer|qa\s+engineer|automation\s+engineer|test\s+engineer|technical\s+lead|team\s+lead|business\s+analyst|data\s+analyst)\b/i;
 }
 function compactRoleCandidate(value) {
   const candidate=normalizeRoleTitle(value);
@@ -859,15 +901,30 @@ function compactRoleCandidate(value) {
   if(hasRoleNoun&&words.length<=9&&!/[.!?;]/.test(candidate))return candidate;
   return '';
 }
-function extractExplicitRoleFromResume(documentText) {
+// "Lead Data Scientist / AI-ML / GenAI Engineer": keep the CV's seniority and choose the listed
+// title whose role noun matches the JD title's noun (Engineer, Scientist, Architect). CV words only.
+function pickRoleAlternative(rawValue,jdTitle='') {
+  const parts=String(rawValue||'').split(/\s+\/\s+|\s*\|\s*/).map(part=>compactRoleCandidate(part)).filter(Boolean);
+  if(!parts.length)return '';
+  if(parts.length<2||!jdTitle)return parts[0];
+  const noun=title=>(String(title).toLowerCase().match(/\b(engineer|developer|architect|tester|analyst|consultant|scientist|manager|specialist|administrator)\s*$/)||[])[1]||'';
+  const jdNoun=noun(jdTitle);
+  let chosen=(jdNoun&&parts.find(part=>noun(part)===jdNoun))||parts[0];
+  const seniority=/^(?:senior|sr\.?|lead|principal|staff|junior|jr\.?|associate)\b/i;
+  const first=parts[0].match(seniority);
+  if(first&&!seniority.test(chosen))chosen=`${first[0]} ${chosen}`;
+  return chosen;
+}
+function extractExplicitRoleFromResume(documentText,jdText='') {
   const text=normalizeText(documentText);
   if(!text)return '';
   const lines=text.split('\n').map(line=>line.trim()).filter(Boolean);
   const labelled=/\b(?:current\s+)?(?:role|job\s+title|title|designation|position)\s*[:\-–—]\s*(.+)$/i;
+  const jdTitle=normalizeText(jdText)?extractExplicitRoleFromJD(jdText):'';
   for(const line of lines.slice(0,220)){
     const label=line.match(labelled);
     if(!label)continue;
-    const candidate=compactRoleCandidate(label[1]);
+    const candidate=pickRoleAlternative(label[1],jdTitle);
     if(candidate)return candidate;
   }
   for(const line of lines.slice(0,35)){
@@ -890,9 +947,22 @@ function extractExplicitRoleFromJD(documentText) {
   const labelled=[
     /\b(?:job\s+title|role|title|position|designation)\s*[:\-–—]\s*(.+)$/i,
     /\bjob\s+description\s+for\s*[:\-–—]?\s*(.+)$/i,
-    /\b(?:opening|opportunity)\s+for\s+(?:an?\s+)?(.+)$/i,
-    /\b(?:we\s+are\s+(?:looking|hiring|seeking)\s+for|looking\s+for|seeking)\s+(?:an?\s+)?(.+?)\s*(?:to\s+join|with\s+|who\s+|$)/i
+    /\b(?:opening|opportunity)\s+for\s+(?:an?\s+)?(.+)$/i
   ];
+  const hiring=/\b(?:we\s+are\s+(?:looking|hiring|seeking)\s+for|looking\s+for|seeking)\s+(?:an?\s+)?(.+?)\s*(?:to\s+join|with\s+|who\s+|$)/i;
+  // A title-looking heading in the first lines ("Job Description / Conversational AI Data Engineer")
+  // beats a "looking for a ... engineer" sentence, which only yields a bare noun.
+  const headingTitle=()=>{
+    for(const line of lines.slice(0,8)){
+      if(/\b(?:responsibilit|requirement|qualification|experience|must|should|will|work with|collaborat|looking|skills?)\b/i.test(line))continue;
+      const stripped=line.replace(/\s+[|•·]\s+.*$/,'').trim();
+      const words=stripped.split(/\s+/).filter(Boolean);
+      if(words.length<2||words.length>9||/[.!?;:]/.test(stripped))continue;
+      const candidate=compactRoleCandidate(stripped);
+      if(candidate&&candidate.split(/\s+/).length>=2)return candidate;
+    }
+    return '';
+  };
   for(const line of lines.slice(0,180)){
     for(const pattern of labelled){
       const match=line.match(pattern);
@@ -900,6 +970,14 @@ function extractExplicitRoleFromJD(documentText) {
       const candidate=compactRoleCandidate(match[1]);
       if(candidate)return candidate;
     }
+  }
+  const headingRole=headingTitle();
+  if(headingRole)return headingRole;
+  for(const line of lines.slice(0,180)){
+    const match=line.match(hiring);
+    if(!match)continue;
+    const candidate=compactRoleCandidate(match[1]);
+    if(candidate)return candidate;
   }
   // Bare JD titles are accepted only when the line itself looks like a heading/title.
   // Do not extract "developer" from a responsibility sentence such as "work with developers".
@@ -1036,7 +1114,7 @@ function inferRoleFromJDEvidence(jdText) {
 }
 
 function inferTargetRoleFromDocuments(resumeText,jdText) {
-  const resumeRole=extractExplicitRoleFromResume(resumeText);
+  const resumeRole=extractExplicitRoleFromResume(resumeText,jdText);
   if(resumeRole)return resumeRole;
   const jdRole=extractExplicitRoleFromJD(jdText);
   if(jdRole)return jdRole;
@@ -1059,13 +1137,13 @@ async function generateStructuredProfile(resumeText, jdText, yearsExperience, ro
   const fallback = fallbackProfile(resumeText, jdText, yearsExperience, role);
   const suppliedYears=Number.isFinite(yearsExperience)?yearsExperience:null;
   const deterministicYears=suppliedYears===null?inferYearsExperienceFromResume(resumeText):suppliedYears;
-  const explicitResumeRole=role?'':extractExplicitRoleFromResume(resumeText);
+  const explicitResumeRole=role?'':extractExplicitRoleFromResume(resumeText,jdText);
   const explicitJdRole=(role||explicitResumeRole)?'':extractExplicitRoleFromJD(jdText);
   const inferredJdRole=(!role&&!explicitResumeRole&&!explicitJdRole&&normalizeText(jdText))?(inferRoleFromJDEvidence(jdText)||inferRoleFromSkills('',jdText)):'';
   const inferredResumeRole=(!role&&!explicitResumeRole&&!explicitJdRole&&!normalizeText(jdText))?inferRoleFromSkills(resumeText,''):'';
   const deterministicRole=role||explicitResumeRole||explicitJdRole||inferredJdRole||inferredResumeRole;
   try {
-    const data = await (isChatProvider(answerProvider) ? providerResponseJson({provider:answerProvider, model:answerProvider==='deepseek'?DEEPSEEK_MODEL:CEREBRAS_MODEL, instructions:'Extract a grounded candidate profile from resume and job description. Return one valid JSON object only; no markdown.', input:`RESUME\n${resumeText.slice(0,30000)}\nJOB DESCRIPTION\n${jdText.slice(0,24000)}\nReturn JSON fields candidateSummary, jdSummary, primarySkills, projectHighlights, domainVocabulary, targetRole, yearsExperience. Do not invent experience.`, maxTokens:1800}) : openAIResponseJson({
+    const data = await (isChatProvider(answerProvider) ? providerResponseJson({provider:answerProvider, model:chatModelFor(answerProvider), instructions:'Extract a grounded candidate profile from resume and job description. Return one valid JSON object only; no markdown.', input:`RESUME\n${resumeText.slice(0,30000)}\nJOB DESCRIPTION\n${jdText.slice(0,24000)}\nReturn JSON fields candidateSummary, jdSummary, primarySkills, projectHighlights, domainVocabulary, targetRole, yearsExperience. Do not invent experience.`, maxTokens:1800}) : openAIResponseJson({
       model:answerProvider==='terra'?OPENAI_TERRA_MODEL:answerProvider==='luna'?OPENAI_LUNA_MODEL:LLM_PROFILE_MODEL,
       instructions:'Create a compact interview-grounding profile. Return JSON only, no markdown. Never invent project facts. Respect the deterministic resume/JD role and experience extraction supplied in the prompt; use model inference only to fill genuinely unresolved profile fields.',
       input:`Years of experience supplied by user: ${suppliedYears===null?'not supplied':suppliedYears}
@@ -1130,6 +1208,8 @@ function isContextualFollowup(question) {
 function isInterviewLogisticsQuestion(value) {
   const q=normalizeText(value).toLowerCase().replace(/[?.!,;:]+/g,' ').replace(/\s+/g,' ').trim();
   if(!q)return true;
+  // Pure acknowledgements ("ok", "fine", "thank you") are not questions: no answer, no model call.
+  if(/^(?:(?:ok|okay|yeah|yes|yep|sure|fine|right|alright|all right|mhmm+|hmm+|uh huh|got it|thanks|thank you|cool|nice|great|good)\s*)+$/.test(q))return true;
   const patterns=[
     /\byou(?:'re| are)\b.{0,25}\b(?:able to )?(?:hear|see) (?:me|us)\b/,
     /\b(?:for (?:the )?sake of clarification|just for clarification)\b/,
@@ -1753,6 +1833,7 @@ function selectAnswerRoute(_question, prepared=null, _options={}) {
   // The user explicitly chooses the live answer provider on Prepare Interview.
   // No automatic routing/classifier is introduced, so latency and answer flow remain deterministic.
   const selected=String(prepared?.session?.answerProvider||'openai');
+  if(selected==='gpt4o') return {provider:'gpt4o',model:GPT4O_MODEL,effort:'none',tier:'gpt4o-chat',reason:'user-selected-gpt4o'};
   if(selected==='deepseek') return {provider:'deepseek',model:DEEPSEEK_MODEL,effort:'none',tier:'deepseek-chat',reason:'user-selected-deepseek'};
   if(selected==='cerebras') return {provider:'cerebras',model:CEREBRAS_MODEL,effort:CEREBRAS_REASONING_EFFORT,tier:'cerebras',reason:'user-selected-cerebras-gpt-oss-120b'};
   if(selected==='terra') return {provider:'openai',model:OPENAI_TERRA_MODEL,effort:LLM_REASONING_EFFORT,tier:'openai-terra-fast',reason:'user-selected-openai-terra-fast'};
@@ -1850,7 +1931,7 @@ async function prepareQuestion(email, question, {inputSource='', requestId='', c
   perf.promptTokenEstimate = Math.ceil(perf.promptChars / 4);
   return { session, prompt, retrieved, rejection, followupInfo, responseType, correctedQuestion, intentQuestion, canonicalReplacements:canonical.replacements, latency:{ startedAt, embeddingMs, retrievalMs, retrievalMode, promptReadyMs:Date.now()-startedAt, ...perf } };
 }
-app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, deepseekModel:DEEPSEEK_MODEL, terraModel:OPENAI_TERRA_MODEL, lunaModel:OPENAI_LUNA_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',options:['openai','terra','luna','cerebras','deepseek']}, embeddingModel:EMBEDDING_MODEL }));
+app.get('/', (_req, res) => res.json({ ok:true, service:'Topper Backend', stt:'/stt', llm:'/ask', llmStream:'/ask/stream', prepare:'/prepare-context', llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, deepseekModel:DEEPSEEK_MODEL, gpt4oModel:GPT4O_MODEL, terraModel:OPENAI_TERRA_MODEL, lunaModel:OPENAI_LUNA_MODEL, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT, visionProvider:'openai', llmRouting:{enabled:false,mode:'manual-selection',default:'openai',options:['openai','terra','luna','cerebras','deepseek','gpt4o']}, embeddingModel:EMBEDDING_MODEL }));
 app.get('/health', (_req, res) => res.json({ ok:true, llmProvider:'user-selectable', llmModel:LLM_DEFAULT_MODEL, cerebrasModel:CEREBRAS_MODEL, cerebrasAnswerStyle:CEREBRAS_ANSWER_STYLE, cerebrasReasoningEffort:CEREBRAS_REASONING_EFFORT, openaiConfigured:!!OPENAI_API_KEY, cerebrasConfigured:!!CEREBRAS_API_KEY, deepseekConfigured:!!DEEPSEEK_API_KEY, openaiServiceTier:OPENAI_SERVICE_TIER, reasoningEffort:LLM_REASONING_EFFORT }));
 
 app.post('/validate-license', (req, res) => {
@@ -1866,10 +1947,10 @@ app.post('/prepare-context', async (req, res) => {
   const yearsExperience=(rawYears===null||rawYears===undefined||String(rawYears).trim()==='')?null:Number(rawYears);
   const role = normalizeText(req.body.role || '').slice(0,160);
   const requestedProvider=String(req.body.answerProvider || 'openai').trim().toLowerCase();
-  const answerProvider=['openai','terra','luna','cerebras','deepseek'].includes(requestedProvider)?requestedProvider:'openai';
+  const answerProvider=['openai','terra','luna','cerebras','deepseek','gpt4o'].includes(requestedProvider)?requestedProvider:'openai';
   if(answerProvider==='deepseek'&&!DEEPSEEK_API_KEY)return res.status(500).json({ok:false,error:'DEEPSEEK_API_KEY missing on backend for selected model'});
   if(answerProvider==='cerebras'&&!CEREBRAS_API_KEY)return res.status(500).json({ok:false,error:'CEREBRAS_API_KEY missing on backend for selected model'});
-  if((answerProvider==='openai'||answerProvider==='terra'||answerProvider==='luna')&&!OPENAI_API_KEY)return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for selected model'});
+  if((answerProvider==='openai'||answerProvider==='terra'||answerProvider==='luna'||answerProvider==='gpt4o')&&!OPENAI_API_KEY)return res.status(500).json({ok:false,error:'OPENAI_API_KEY missing on backend for selected model'});
   if (yearsExperience!==null && (!Number.isFinite(yearsExperience) || yearsExperience < 0 || yearsExperience > 60)) return res.status(400).json({ ok:false, error:'yearsExperience must be between 0 and 60 when provided' });
   if (!req.body.resume) return res.status(400).json({ ok:false, error:'Resume is required' });
   const t0 = Date.now();
@@ -1900,7 +1981,7 @@ app.post('/prepare-context', async (req, res) => {
       stats:{ resumeChars:resumeText.length, jdChars:jdText.length, chunkCount:chunks.length, parseMs, summaryMs, embeddingMs }
     });
     console.log(`[RAG] Prepared ${email}: ${chunks.length} chunks in ${Date.now()-t0}ms`);
-    return res.json({ ok:true, answerProvider, answerModel:answerProvider==='deepseek'?DEEPSEEK_MODEL:(answerProvider==='cerebras'?CEREBRAS_MODEL:(answerProvider==='terra'?OPENAI_TERRA_MODEL:(answerProvider==='luna'?OPENAI_LUNA_MODEL:LLM_DEFAULT_MODEL))), chunkCount:chunks.length, profile:{ yearsExperience:resolvedYears, targetRole:resolvedRole, primarySkills:(profile.primarySkills || []).slice(0,12), jdProvided:!!jdText }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
+    return res.json({ ok:true, answerProvider, answerModel:answerProvider==='gpt4o'?GPT4O_MODEL:answerProvider==='deepseek'?DEEPSEEK_MODEL:(answerProvider==='cerebras'?CEREBRAS_MODEL:(answerProvider==='terra'?OPENAI_TERRA_MODEL:(answerProvider==='luna'?OPENAI_LUNA_MODEL:LLM_DEFAULT_MODEL))), chunkCount:chunks.length, profile:{ yearsExperience:resolvedYears, targetRole:resolvedRole, primarySkills:(profile.primarySkills || []).slice(0,12), jdProvided:!!jdText }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
   } catch (err) {
     console.error('[RAG] Prepare error:', err.message);
     return res.status(500).json({ ok:false, error:err.message || 'Context preparation failed' });
@@ -1933,7 +2014,7 @@ app.post('/ask', async (req, res) => {
     answer=(await ensureModeConformance({answer,responseType:prepared.responseType,prompt:prepared.prompt,model:route.model,effort:route.effort,provider:route.provider})).answer;
     if (prepared.session && answer) addTurn(prepared.session,prepared.intentQuestion||text,answer,prepared.retrieved,prepared.responseType);
     const latency = { embeddingMs:prepared.latency.embeddingMs, retrievalMs:prepared.latency.retrievalMs, retrievalMode:prepared.latency.retrievalMode, promptReadyMs:prepared.latency.promptReadyMs, llmMs:Date.now()-llmStart, totalMs:Date.now()-prepared.latency.startedAt };
-    const providerServiceTier=route.provider==='deepseek'?'standard':route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:String(data?.service_tier||OPENAI_SERVICE_TIER);
+    const providerServiceTier=(route.provider==='deepseek'||route.provider==='gpt4o')?'standard':route.provider==='cerebras'?CEREBRAS_SERVICE_TIER:String(data?.service_tier||OPENAI_SERVICE_TIER);
     console.log(`[LLM] ${email} model=${route.model} modelTier=${route.tier} serviceTier=${providerServiceTier} total=${latency.totalMs}ms embed=${latency.embeddingMs}ms retrieve=${latency.retrievalMs}ms mode=${prepared.latency.retrievalMode} llm=${latency.llmMs}ms`);
     return res.json({ ok:true, answer, model:route.model, modelTier:route.tier, serviceTier:providerServiceTier, contextPrepared:!!prepared.session, retrieved:prepared.retrieved.map(c => ({source:c.source, section:c.section, score:Number(c.score.toFixed(3))})), latency });
   } catch (err) {
@@ -2229,7 +2310,7 @@ app.post('/ask/stream', async (req, res) => {
             emit('meta', {model:route.model,modelTier:route.tier,phase:'retry',reason:`provider HTTP ${status}`});
             continue;
           }
-          throw new Error(data?.error?.message || `${route.provider==='deepseek'?'DeepSeek':route.provider==='cerebras'?'Cerebras':'OpenAI'} request failed (${status})`);
+          throw new Error(data?.error?.message || `${providerLabel(route.provider)} request failed (${status})`);
         }
         const reader = upstream.body.getReader();
         const decoder = new TextDecoder();
@@ -2259,7 +2340,7 @@ app.post('/ask/stream', async (req, res) => {
               answer += delta;
               emit('delta', { delta });
             }
-            if (eventType==='error' || evt?.error) throw new Error(evt?.error?.message || evt?.message || `${route.provider==='deepseek'?'DeepSeek':route.provider==='cerebras'?'Cerebras':'OpenAI'} stream error`);
+            if (eventType==='error' || evt?.error) throw new Error(evt?.error?.message || evt?.message || `${providerLabel(route.provider)} stream error`);
             if (route.provider==='openai' && eventType==='response.completed' && evt?.response?.service_tier) providerServiceTier=String(evt.response.service_tier);
             if (route.provider==='openai' && eventType==='response.completed' && evt?.response?.usage) providerUsage=evt.response.usage;
             if (route.provider==='openai' && eventType==='response.failed') throw new Error(evt?.response?.error?.message || 'OpenAI response failed');
