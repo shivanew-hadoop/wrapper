@@ -18,3 +18,12 @@ Changed: backend/server.js, main.js, setup/index.html, setup/setup.js; QUALITY_D
 - GPT-4o dropdown option ("gpt4o"): OpenAI Chat Completions, model GPT4O_MODEL (default gpt-4o), same instructions/input/token ceiling/streaming as DeepSeek, local retrieval (no embedding calls), no extra calls, no reasoning/service-tier fields. Uses OPENAI_API_KEY.
 - Role: title pattern now knows Forward-Deployed, GenAI, Conversational, Scientist etc.; ALL-CAPS titles are title-cased; a JD title line beats a "looking for ... engineer" sentence; CV "A / B / C" lists keep the CV seniority and pick the alternative matching the JD's role noun. Priority is unchanged: supplied role, CV title, JD title, inferred.
 Not verified live: model output quality and latency (no API keys here). Replay the 12 questions in staging for DeepSeek and GPT-4o and compare p50/p95 first-token and total latency. Rollback: restore previous backend/server.js, main.js, setup files.
+
+## v14.9.25 (built on v14.9.23; v14.9.24 prompt changes dropped)
+Baseline: v14.9.23 DeepSeek spoken prompt and input builder, restored verbatim (v14.9.24's plain-by-default format, plain-words block, earlier-answers memory and screen split are NOT included).
+Changed on top of v23:
+- Format: bullets keep v23's trigger (flow/design/how-to) but are now "- I ..." sentences with the stage/topic folded into the sentence; no headings, "Label:" prefixes or bold. Definitions ("what is/what are") stay plain lines.
+- SQL vs SOQL: "SQL" means standard relational SQL; SOQL only when the interviewer says SOQL/Salesforce (local technical check + rule "technology asked = technology answered").
+- Mishearing repairs (local, no model call): joints->joins (near SQL), implicit/explicit/fluent rate->wait, optics->objects (near Salesforce), profiles and roads->roles. Never tell the interviewer a term "doesn't exist".
+Kept from v14.9.24 because they do not change answer format: GPT-4o dropdown option (same prompts/limits/streaming as DeepSeek), CV+JD role extraction, "ok/thank you" no-answer guard, local checks for "tool calling only MCP" (answer No) and project status/user counts.
+Not verified live (no API keys). Replay in staging and compare p50/p95 latency. Rollback: restore previous backend/server.js, main.js, setup files.

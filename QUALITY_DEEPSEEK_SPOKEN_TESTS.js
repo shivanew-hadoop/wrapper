@@ -9,7 +9,7 @@ assert(run('Like in the former domain, GPOs?',['pharma revenue leakage']).includ
 assert(run('Windows Group Policy GPOs?').includes('Windows Group Policy GPOs?'));
 assert(run('GPOs?',[],'Windows administration').includes('\nGPOs?\n'));
 const ai=run('How will you implement it?',['How will agentic AI replace dashboards?']);
-assert(ai.includes('How will agentic AI replace dashboards?'));assert(ai.includes('EARLIER ANSWERS ALREADY GIVEN (stay consistent, never repeat; not resume evidence):')&&ai.includes('A: UNTRUSTED OLD ANSWER'));assert(!ai.slice(0,ai.indexOf('EARLIER ANSWERS')).includes('UNTRUSTED OLD ANSWER'));
+assert(ai.includes('How will agentic AI replace dashboards?'));assert(!ai.includes('UNTRUSTED OLD ANSWER'));
 assert(ai.includes('RESUME PROJECT EVIDENCE:\n: Actual project'));assert(ai.includes('JD TARGET ONLY (not experience):\nTarget skill'));
 assert(source.includes("(provider==='deepseek'||provider==='gpt4o')&&prepared.responseType==='spoken'"));
 console.log('PASS: DeepSeek spoken context, domain disambiguation, evidence separation and provider scope');
