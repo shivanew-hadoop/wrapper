@@ -326,9 +326,10 @@ Never open with 'From what I can speak to directly', 'I'd frame it this way', 'I
 // DeepSeek-only spoken rules: ChatGPT-style labelled bullets, answer-the-layer-asked,
 // no denial of CV-listed tools, no CV/JD talk in speech. Prompt text only; no extra calls.
 const DEEPSEEK_SPOKEN_RULES=`
-DEEPSEEK ANSWER FORMAT (overrides any earlier format rule that conflicts): Speak as the candidate in first person with "I" (I would / I configure / I check / I validate); avoid "we". Lead with 1–2 lines that directly answer in practical production terms. For architecture, data-flow, pipeline, orchestration, scheduling, data-model, configuration, step-by-step, RAG-pipeline and "walk me through" questions, follow with 4–6 bullets, each on its own line starting with "- I" and one specific detail (max 22 words), folding the stage or topic name into the sentence itself, e.g. "- I pull the sources from SQL, SharePoint and REST APIs" or "- I land the raw files in S3 by source and date"; never write a heading, a "Label:" prefix or bold text. Then at most one closing line on my ownership or how I validate it. Simple factual, definition ("what is / what are"), yes/no, behavioural and wrap-up questions: 2–4 plain lines, no bullets. Introductions and requested long answers: short natural paragraphs, no bullets. Bulleted answers run about 70–120 words. No bold text, headings or section labels anywhere. Prefer current managed approaches over legacy ones when relevant.
+DEEPSEEK ANSWER FORMAT (overrides any earlier format rule that conflicts): Speak as the candidate in first person with "I" (I would / I configure / I check / I validate); avoid "we". Lead with 1–2 lines that directly answer in practical production terms. For architecture, data-flow, pipeline, orchestration, scheduling, data-model, configuration, step-by-step, RAG-pipeline and "walk me through" questions, follow with 4–6 bullets, each on its own line starting with "- I" and one specific detail (max 22 words), folding the stage or topic name into the sentence itself, e.g. "- I pull the sources from SQL, SharePoint and REST APIs" or "- I land the raw files in S3 by source and date"; never write a heading, a "Label:" prefix or bold text. For technical questions put the exact command, statement, API call, setting or short code in backticks inside the bullet or plain line (e.g. \`SELECT ... FROM ... WHERE ...\`, a CLI command, \`await expect(locator).toBeVisible()\`, a Setup path), one per point where it fits; a definition may carry one short real example. Then at most one closing line on my ownership or how I validate it. Simple factual, definition ("what is / what are"), yes/no, behavioural and wrap-up questions: 2–4 plain lines, no bullets. Introductions and requested long answers: short natural paragraphs, no bullets. Bulleted answers run about 70–130 words. No bold text, headings or section labels anywhere. Prefer current managed approaches over legacy ones when relevant.
 ANSWER THE LAYER ASKED: use the nearest interviewer questions to decide the layer. In an ingestion/storage/cloud-infrastructure thread (sources, landing zone, S3, Lambda, Snowflake), "orchestration", "separate", "bucketing", "history" and "design" mean data-pipeline scheduling, S3 bucket/prefix layout, retention and table design (Databricks Jobs, EventBridge, Step Functions, Airflow, Snowflake Tasks), NOT LangChain/agent orchestration or the RAG index. Move to the RAG/LLM layer only when asked. If one speech holds several distinct questions, answer each in order as its own short paragraph, newest last; never answer only the last. Never echo speech-recognition artifacts (counting "one, two, three", "next scale", "or something like that", fillers, mishears) as content.
 TECHNOLOGY ASKED = TECHNOLOGY ANSWERED: answer the technology the interviewer names. "SQL" means standard relational SQL (joins, keys, indexes, group by), never Salesforce SOQL unless the interviewer says SOQL or Salesforce; likewise Selenium vs Playwright, REST vs GraphQL. The resume's domain (Salesforce, healthcare, banking) never replaces the topic asked; use it only for one short example when it helps. A word that sounds like a finance or unrelated term inside a software interview is a mishearing: choose the technical reading from the nearest questions (implicit rate = implicit wait, joints = joins, optics in Salesforce = objects). Never tell the interviewer a term "doesn't exist"; answer the closest standard term.
+COMMANDS STAY ON TOPIC: every command, query, API call or setting must be real and belong to the exact technology and topic asked (a Salesforce access question gets Setup paths, SOQL on permission objects and profile/permission-set checks; a SQL question gets SQL; a Playwright question gets Playwright calls); never borrow another stack's syntax, never invent flags or object names, and if the exact syntax is uncertain describe the step instead.
 CV-LISTED TOOLS (anything in the CV-LISTED TOOLS block, e.g. S3, Lambda, Snowflake, Databricks, Kendra, Redshift): never say "I haven't worked hands-on" about them. Give the concrete design with "I would" or "my design" and do not invent project names, counts, dates or incidents that the resume evidence lacks; one short phrase like "that's the layout I'd standardize on" is enough. Say "I haven't used X hands-on" only for a tool absent from both the resume evidence and the CV-LISTED TOOLS, then give the closest transferable experience in one or two lines.
 NEVER mention the CV, resume, JD, job description or target role in the spoken answer, never compare the CV with the job, and never volunteer gaps or what is "not in the CV" unless the interviewer directly asks about that exact tool.`;
 function sharesDeepseekPrompts(provider){return provider==='deepseek'||provider==='gpt4o';}
@@ -477,7 +478,8 @@ function deepseekSpokenInput(prepared) {
   // Tools the CV lists (skills table / environment lines): stops false "never worked with S3/Lambda/Snowflake" denials.
   const listedTools=resume.filter(c=>/\b(?:cloud platforms|data engineering|environment\s*:)/i.test(String(c.text||''))).map(c=>String(c.text||'').slice(0,450)).join('\n').slice(0,900);
   const preferences=String(prepared.session?.userInstructions||'').slice(0,1000);
-  return `LATEST INTERVIEWER SPEECH (answer only the substantive request):\n${question}\n\nRECENT INTERVIEWER QUESTIONS (context, not requests; newest last):\n${context}\n\nCANDIDATE: ${prepared.session?.role||profile.targetRole||''}; years: ${prepared.session?.yearsExperience??'unknown'}\n${String(profile.candidateSummary||'').slice(0,900)}\n\nRESUME PROJECT EVIDENCE:\n${evidence}\n\nRESUME TIMELINE EXCERPTS (for current/latest project and ownership):\n${timeline}\n\nCV-LISTED TOOLS (candidate's own skills/environment; never deny these):\n${listedTools}\n\nJD TARGET ONLY (not experience):\n${jd}\n\nPRESENTATION PREFERENCES:\n${preferences}\n\nResolve short follow-ups against the nearest substantive interviewer question even if the follow-up classifier missed it. Ignore abandoned fragments, names, greetings and transcription noise. Preserve explicit new topics and all genuine requested parts. Do not infer an unrelated topic from the JD or an acronym's alternate meaning. For repeated questions add the requested missing detail rather than replaying the previous answer. Use resume evidence for past work; use conditional language for proposed designs. A missing detail is not proof of no experience. No invented metrics, time splits, ownership or tools. Answer in the DEEPSEEK ANSWER FORMAT: direct 1–2 lines, then labelled "- **Label:** detail" bullets for flow/design/how-to questions (plain 2–4 lines otherwise), roughly 60–120 words; explicit introductions or requested expanded answers may be longer. Answer the data/infrastructure layer when the thread is about ingestion, S3, Lambda or Snowflake; answer every distinct question in the speech in order; never mention the CV, resume or JD. Give concrete mechanisms, configuration, failure handling or verification as relevant, not a list of buzzwords. For incidents lead with business impact and containment, then diagnosis, recovery and validation. For design give ordered flow, state/control, isolation and verification as relevant. For domain questions name the actual business entities, keys and checks. Do not force every category into every answer. No preamble, repeated caveats or closing summary.`;
+  const repairs=(prepared.canonicalReplacements||[]).filter(r=>r&&r.from&&r.to).slice(0,6).map(r=>`${String(r.from).slice(0,60)} -> ${String(r.to).slice(0,60)}`).join('; ');
+  return `LATEST INTERVIEWER SPEECH (answer only the substantive request):\n${question}${repairs?`\n(Speech repairs already applied, heard -> intended; answer the intended wording: ${repairs})`:''}\n\nRECENT INTERVIEWER QUESTIONS (context, not requests; newest last):\n${context}\n\nCANDIDATE: ${prepared.session?.role||profile.targetRole||''}; years: ${prepared.session?.yearsExperience??'unknown'}\n${String(profile.candidateSummary||'').slice(0,900)}\n\nRESUME PROJECT EVIDENCE:\n${evidence}\n\nRESUME TIMELINE EXCERPTS (for current/latest project and ownership):\n${timeline}\n\nCV-LISTED TOOLS (candidate's own skills/environment; never deny these):\n${listedTools}\n\nJD TARGET ONLY (not experience):\n${jd}\n\nPRESENTATION PREFERENCES:\n${preferences}\n\nResolve short follow-ups against the nearest substantive interviewer question even if the follow-up classifier missed it. Ignore abandoned fragments, names, greetings and transcription noise. Preserve explicit new topics and all genuine requested parts. Do not infer an unrelated topic from the JD or an acronym's alternate meaning. For repeated questions add the requested missing detail rather than replaying the previous answer. Use resume evidence for past work; use conditional language for proposed designs. A missing detail is not proof of no experience. No invented metrics, time splits, ownership or tools. Answer in the DEEPSEEK ANSWER FORMAT: direct 1–2 lines, then labelled "- **Label:** detail" bullets for flow/design/how-to questions (plain 2–4 lines otherwise), roughly 60–120 words; explicit introductions or requested expanded answers may be longer. Answer the data/infrastructure layer when the thread is about ingestion, S3, Lambda or Snowflake; answer every distinct question in the speech in order; never mention the CV, resume or JD. Give concrete mechanisms, configuration, failure handling or verification as relevant, not a list of buzzwords. For incidents lead with business impact and containment, then diagnosis, recovery and validation. For design give ordered flow, state/control, isolation and verification as relevant. For domain questions name the actual business entities, keys and checks. Do not force every category into every answer. No preamble, repeated caveats or closing summary.`;
 }
 function providerInterviewInput(provider,prepared) {
   if(provider!=='cerebras'&&provider!=='deepseek'&&provider!=='gpt4o')return prepared.prompt;
@@ -686,6 +688,71 @@ function editDistance(a, b) {
   }
   return row[b.length];
 }
+// Speech-intent repair (local, deterministic, no model call). Live STT often hears a technical phrase as
+// ordinary words ("difficult life cycle", "record on security"). These repairs use the prepared CV/JD
+// vocabulary plus the last few interviewer questions, and each repair is gated by that context.
+const STT_TECH_LEXICON=['Playwright','Selenium','TestNG','Postman','Jenkins','GitHub','JavaScript','TypeScript','XPath','Salesforce','Sandbox','Cucumber','Appium','Cypress','JUnit','Swagger','Kubernetes','Terraform','Snowflake','Databricks','PySpark','Pytest','FastAPI','LangChain','LangGraph','Dialogflow','WebDriver'];
+function mergeSplitTechTerms(text,vocab,replacements) {
+  const terms=Array.from(new Set([...STT_TECH_LEXICON,...(vocab||[]).map(v=>String(v||'').trim())].filter(t=>/^[A-Za-z]{6,}$/.test(t))));
+  const words=[];const wordRe=/[A-Za-z]+/g;let m;
+  while((m=wordRe.exec(text)))words.push({w:m[0],start:m.index,end:m.index+m[0].length});
+  let out='',cursor=0,i=0;
+  while(i<words.length){
+    let hit=null;
+    for(const n of [3,2]){
+      if(i+n>words.length)continue;
+      const seg=words.slice(i,i+n);
+      if(!seg.every((x,k)=>k===0||text.slice(seg[k-1].end,x.start)===' '))continue;
+      if(!seg.some(x=>x.w.length<=5))continue;
+      const joined=seg.map(x=>x.w).join('').toLowerCase();
+      if(joined.length<6)continue;
+      let best=null;
+      for(const term of terms){
+        if(Math.abs(term.length-joined.length)>1)continue;
+        const d=editDistance(joined,term.toLowerCase());
+        if((d===0||(d===1&&term.length>=9))&&(!best||d<best.d))best={term,d};
+      }
+      if(best){hit={n,term:best.term,from:text.slice(seg[0].start,seg[n-1].end)};break;}
+    }
+    if(hit){
+      out+=text.slice(cursor,words[i].start)+hit.term;cursor=words[i+hit.n-1].end;
+      replacements.push({from:hit.from,to:hit.term,distance:0,kind:'split-term'});
+      i+=hit.n;
+    } else i++;
+  }
+  return out+text.slice(cursor);
+}
+function applySttIntentRepairs(working,context,recentText,replacements) {
+  const low=working.toLowerCase();
+  const ctx=`${context} ${low}`;
+  const sf=/\b(?:salesforce|apex|soql|lwc|lightning|sandbox|permission sets?|profiles?|owd|sharing rules?|org-wide)\b/.test(ctx);
+  const qa=/\b(?:playwright|selenium|testng|automation|testing|test cases?|defect|regression|api testing|postman)\b/.test(ctx);
+  const cloudProvider=/\b(?:aws|azure|gcp|s3|bucket|blob|gcs)\b/.test(`${recentText} ${low}`);
+  const rules=[
+    [/\bdifficult\s+(life\s*cycle|lifecycle)\b/gi,(m,l)=>`defect ${l}`,true],
+    [/\bdifficult\s+(leakage|density|triage|tracking|report|management|priority|severity)\b/gi,(m,w)=>`defect ${w}`,qa],
+    [/\b(?:order|other|odd)\s+(?:period|per\s?it|record|object)\s+level\b/gi,()=>'object, field and record level',sf||/\b(?:access|security|sharing)\b/.test(low)],
+    [/\bwhat\s+(?:i|is|are|do|does)?\s*(?:the\s+)?look\s*up\s+(?:on|and|vs\.?|versus|or|n)\s+master[\s-]*(?:retail|retailed|detail|details|data)\s+relationships?\b/gi,()=>'What is the difference between lookup and master-detail relationships',true],
+    [/\bmaster[\s-]+(?:retail|retailed|details)\b/gi,()=>'master-detail',sf||/\b(?:relationships?|lookup)\b/.test(low)],
+    [/\b(object|record|field|row|column)\s+(?:on|cloud|clone|love|lover|labels?|lable|lvl|lever)\s+(security|access|permissions?|sharing)\b/gi,(m,a,b)=>`${a} level ${b}`,!cloudProvider],
+    [/\bfunction\s+objects?\b/gi,m=>/s$/i.test(m)?'junction objects':'junction object',sf],
+    [/\bgovern(?:ance|ess|ing)\s+limits?\b/gi,m=>/s$/i.test(m)?'governor limits':'governor limit',sf],
+    [/\b(?:sock\s*l|so\s*quel|soak\s*l|s\s+o\s+q\s+l)\b/gi,()=>'SOQL',sf],
+    [/\ba\s*pecks?\b|\ba\s+pex\b/gi,()=>'Apex',sf],
+    [/\bplay\s?(?:rate|right|write|wright|rite|ride)\b/gi,()=>'Playwright',qa],
+    [/\bpost\s*(?:mail|men|man)\b/gi,()=>'Postman',/\b(?:api|postman|testing|rest)\b/.test(ctx)],
+    [/\bsmoking\s+(test(?:ing|s)?)\b/gi,(m,w)=>`smoke ${w}`,qa],
+    [/\bdigression\s+(test(?:ing|s)?)\b/gi,(m,w)=>`regression ${w}`,qa],
+    [/\b(implicit|explicit|fluent)\s+(?:rate|weight|wade|wake)\b/gi,(m,w)=>`${w} wait`,qa],
+    [/\bprofiles and (?:roads?|rolls?)\b/gi,()=>'profiles and roles',sf],
+    [/\boptics\b(?=.{0,30}\bsalesforce\b)/gi,()=>'objects',true]
+  ];
+  for(const [rx,to,when] of rules){
+    if(!when)continue;
+    working=working.replace(rx,(...a)=>{const out=to(...a);replacements.push({from:a[0],to:out,distance:0,kind:'intent-phrase'});return out;});
+  }
+  return working;
+}
 function resolveCanonicalQuestion(session, question) {
   const profileVocab = session?.profile?.domainVocabulary || session?.profile?.primarySkills || [];
   const original = String(question || '');
@@ -747,9 +814,14 @@ function resolveCanonicalQuestion(session, question) {
     });
   }
 
+  const recentText=(session?.turns||[]).slice(-3).map(t=>String(t.question||'')).join(' ').toLowerCase();
+  working=applySttIntentRepairs(working,technologyContext,recentText,replacements);
+  working=mergeSplitTechTerms(working,profileVocab,replacements);
+  const protectedTokens=new Set(replacements.flatMap(r=>String(r.to||'').toLowerCase().match(/[a-z0-9+#]+/g)||[]));
   if (!profileVocab.length) return { corrected:working, replacements };
   const corrected = working.replace(/\b[A-Za-z][A-Za-z0-9+#.-]{1,}\b/g, token => {
     const cleanToken = token.toLowerCase().replace(/[^a-z0-9+#]/g, '');
+    if (protectedTokens.has(cleanToken)) return token;
     // Bias correction toward acronym/technology-looking STT tokens. Ordinary prose is left untouched.
     const techLike = /^[A-Z0-9+#.-]{2,}$/.test(token) || /[+#.]/.test(token) || token.length >= 5;
     if (!techLike) return token;
