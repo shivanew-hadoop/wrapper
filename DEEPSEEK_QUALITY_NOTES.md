@@ -28,11 +28,15 @@ Changed on top of v23:
 Kept from v14.9.24 because they do not change answer format: GPT-4o dropdown option (same prompts/limits/streaming as DeepSeek), CV+JD role extraction, "ok/thank you" no-answer guard, local checks for "tool calling only MCP" (answer No) and project status/user counts.
 Not verified live (no API keys). Replay in staging and compare p50/p95 latency. Rollback: restore previous backend/server.js, main.js, setup files.
 
-## v14.9.26 (built on v14.9.25): question-intent repair + on-topic commands
-Format, bullets, routing, models, retrieval, token budgets and the GPT-4o option are unchanged.
-- Local speech-intent repair inside resolveCanonicalQuestion (no model call, no new request): phrase repairs gated by CV/JD vocabulary and the last three interviewer questions: difficult life cycle -> defect life cycle; order period level -> object, field and record level; "look up on master retail relationships" -> difference between lookup and master-detail relationships; record/object/field + on|cloud|clone -> "... level security" (skipped when AWS/Azure/GCP/S3/bucket is in the current or recent question); function object -> junction object; governance limits -> governor limits; sock l -> SOQL; PlayRate/play right -> Playwright; post mail -> Postman; smoking test -> smoke test; digression test -> regression test; implicit/explicit/fluent rate -> wait.
-- Split technology names are merged against the built-in lexicon plus CV/JD vocabulary (test ng -> TestNG, git hub -> GitHub, sand box -> sandbox); repaired words are protected from the existing fuzzy matcher.
-- The DeepSeek/GPT-4o spoken input now carries one bounded line "(Speech repairs already applied, heard -> intended ...)" when something was repaired, so the model answers the intended wording.
-- Rules: technical bullets/definitions carry the exact command, statement, API call, setting or short code in backticks (one per point where it fits); new COMMANDS STAY ON TOPIC rule (real syntax, exact technology asked, no borrowed stacks, no invented flags). Bulleted word budget 70-120 -> 70-130.
-Tests: QUALITY_INTENT_REPAIR_TESTS.js (new, uses the reported phrases plus false-positive and context-gate cases); all existing suites pass.
-Not verified live (no API keys). Replay the 50-question transcript in staging and compare p50/p95 latency. Rollback: restore previous backend/server.js.
+## v14.9.27 — CV facts (current client, dates, personal details)
+Root cause: CV headings were glued DOCX cells ("McDonald’s, ILDec 2022 - Till Now") with no "Client:/Role:" labels, so the resume timeline filter returned nothing and the model guessed (Morgan Stanley / 2022–2024) or claimed clients are not named.
+Fix (no format/architecture/latency change; no extra model call):
+- `normalizeResumeHeadings` splits glued employer/location/date headings; employer headers become chunk sections and sub-sections keep the employer.
+- `extractCvFacts` parses employers, location, role, start/end, current ("Till Now/Present"), duration, project description, Client:/Project: labels, name/contact, education, certifications; stored in `session.cvFacts` at /prepare-context.
+- `cvFactsPromptBlock` injects an authoritative CV FACTS block plus a deterministic `DIRECT CV FACT` line (current/latest/previous/named client, duration, list, contact, education, certifications) into spoken, chat-provider and OpenAI prompts.
+- Spoken rules: name clients/employers directly, never deny a CV-listed employer.
+- Role extraction falls back to the most recent employer's title when the CV has no title line.
+- Tests: QUALITY_CV_FACTS_TESTS.js with the real Data_Engineerrr CV.
+
+## v14.9.28 — answer shape
+Immediate 1–2 line answer, then "- I …" bullets with the topic folded into the sentence (no "Term: description" headings). Labels (A:, B:, Difference:) only for difference/compare/A-vs-B questions. Applied to spoken (DeepSeek/GPT-4o) rules and a compact rule for multi-question chat-provider answers. No change to retrieval, routing, latency or OpenAI prompts.

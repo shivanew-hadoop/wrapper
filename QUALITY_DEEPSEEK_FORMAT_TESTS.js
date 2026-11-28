@@ -12,7 +12,7 @@ assert(sys.includes('follow with 4–6 bullets, each on its own line starting wi
 assert(sys.includes('never write a heading, a "Label:" prefix or bold text')&&sys.includes('No bold text, headings or section labels anywhere'));
 assert(!sys.includes('**Label:**')&&!sys.includes('Bold only the bullet labels')&&!sys.includes('own bold label'));
 assert(sys.includes('definition ("what is / what are")'));
-assert(sys.includes('Lead with 1–2 lines that directly answer')&&sys.includes('Bulleted answers run about 70–130 words'));
+assert(sys.includes('Lead with 1–2 lines that directly answer')&&sys.includes('Bulleted answers run about 70–120 words'));
 // v23 grounding rules still present
 assert(sys.includes('ANSWER THE LAYER ASKED')&&sys.includes('CV-LISTED TOOLS')&&sys.includes('NEVER mention the CV, resume, JD'));
 // technology asked = technology answered
@@ -68,3 +68,7 @@ const jd1='Job Description\nConversational AI Data Engineer\n\nLooking for a han
 assert.strictEqual(ctx.inferTargetRoleFromDocuments(cv1,jd1),'Lead GenAI Engineer');
 assert.strictEqual(ctx.inferTargetRoleFromDocuments('TEJASWI\nFORWARD DEPLOYED AI ENGINEER | ENTERPRISE AI SOLUTIONS ARCHITECT\nTampa','Role: Forward-Deployed AI Engineer — Enterprise AI'),'Forward Deployed AI Engineer');
 console.log('PASS: v23 format kept with I-bullets and no headings; SQL is not SOQL; mishearing repairs; GPT-4o parity; role; ack guard');
+// v14.9.28 answer-shape rules
+{const fs=require('fs');const t=fs.readFileSync(__dirname+'/backend/server.js','utf8');
+ for(const k of ['ANSWER SHAPE (strict)','COMPARISON EXCEPTION','CHAT_SHAPE_RULE'])if(!t.includes(k))throw new Error('missing '+k);
+ console.log('PASS: v14.9.28 answer shape + comparison exception');}

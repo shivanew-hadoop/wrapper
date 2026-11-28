@@ -188,6 +188,7 @@ function guessHeading(line) {
   if (!s || s.length > 80) return false;
   if (/^(summary|profile|skills|technical skills|experience|work experience|professional experience|projects?|education|certifications?|responsibilities|requirements|qualifications|preferred|about the role|job description|what you will do|must have|nice to have)\b/i.test(s)) return true;
   if (s.endsWith(':') && s.split(/\s+/).length <= 8) return true;
+  if (/ \| /.test(s) && CV_RANGE_RX.test(s)) return true; // normalized employment header
   if (s.length >= 4 && s === s.toUpperCase() && /[A-Z]/.test(s)) return true;
   return false;
 }
@@ -196,9 +197,16 @@ function semanticChunks(text, source) {
   const sections = [];
   let heading = source === 'resume' ? 'Resume' : 'Job Description';
   let buf = [];
+  let employerHead = '';
   const flushSection = () => { if (buf.length) { sections.push({ heading, text:buf.join('\n') }); buf = []; } };
   for (const line of lines) {
-    if (guessHeading(line)) { flushSection(); heading = line.replace(/:$/, ''); }
+    if (guessHeading(line)) {
+      flushSection();
+      const isEmployerHeader = / \| /.test(line) && CV_RANGE_RX.test(line);
+      if (isEmployerHeader) employerHead = line;
+      else if (/^(?:summary|profile|skills|technical skills|education|certifications?|qualification)/i.test(line)) employerHead = '';
+      heading = (!isEmployerHeader && employerHead) ? `${employerHead} › ${line.replace(/:$/, '')}` : line.replace(/:$/, '');
+    }
     else buf.push(line);
   }
   flushSection();
@@ -267,6 +275,130 @@ function cerebrasReasoningEffort(effort=CEREBRAS_REASONING_EFFORT) {
 // Sol/OpenAI prompts, streaming protocol, STT, RAG retrieval and UI remain unchanged.
 // Quality v5: first-person spoken delivery and technical guardrails for both chat providers.
 // No extra model call; the OpenAI/Sol prompt and route are left intact.
+// CVFACTS_BEGIN v14.9.27: deterministic CV parsing so employer/client/date/personal questions never depend on keyword retrieval.
+const CV_MON='(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\\.?';
+const CV_START=`(?:${CV_MON}\\s*\\d{4}|\\d{1,2}\\s*[\\/-]\\s*\\d{4}|\\d{4})`;
+const CV_END=`(?:Till\\s*(?:Now|Date|Today)|To\\s*Date|Present|Current(?:ly)?|Now|Ongoing|${CV_START})`;
+const CV_RANGE_RX=new RegExp(`(${CV_START})\\s*(?:-|–|—|to|until)\\s*(${CV_END})\\s*$`,'i');
+const CV_MONTHS=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+function cvParseDate(s){
+  s=String(s||'').trim();
+  let m=/^([A-Za-z]{3})[a-z]*\.?\s*(\d{4})$/.exec(s);
+  if(m){const i=CV_MONTHS.indexOf(m[1].toLowerCase());if(i>=0)return {y:+m[2],m:i};}
+  m=/^(\d{1,2})\s*[\/-]\s*(\d{4})$/.exec(s);if(m)return {y:+m[2],m:Math.max(0,Math.min(11,+m[1]-1))};
+  m=/^(\d{4})$/.exec(s);if(m)return {y:+m[1],m:0};
+  return null;
+}
+function cvIsOpenEnd(s){return /^(?:till|to\s*date|present|current|now|ongoing)/i.test(String(s||'').trim());}
+function cvDuration(start,end,now=new Date()){
+  const a=cvParseDate(start);if(!a)return '';
+  const b=cvIsOpenEnd(end)?{y:now.getFullYear(),m:now.getMonth()}:cvParseDate(end);if(!b)return '';
+  const months=(b.y-a.y)*12+(b.m-a.m)+1;if(months<=0)return '';
+  const y=Math.floor(months/12),mo=months%12;
+  return `${y?`${y} year${y>1?'s':''}`:''}${y&&mo?' ':''}${mo?`${mo} month${mo>1?'s':''}`:''}`||'1 month';
+}
+function normalizeResumeHeadings(text){
+  // "McDonald’s, ILDec 2022 - Till Now" -> "McDonald’s, IL | Dec 2022 - Till Now" (glued DOCX table cells).
+  return String(text||'').replace(/\r/g,'').split('\n').map(line=>{
+    const t=line.trim();
+    if(!t||t.length>150||/^[•·▪◦†*\-]/.test(t))return line;
+    const m=CV_RANGE_RX.exec(t);if(!m)return line;
+    const prefix=t.slice(0,m.index).replace(/[\s,|–—-]+$/,'').trim();
+    if(!prefix||prefix.split(/\s+/).length>12||/[.;]\s/.test(prefix))return line;
+    return `${prefix} | ${m[1].trim()} - ${m[2].trim()}`;
+  }).join('\n');
+}
+function extractCvFacts(rawText){
+  const text=normalizeResumeHeadings(rawText);
+  const lines=text.split('\n').map(x=>x.trim());
+  const facts={name:'',email:'',phone:'',linkedin:'',education:[],certifications:[],employers:[]};
+  facts.email=(text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/)||[''])[0];
+  facts.phone=(text.match(/(?:\+\d{1,3}[\s-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b/)||[''])[0];
+  facts.linkedin=(text.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/[^\s)]+/i)||[''])[0];
+  const first=lines.filter(Boolean).slice(0,4);
+  for(const l of first){ if(/^[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}$/.test(l)&&!/\b(?:summary|profile|experience|engineer|developer|analyst|architect|manager|education|skills)\b/i.test(l)){facts.name=l;break;} }
+  const nm=/^(?:full\s+)?name\s*[:\-]\s*(.+)$/im.exec(text);if(nm)facts.name=nm[1].trim().slice(0,80);
+  // Employment blocks.
+  const idx=[];
+  lines.forEach((l,i)=>{ const m=/^(.+?) \| (.+?) - (.+)$/.exec(l); if(m&&CV_RANGE_RX.test(`${m[2]} - ${m[3]}`))idx.push({i,m}); });
+  idx.forEach((h,k)=>{
+    const endLine=k+1<idx.length?idx[k+1].i:lines.length;
+    const body=lines.slice(h.i+1,endLine);
+    const parts=h.m[1].split(/\s*,\s*/);
+    const employer=parts[0].trim();
+    const location=parts.slice(1).join(', ').trim();
+    let role='';
+    for(const b of body.slice(0,4)){ if(!b)continue; if(b.length<=90&&!/:$/.test(b)&&!/^mission|^project|^responsibilit/i.test(b)&&!/[.;]\s/.test(b)){role=b;} break; }
+    let project='',client='',projectName='';
+    for(const b of body){
+      let m=/^(?:project\s*description|project\s*overview|description)\s*:\s*(.+)$/i.exec(b);if(m&&!project)project=m[1];
+      m=/^client\s*:\s*(.+)$/i.exec(b);if(m&&!client)client=m[1].trim();
+      m=/^project(?:\s*name)?\s*:\s*(.{2,100})$/i.exec(b);if(m&&!projectName)projectName=m[1].trim();
+    }
+    if(!project){const bullet=body.find(b=>b.length>60&&!/:$/.test(b));project=bullet||'';}
+    const open=cvIsOpenEnd(h.m[3]);
+    const resp=body.filter(b=>b.length>50&&b!==project).slice(0,3).map(b=>b.replace(/^[†•·▪◦*-]\s*/,'').slice(0,170));
+    facts.employers.push({employer,location,role,start:h.m[2].trim(),end:h.m[3].trim(),current:open,duration:cvDuration(h.m[2],h.m[3]),client,projectName,project:project.replace(/^[†•·▪◦*-]\s*/,'').slice(0,520),highlights:resp});
+  });
+  if(facts.employers.length&&!facts.employers.some(e=>e.current)) facts.employers[0].latest=true;
+  // Education / certifications sections.
+  const secIdx=(rx)=>lines.findIndex(l=>rx.test(l)&&l.length<60);
+  const takeSection=(rx,max)=>{const i=secIdx(rx);if(i<0)return [];const out=[];for(let j=i+1;j<lines.length&&out.length<max;j++){const l=lines[j];if(!l)continue;if(l.length<35&&/^[A-Z][A-Za-z &/]+:?$/.test(l)&&j>i+1&&/^(?:professional|skills|technical|experience|projects?|summary|awards|languages|publications)/i.test(l))break;out.push(l.slice(0,220));}return out;};
+  facts.education=takeSection(/^(?:education|academic(?:s| background| qualifications?)?)\b/i,5);
+  facts.certifications=takeSection(/^(?:certifications?|qualification badges?|licenses?(?: & certifications?)?)\b/i,4);
+  return facts;
+}
+function formatCvFacts(facts,detail=false){
+  if(!facts||!facts.employers?.length&&!facts.name&&!facts.email&&!facts.education?.length&&!facts.certifications?.length)return '';
+  const now=new Date();
+  const lines=[`CV FACTS (authoritative, parsed directly from the candidate's CV; today is ${CV_MONTHS[now.getMonth()]} ${now.getFullYear()}). Answer every employer/client/project/date/personal question ONLY from these facts. Never deny, contradict or swap them, never invent clients, and never say client names are confidential: state them.`];
+  const p=[];if(facts.name)p.push(`Name: ${facts.name}`);if(facts.email)p.push(`Email: ${facts.email}`);if(facts.phone)p.push(`Phone: ${facts.phone}`);if(facts.linkedin)p.push(`LinkedIn: ${facts.linkedin}`);
+  if(p.length)lines.push(p.join(' | '));
+  facts.employers.forEach((e,i)=>{
+    const tag=e.current?'CURRENT CLIENT/EMPLOYER':(e.latest?'MOST RECENT':'PAST');
+    lines.push(`${i+1}. [${tag}] ${e.employer}${e.location?` (${e.location})`:''} | Role: ${e.role||'n/a'} | ${e.start} to ${e.end}${e.duration?` (${e.duration}${e.current?' so far':''})`:''}${e.client?` | Client: ${e.client}`:''}${e.projectName?` | Project: ${e.projectName}`:''}`);
+    if(detail&&e.project)lines.push(`   Project description: ${e.project.slice(0,i<2?520:260)}`);
+    if(detail&&i<2&&e.highlights.length)lines.push(`   Key work: ${e.highlights.join(' ; ')}`);
+  });
+  if(facts.education.length)lines.push(`Education: ${facts.education.join(' ; ')}`);
+  if(facts.certifications.length)lines.push(`Certifications: ${facts.certifications.join(' ; ')}`);
+  return lines.join('\n').slice(0,detail?4200:2400);
+}
+function cvDirectAnswer(question,facts){
+  const q=String(question||'').toLowerCase();
+  if(!facts)return '';
+  const ems=facts.employers||[];
+  const fmt=e=>`${e.employer}${e.location?` (${e.location})`:''}, ${e.role||'role n/a'}, ${e.start} to ${e.end}${e.duration?` (${e.duration}${e.current?' so far':''})`:''}${e.project?`; project: ${e.project.slice(0,300)}`:''}`;
+  const squash=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const qs=squash(q);
+  const named=ems.find(e=>squash(e.employer).length>=3&&qs.includes(squash(e.employer)));
+  let ans='';
+  const clientWord=/\b(?:clients?|employers?|compan(?:y|ies)|organi[sz]ations?|firms?|projects?|engagements?|working|work(?:ing)? for|roles?|positions?|jobs?)\b/;
+  if(ems.length){
+    if(named&&/\b(?:how long|duration|when|start|end|from|since|years?|months?|tenure|period|role|project|worked|work)\b/.test(q)) ans=`${named.current?'CURRENT: ':'PAST (ended '+named.end+'): '}${fmt(named)}`;
+    else if(/\b(?:current(?:ly)?|present(?:ly)?|now|latest|recent(?:ly)?|today|right now|last)\b/.test(q)&&clientWord.test(q)||/\bwhere (?:are|do) you (?:currently )?work/.test(q)||/\bwho (?:are|is) (?:you|your)\b.*\b(?:client|employer)/.test(q)){
+      const cur=ems.find(e=>e.current)||ems[0];ans=`${cur.current?'CURRENT':'MOST RECENT'} client/employer: ${fmt(cur)}`;
+    } else if(/\b(?:previous|past|earlier|prior|former|other|before)\b/.test(q)&&clientWord.test(q)) ans=`Past: ${ems.filter(e=>!e.current).map(fmt).join(' || ')}`;
+    else if(/\b(?:all|list|every|each|which|what)\b.*\b(?:clients?|employers?|companies|organi[sz]ations|projects)\b|\bwork(?:ed)? history|career|employment history\b/.test(q)) ans=ems.map((e,i)=>`${i+1}. ${fmt(e)}`).join(' || ');
+    else if(/\b(?:how long|duration|start date|end date|since when|from when|tenure)\b/.test(q)&&clientWord.test(q)){ const cur=ems.find(e=>e.current)||ems[0]; ans=`Duration at ${cur.employer}: ${cur.start} to ${cur.end}${cur.duration?` (${cur.duration})`:''}`; }
+  }
+  if(!ans){
+    if(/\b(?:your|my) (?:full )?name\b|\bwho are you\b/.test(q)&&facts.name)ans=`Name: ${facts.name}`;
+    else if(/\b(?:e-?mail|email id)\b/.test(q)&&facts.email)ans=`Email: ${facts.email}`;
+    else if(/\b(?:phone|mobile|contact number|contact)\b/.test(q)&&(facts.phone||facts.email))ans=`Contact: ${[facts.phone,facts.email,facts.linkedin].filter(Boolean).join(', ')}`;
+    else if(/\b(?:education|degree|qualification|university|college|graduat|studied)\b/.test(q)&&facts.education.length)ans=`Education: ${facts.education.join(' ; ')}`;
+    else if(/\bcertif|\bbadges?\b/.test(q)&&facts.certifications.length)ans=`Certifications: ${facts.certifications.join(' ; ')}`;
+  }
+  return ans?`DIRECT CV FACT FOR THIS QUESTION (state this verbatim, in first person, naming the employer; do not contradict it): ${ans}`:'';
+}
+// CVFACTS_END
+function cvFactsPromptBlock(session,question){
+  const facts=session?.cvFacts;if(!facts)return '';
+  const detail=/\b(?:client|employer|compan|project|engagement|current|latest|recent|previous|past|duration|how long|start|end date|since|worked|work history|experience|role|education|degree|certif|name|contact|email|phone|introduc|background|yourself|resume|cv)\b/i.test(String(question||''));
+  const block=formatCvFacts(facts,detail);if(!block)return '';
+  const direct=cvDirectAnswer(question,facts);
+  return `${block}\n${direct?direct+'\n':''}\n`;
+}
 function interviewTopic(q, context='') {
   const text=String(q||'').toLowerCase();
   const recent=String(context||'').toLowerCase();
@@ -326,12 +458,13 @@ Never open with 'From what I can speak to directly', 'I'd frame it this way', 'I
 // DeepSeek-only spoken rules: ChatGPT-style labelled bullets, answer-the-layer-asked,
 // no denial of CV-listed tools, no CV/JD talk in speech. Prompt text only; no extra calls.
 const DEEPSEEK_SPOKEN_RULES=`
-DEEPSEEK ANSWER FORMAT (overrides any earlier format rule that conflicts): Speak as the candidate in first person with "I" (I would / I configure / I check / I validate); avoid "we". Lead with 1–2 lines that directly answer in practical production terms. For architecture, data-flow, pipeline, orchestration, scheduling, data-model, configuration, step-by-step, RAG-pipeline and "walk me through" questions, follow with 4–6 bullets, each on its own line starting with "- I" and one specific detail (max 22 words), folding the stage or topic name into the sentence itself, e.g. "- I pull the sources from SQL, SharePoint and REST APIs" or "- I land the raw files in S3 by source and date"; never write a heading, a "Label:" prefix or bold text. For technical questions put the exact command, statement, API call, setting or short code in backticks inside the bullet or plain line (e.g. \`SELECT ... FROM ... WHERE ...\`, a CLI command, \`await expect(locator).toBeVisible()\`, a Setup path), one per point where it fits; a definition may carry one short real example. Then at most one closing line on my ownership or how I validate it. Simple factual, definition ("what is / what are"), yes/no, behavioural and wrap-up questions: 2–4 plain lines, no bullets. Introductions and requested long answers: short natural paragraphs, no bullets. Bulleted answers run about 70–130 words. No bold text, headings or section labels anywhere. Prefer current managed approaches over legacy ones when relevant.
+DEEPSEEK ANSWER FORMAT (overrides any earlier format rule that conflicts): Speak as the candidate in first person with "I" (I would / I configure / I check / I validate); avoid "we". Lead with 1–2 lines that directly answer in practical production terms. For architecture, data-flow, pipeline, orchestration, scheduling, data-model, configuration, step-by-step, RAG-pipeline and "walk me through" questions, follow with 4–6 bullets, each on its own line starting with "- I" and one specific detail (max 22 words), folding the stage or topic name into the sentence itself, e.g. "- I pull the sources from SQL, SharePoint and REST APIs" or "- I land the raw files in S3 by source and date"; never write a heading, a "Label:" prefix or bold text. Then at most one closing line on my ownership or how I validate it. Simple factual, definition ("what is / what are"), yes/no, behavioural and wrap-up questions: 2–4 plain lines, no bullets. Introductions and requested long answers: short natural paragraphs, no bullets. Bulleted answers run about 70–120 words. No bold text, headings or section labels anywhere, except the A-versus-B comparison shape below.
+ANSWER SHAPE (strict): line 1–2 = the immediate direct answer. Then, when there are several steps, parts or aspects, bullets that each start "- I " (use "- We " only where it is truly team work); the topic name or term sits INSIDE the sentence ("- I partition the table by date so queries prune files"), never as "Term: description", "Term – description" or a bold/standalone heading line followed by an explanation. If bullets do not fit, give 2–4 plain natural lines. COMPARISON EXCEPTION: only when the interviewer asks the difference between / comparison of / A vs B, write "A:" with 1–2 plain lines (or "- I" bullets), then "B:" the same way, then one closing line starting "Difference:" with the key contrast. No other question gets labels. Stay inside facts that are standard or supported by the CV; do not invent numbers, tools, projects or incidents. Prefer current managed approaches over legacy ones when relevant.
 ANSWER THE LAYER ASKED: use the nearest interviewer questions to decide the layer. In an ingestion/storage/cloud-infrastructure thread (sources, landing zone, S3, Lambda, Snowflake), "orchestration", "separate", "bucketing", "history" and "design" mean data-pipeline scheduling, S3 bucket/prefix layout, retention and table design (Databricks Jobs, EventBridge, Step Functions, Airflow, Snowflake Tasks), NOT LangChain/agent orchestration or the RAG index. Move to the RAG/LLM layer only when asked. If one speech holds several distinct questions, answer each in order as its own short paragraph, newest last; never answer only the last. Never echo speech-recognition artifacts (counting "one, two, three", "next scale", "or something like that", fillers, mishears) as content.
 TECHNOLOGY ASKED = TECHNOLOGY ANSWERED: answer the technology the interviewer names. "SQL" means standard relational SQL (joins, keys, indexes, group by), never Salesforce SOQL unless the interviewer says SOQL or Salesforce; likewise Selenium vs Playwright, REST vs GraphQL. The resume's domain (Salesforce, healthcare, banking) never replaces the topic asked; use it only for one short example when it helps. A word that sounds like a finance or unrelated term inside a software interview is a mishearing: choose the technical reading from the nearest questions (implicit rate = implicit wait, joints = joins, optics in Salesforce = objects). Never tell the interviewer a term "doesn't exist"; answer the closest standard term.
-COMMANDS STAY ON TOPIC: every command, query, API call or setting must be real and belong to the exact technology and topic asked (a Salesforce access question gets Setup paths, SOQL on permission objects and profile/permission-set checks; a SQL question gets SQL; a Playwright question gets Playwright calls); never borrow another stack's syntax, never invent flags or object names, and if the exact syntax is uncertain describe the step instead.
 CV-LISTED TOOLS (anything in the CV-LISTED TOOLS block, e.g. S3, Lambda, Snowflake, Databricks, Kendra, Redshift): never say "I haven't worked hands-on" about them. Give the concrete design with "I would" or "my design" and do not invent project names, counts, dates or incidents that the resume evidence lacks; one short phrase like "that's the layout I'd standardize on" is enough. Say "I haven't used X hands-on" only for a tool absent from both the resume evidence and the CV-LISTED TOOLS, then give the closest transferable experience in one or two lines.
-NEVER mention the CV, resume, JD, job description or target role in the spoken answer, never compare the CV with the job, and never volunteer gaps or what is "not in the CV" unless the interviewer directly asks about that exact tool.`;
+CV FACTS RULE: when the interviewer asks about your current/previous client, employer, company, project, role, dates, duration, name, contact, education or certifications, answer directly and completely from the CV FACTS block and DIRECT CV FACT line, in first person naming the employer, role, start and end dates (\"Till Now\" means I am there currently). Never say you cannot name clients, never deny a CV-listed employer, never shift dates, and never treat the current employer as past. This is not mentioning the CV; it is your own career.\nNEVER mention the CV, resume, JD, job description or target role in the spoken answer, never compare the CV with the job, and never volunteer gaps or what is "not in the CV" unless the interviewer directly asks about that exact tool.`;
+const CHAT_SHAPE_RULE=`\nANSWER SHAPE: start each answer with the immediate 1–2 line direct answer; then bullets that each start "- I " with the topic folded into the sentence, never "Term: description" headings or bold labels. Only an A-versus-B difference question may use "A:", "B:" and a closing "Difference:" line. Do not invent facts.`;
 function sharesDeepseekPrompts(provider){return provider==='deepseek'||provider==='gpt4o';}
 function providerInterviewInstructions(provider,responseType,question='',context='') {
   if(sharesDeepseekPrompts(provider)&&responseType==='spoken') return chatQualityInstructions(responseType,question,context)
@@ -341,7 +474,7 @@ function providerInterviewInstructions(provider,responseType,question='',context
     .replace('say explicitly that it is not established in the CV and explain how I would approach it','say naturally that I have not used it hands-on and explain how I would approach it')
     +DEEPSEEK_SPOKEN_RULES+`\nFor live spoken answers, prioritize the actual latest request and nearest relevant interviewer context over incidental keywords. Give concrete implementation details in the DEEPSEEK ANSWER FORMAT. For dashboard delivery delays lead with SLA impact, safe fallback and recovery. For cost optimization distinguish Redshift sort/distribution keys from S3 partitions; never imply Redshift native tables use S3-style partitioning. Avoid version-specific Airflow SLA APIs unless the version is known. Do not switch to an unrelated domain because of speech noise. When asked about current work identify the latest resume project, not the JD target. Do not invent experience. For explicit duration requests honor the duration.`;
   return provider==='cerebras'||sharesDeepseekPrompts(provider)
-    ? chatQualityInstructions(responseType,question,context)
+    ? chatQualityInstructions(responseType,question,context)+(responseType==='multi'?CHAT_SHAPE_RULE:'')
     : copilotInstructions(responseType);
 }
 // The prepared evidence stays available, but old candidate answers and legacy
@@ -478,8 +611,8 @@ function deepseekSpokenInput(prepared) {
   // Tools the CV lists (skills table / environment lines): stops false "never worked with S3/Lambda/Snowflake" denials.
   const listedTools=resume.filter(c=>/\b(?:cloud platforms|data engineering|environment\s*:)/i.test(String(c.text||''))).map(c=>String(c.text||'').slice(0,450)).join('\n').slice(0,900);
   const preferences=String(prepared.session?.userInstructions||'').slice(0,1000);
-  const repairs=(prepared.canonicalReplacements||[]).filter(r=>r&&r.from&&r.to).slice(0,6).map(r=>`${String(r.from).slice(0,60)} -> ${String(r.to).slice(0,60)}`).join('; ');
-  return `LATEST INTERVIEWER SPEECH (answer only the substantive request):\n${question}${repairs?`\n(Speech repairs already applied, heard -> intended; answer the intended wording: ${repairs})`:''}\n\nRECENT INTERVIEWER QUESTIONS (context, not requests; newest last):\n${context}\n\nCANDIDATE: ${prepared.session?.role||profile.targetRole||''}; years: ${prepared.session?.yearsExperience??'unknown'}\n${String(profile.candidateSummary||'').slice(0,900)}\n\nRESUME PROJECT EVIDENCE:\n${evidence}\n\nRESUME TIMELINE EXCERPTS (for current/latest project and ownership):\n${timeline}\n\nCV-LISTED TOOLS (candidate's own skills/environment; never deny these):\n${listedTools}\n\nJD TARGET ONLY (not experience):\n${jd}\n\nPRESENTATION PREFERENCES:\n${preferences}\n\nResolve short follow-ups against the nearest substantive interviewer question even if the follow-up classifier missed it. Ignore abandoned fragments, names, greetings and transcription noise. Preserve explicit new topics and all genuine requested parts. Do not infer an unrelated topic from the JD or an acronym's alternate meaning. For repeated questions add the requested missing detail rather than replaying the previous answer. Use resume evidence for past work; use conditional language for proposed designs. A missing detail is not proof of no experience. No invented metrics, time splits, ownership or tools. Answer in the DEEPSEEK ANSWER FORMAT: direct 1–2 lines, then labelled "- **Label:** detail" bullets for flow/design/how-to questions (plain 2–4 lines otherwise), roughly 60–120 words; explicit introductions or requested expanded answers may be longer. Answer the data/infrastructure layer when the thread is about ingestion, S3, Lambda or Snowflake; answer every distinct question in the speech in order; never mention the CV, resume or JD. Give concrete mechanisms, configuration, failure handling or verification as relevant, not a list of buzzwords. For incidents lead with business impact and containment, then diagnosis, recovery and validation. For design give ordered flow, state/control, isolation and verification as relevant. For domain questions name the actual business entities, keys and checks. Do not force every category into every answer. No preamble, repeated caveats or closing summary.`;
+  const cvBlock=(typeof cvFactsPromptBlock==='function'?cvFactsPromptBlock(prepared.session,`${raw} ${question}`):'');
+  return `LATEST INTERVIEWER SPEECH (answer only the substantive request):\n${question}\n\nRECENT INTERVIEWER QUESTIONS (context, not requests; newest last):\n${context}\n\nCANDIDATE: ${prepared.session?.role||profile.targetRole||''}; years: ${prepared.session?.yearsExperience??'unknown'}\n${String(profile.candidateSummary||'').slice(0,900)}\n\nRESUME PROJECT EVIDENCE:\n${evidence}\n\n${cvBlock}RESUME TIMELINE EXCERPTS (for current/latest project and ownership):\n${timeline}\n\nCV-LISTED TOOLS (candidate's own skills/environment; never deny these):\n${listedTools}\n\nJD TARGET ONLY (not experience):\n${jd}\n\nPRESENTATION PREFERENCES:\n${preferences}\n\nResolve short follow-ups against the nearest substantive interviewer question even if the follow-up classifier missed it. Ignore abandoned fragments, names, greetings and transcription noise. Preserve explicit new topics and all genuine requested parts. Do not infer an unrelated topic from the JD or an acronym's alternate meaning. For repeated questions add the requested missing detail rather than replaying the previous answer. Use resume evidence for past work; use conditional language for proposed designs. A missing detail is not proof of no experience. No invented metrics, time splits, ownership or tools. Answer in the DEEPSEEK ANSWER FORMAT: direct 1–2 lines, then labelled "- **Label:** detail" bullets for flow/design/how-to questions (plain 2–4 lines otherwise), roughly 60–120 words; explicit introductions or requested expanded answers may be longer. Answer the data/infrastructure layer when the thread is about ingestion, S3, Lambda or Snowflake; answer every distinct question in the speech in order; never mention the CV, resume or JD. Give concrete mechanisms, configuration, failure handling or verification as relevant, not a list of buzzwords. For incidents lead with business impact and containment, then diagnosis, recovery and validation. For design give ordered flow, state/control, isolation and verification as relevant. For domain questions name the actual business entities, keys and checks. Do not force every category into every answer. No preamble, repeated caveats or closing summary.`;
 }
 function providerInterviewInput(provider,prepared) {
   if(provider!=='cerebras'&&provider!=='deepseek'&&provider!=='gpt4o')return prepared.prompt;
@@ -511,7 +644,7 @@ function providerInterviewInput(provider,prepared) {
   const flowRule=focus.flow?'END-TO-END FLOW FORMAT: The FIRST output line must be a single-line directional chain with Unicode arrows (→), e.g. Dataverse record create/update → asynchronous plug-in/webhook → Azure Service Bus queue/topic → Azure Function/Logic App consumer → target REST API → third-party system → acknowledgment/status update. Include only components appropriate to the asked scenario; do not claim an illustrative flow was personally deployed unless CV project evidence confirms it. After that, use 2–4 SHORT separate lines describing trigger/payload, queue and consumer, target processing, and retries/DLQ/idempotency. No preamble or heading before the arrow chain.': '';
   // Only use current-question evidence and the current interview topic for personal claims.
   // Do not supply unrelated older answers as examples to imitate.
-  return `CURRENT INTERVIEWER QUESTION (highest priority):\n${latest}\n${focus.note?`QUESTION CLEANUP: ${focus.note}\n`:''}${sqlRule?`${sqlRule}\n`:''}${flowRule?`${flowRule}\n`:''}${subject?`ACTIVE SUBJECT (follow-up disambiguation):\n${subject}\n`:``}\nQUESTION TYPE: ${yesNo?'Genuine yes/no: first word Yes or No.':'Not a yes/no question: never start with a gratuitous Yes or No.'}\n${raw!==latest&&!focus.note?`RAW STT FOR DISAMBIGUATION ONLY:\n${raw.slice(-950)}\n`:''}${previous?`GENUINE FOLLOW-UP CONTEXT:\n${previous}\n`:''}${recentTopic?`PREVIOUS INTERVIEWER QUESTION (context only; especially for short follow-ups):\n${recentTopic}\n`:''}${resumeExperienceGrounding(prepared)}\n${profile?`RESUME PROFILE (model summary; not proof of experience):\n${profile}\n`:''}${evidence&&evidence!=='No prepared evidence matched.'?`RETRIEVED RESUME EVIDENCE:\n${evidence}\n`:''}${userPreferences?`PRESENTATION PREFERENCES:\n${userPreferences}\n`:''}Keep the active conversation subject when the interviewer asks a short follow-up. Never say 'from my CV', 'listed on my resume', 'documented in the CV', or 'according to my CV' in the SPOKEN answer. Treat CV silently as evidence. When an experience claim is unsupported, say naturally 'I haven't worked hands-on with [tool], but I understand how it works and I would ...'; do not suggest the CV itself is the subject. Never repeat meaningless STT fragments or answer an abandoned false-start as a separate question. For follow-up pronouns, use the last interviewer technical question to identify the antecedent, without quoting the pronoun. Start with Yes or No ONLY for a genuine yes/no question, never for how/what/why scenario questions. Short factual questions start with the answer, not 'I would'. Use 2–4 short spoken lines, at most 5–6 for a normal question. Put each separate step or idea on its own NEW LINE; do not print a dense continuous paragraph. A blank line may separate the direct answer from steps. Do not use bullets unless the question needs a list. No filler, unnecessary alternatives or closing summary. Answer only the current question in first-person spoken interview style. Use I would / I check / I validate for proposed actions; reserve I did / I delivered / I implemented for resume-supported past work. If asked for personal experience, do not invent a specific incident when resume evidence lacks it. For SQL example requests, give executable SQL with short inline comments even if the general spoken format normally excludes code. Do not say what query you would write instead of writing it. For multi-core onboarding questions, distinguish client business meaning, each core API owner, canonical field mapping, source-of-truth, transformation and sample payload verification. Do not assume the candidate personally onboarded external banks merely because the JD requires it. Avoid repeating an earlier example unless the follow-up specifically asks to expand that example. Start with the requested answer, never 'From what I can speak to directly', 'I’d frame it this way', 'I would treat it as', or other throat-clearing. Use common words instead of 'eliciting', 'canonical layer', or 'cardinality' unless essential. Do not recycle the previous answer; each follow-up must add the new requested detail. For SQL examples, short lines and compact comments prevent sideways scrolling; avoid stale hardcoded dates called current.
+  return `CURRENT INTERVIEWER QUESTION (highest priority):\n${latest}\n${focus.note?`QUESTION CLEANUP: ${focus.note}\n`:''}${sqlRule?`${sqlRule}\n`:''}${flowRule?`${flowRule}\n`:''}${subject?`ACTIVE SUBJECT (follow-up disambiguation):\n${subject}\n`:``}\n${(typeof cvFactsPromptBlock==='function'?cvFactsPromptBlock(prepared.session,`${latest} ${raw}`):'')}QUESTION TYPE: ${yesNo?'Genuine yes/no: first word Yes or No.':'Not a yes/no question: never start with a gratuitous Yes or No.'}\n${raw!==latest&&!focus.note?`RAW STT FOR DISAMBIGUATION ONLY:\n${raw.slice(-950)}\n`:''}${previous?`GENUINE FOLLOW-UP CONTEXT:\n${previous}\n`:''}${recentTopic?`PREVIOUS INTERVIEWER QUESTION (context only; especially for short follow-ups):\n${recentTopic}\n`:''}${resumeExperienceGrounding(prepared)}\n${profile?`RESUME PROFILE (model summary; not proof of experience):\n${profile}\n`:''}${evidence&&evidence!=='No prepared evidence matched.'?`RETRIEVED RESUME EVIDENCE:\n${evidence}\n`:''}${userPreferences?`PRESENTATION PREFERENCES:\n${userPreferences}\n`:''}Keep the active conversation subject when the interviewer asks a short follow-up. Never say 'from my CV', 'listed on my resume', 'documented in the CV', or 'according to my CV' in the SPOKEN answer. Treat CV silently as evidence. When an experience claim is unsupported, say naturally 'I haven't worked hands-on with [tool], but I understand how it works and I would ...'; do not suggest the CV itself is the subject. Never repeat meaningless STT fragments or answer an abandoned false-start as a separate question. For follow-up pronouns, use the last interviewer technical question to identify the antecedent, without quoting the pronoun. Start with Yes or No ONLY for a genuine yes/no question, never for how/what/why scenario questions. Short factual questions start with the answer, not 'I would'. Use 2–4 short spoken lines, at most 5–6 for a normal question. Put each separate step or idea on its own NEW LINE; do not print a dense continuous paragraph. A blank line may separate the direct answer from steps. Do not use bullets unless the question needs a list. No filler, unnecessary alternatives or closing summary. Answer only the current question in first-person spoken interview style. Use I would / I check / I validate for proposed actions; reserve I did / I delivered / I implemented for resume-supported past work. If asked for personal experience, do not invent a specific incident when resume evidence lacks it. For SQL example requests, give executable SQL with short inline comments even if the general spoken format normally excludes code. Do not say what query you would write instead of writing it. For multi-core onboarding questions, distinguish client business meaning, each core API owner, canonical field mapping, source-of-truth, transformation and sample payload verification. Do not assume the candidate personally onboarded external banks merely because the JD requires it. Avoid repeating an earlier example unless the follow-up specifically asks to expand that example. Start with the requested answer, never 'From what I can speak to directly', 'I’d frame it this way', 'I would treat it as', or other throat-clearing. Use common words instead of 'eliciting', 'canonical layer', or 'cardinality' unless essential. Do not recycle the previous answer; each follow-up must add the new requested detail. For SQL examples, short lines and compact comments prevent sideways scrolling; avoid stale hardcoded dates called current.
 FINAL ANSWER SCOPE (applies to every role and resume): For a project walkthrough, select ONE relevant CV project (current if explicitly requested; otherwise the best match) and explain its actual system or business flow in order, then the candidate's own contribution and validation. Do not switch employers or projects mid-answer unless explicitly asked to compare. For a yes/no ownership question, answer directly, state the verified scope in one or two sentences, and stop; do not add a hypothetical tutorial unless asked how. For past challenges, distinguish documented activities from unverified incident details: never invent a root cause, recurring defect, architecture, team assignment, access, sign-off authority, improvement or successful outcome. If the CV lacks a specific incident or result, describe the verified type of work and explain a possible investigation as a proposed approach, not a past event. Do not assume who handled external work or claim tool execution from the JD or prior generated answers. Use everyday spoken English: say gather requirements, common field names, work plan, checks before release; retain precise technical terms only when needed. Avoid throat-clearing such as "I'll be honest", "the hardest one I can speak to", or "I wouldn't claim". For a narrow follow-up, answer only the new detail, not the earlier lifecycle. History is reference material, never an additional request: do not quote, revisit or answer an earlier question unless explicitly asked. For a new topic ignore old requests entirely. Preserve essential technical checks even when concise: for interface mapping include schema and sample payload verification, transaction-key correlation, missing/null handling and agreed transformations. Do not invent a separate team or its ownership; state only verified responsibilities. When useful, give one short illustrative field or code example, clearly not a claim about the candidate's actual systems. Honor explicit duration requests for introductions; otherwise keep answers within the existing short spoken format.`;
 }
 function cerebrasAnswerBudget(question, responseType, baseBudget) {
@@ -688,71 +821,6 @@ function editDistance(a, b) {
   }
   return row[b.length];
 }
-// Speech-intent repair (local, deterministic, no model call). Live STT often hears a technical phrase as
-// ordinary words ("difficult life cycle", "record on security"). These repairs use the prepared CV/JD
-// vocabulary plus the last few interviewer questions, and each repair is gated by that context.
-const STT_TECH_LEXICON=['Playwright','Selenium','TestNG','Postman','Jenkins','GitHub','JavaScript','TypeScript','XPath','Salesforce','Sandbox','Cucumber','Appium','Cypress','JUnit','Swagger','Kubernetes','Terraform','Snowflake','Databricks','PySpark','Pytest','FastAPI','LangChain','LangGraph','Dialogflow','WebDriver'];
-function mergeSplitTechTerms(text,vocab,replacements) {
-  const terms=Array.from(new Set([...STT_TECH_LEXICON,...(vocab||[]).map(v=>String(v||'').trim())].filter(t=>/^[A-Za-z]{6,}$/.test(t))));
-  const words=[];const wordRe=/[A-Za-z]+/g;let m;
-  while((m=wordRe.exec(text)))words.push({w:m[0],start:m.index,end:m.index+m[0].length});
-  let out='',cursor=0,i=0;
-  while(i<words.length){
-    let hit=null;
-    for(const n of [3,2]){
-      if(i+n>words.length)continue;
-      const seg=words.slice(i,i+n);
-      if(!seg.every((x,k)=>k===0||text.slice(seg[k-1].end,x.start)===' '))continue;
-      if(!seg.some(x=>x.w.length<=5))continue;
-      const joined=seg.map(x=>x.w).join('').toLowerCase();
-      if(joined.length<6)continue;
-      let best=null;
-      for(const term of terms){
-        if(Math.abs(term.length-joined.length)>1)continue;
-        const d=editDistance(joined,term.toLowerCase());
-        if((d===0||(d===1&&term.length>=9))&&(!best||d<best.d))best={term,d};
-      }
-      if(best){hit={n,term:best.term,from:text.slice(seg[0].start,seg[n-1].end)};break;}
-    }
-    if(hit){
-      out+=text.slice(cursor,words[i].start)+hit.term;cursor=words[i+hit.n-1].end;
-      replacements.push({from:hit.from,to:hit.term,distance:0,kind:'split-term'});
-      i+=hit.n;
-    } else i++;
-  }
-  return out+text.slice(cursor);
-}
-function applySttIntentRepairs(working,context,recentText,replacements) {
-  const low=working.toLowerCase();
-  const ctx=`${context} ${low}`;
-  const sf=/\b(?:salesforce|apex|soql|lwc|lightning|sandbox|permission sets?|profiles?|owd|sharing rules?|org-wide)\b/.test(ctx);
-  const qa=/\b(?:playwright|selenium|testng|automation|testing|test cases?|defect|regression|api testing|postman)\b/.test(ctx);
-  const cloudProvider=/\b(?:aws|azure|gcp|s3|bucket|blob|gcs)\b/.test(`${recentText} ${low}`);
-  const rules=[
-    [/\bdifficult\s+(life\s*cycle|lifecycle)\b/gi,(m,l)=>`defect ${l}`,true],
-    [/\bdifficult\s+(leakage|density|triage|tracking|report|management|priority|severity)\b/gi,(m,w)=>`defect ${w}`,qa],
-    [/\b(?:order|other|odd)\s+(?:period|per\s?it|record|object)\s+level\b/gi,()=>'object, field and record level',sf||/\b(?:access|security|sharing)\b/.test(low)],
-    [/\bwhat\s+(?:i|is|are|do|does)?\s*(?:the\s+)?look\s*up\s+(?:on|and|vs\.?|versus|or|n)\s+master[\s-]*(?:retail|retailed|detail|details|data)\s+relationships?\b/gi,()=>'What is the difference between lookup and master-detail relationships',true],
-    [/\bmaster[\s-]+(?:retail|retailed|details)\b/gi,()=>'master-detail',sf||/\b(?:relationships?|lookup)\b/.test(low)],
-    [/\b(object|record|field|row|column)\s+(?:on|cloud|clone|love|lover|labels?|lable|lvl|lever)\s+(security|access|permissions?|sharing)\b/gi,(m,a,b)=>`${a} level ${b}`,!cloudProvider],
-    [/\bfunction\s+objects?\b/gi,m=>/s$/i.test(m)?'junction objects':'junction object',sf],
-    [/\bgovern(?:ance|ess|ing)\s+limits?\b/gi,m=>/s$/i.test(m)?'governor limits':'governor limit',sf],
-    [/\b(?:sock\s*l|so\s*quel|soak\s*l|s\s+o\s+q\s+l)\b/gi,()=>'SOQL',sf],
-    [/\ba\s*pecks?\b|\ba\s+pex\b/gi,()=>'Apex',sf],
-    [/\bplay\s?(?:rate|right|write|wright|rite|ride)\b/gi,()=>'Playwright',qa],
-    [/\bpost\s*(?:mail|men|man)\b/gi,()=>'Postman',/\b(?:api|postman|testing|rest)\b/.test(ctx)],
-    [/\bsmoking\s+(test(?:ing|s)?)\b/gi,(m,w)=>`smoke ${w}`,qa],
-    [/\bdigression\s+(test(?:ing|s)?)\b/gi,(m,w)=>`regression ${w}`,qa],
-    [/\b(implicit|explicit|fluent)\s+(?:rate|weight|wade|wake)\b/gi,(m,w)=>`${w} wait`,qa],
-    [/\bprofiles and (?:roads?|rolls?)\b/gi,()=>'profiles and roles',sf],
-    [/\boptics\b(?=.{0,30}\bsalesforce\b)/gi,()=>'objects',true]
-  ];
-  for(const [rx,to,when] of rules){
-    if(!when)continue;
-    working=working.replace(rx,(...a)=>{const out=to(...a);replacements.push({from:a[0],to:out,distance:0,kind:'intent-phrase'});return out;});
-  }
-  return working;
-}
 function resolveCanonicalQuestion(session, question) {
   const profileVocab = session?.profile?.domainVocabulary || session?.profile?.primarySkills || [];
   const original = String(question || '');
@@ -814,14 +882,9 @@ function resolveCanonicalQuestion(session, question) {
     });
   }
 
-  const recentText=(session?.turns||[]).slice(-3).map(t=>String(t.question||'')).join(' ').toLowerCase();
-  working=applySttIntentRepairs(working,technologyContext,recentText,replacements);
-  working=mergeSplitTechTerms(working,profileVocab,replacements);
-  const protectedTokens=new Set(replacements.flatMap(r=>String(r.to||'').toLowerCase().match(/[a-z0-9+#]+/g)||[]));
   if (!profileVocab.length) return { corrected:working, replacements };
   const corrected = working.replace(/\b[A-Za-z][A-Za-z0-9+#.-]{1,}\b/g, token => {
     const cleanToken = token.toLowerCase().replace(/[^a-z0-9+#]/g, '');
-    if (protectedTokens.has(cleanToken)) return token;
     // Bias correction toward acronym/technology-looking STT tokens. Ordinary prose is left untouched.
     const techLike = /^[A-Z0-9+#.-]{2,}$/.test(token) || /[+#.]/.test(token) || token.length >= 5;
     if (!techLike) return token;
@@ -1009,6 +1072,12 @@ function extractExplicitRoleFromResume(documentText,jdText='') {
     const rawComparable=comparable(stripped),candidateComparable=comparable(candidate);
     if(rawComparable===candidateComparable||rawComparable.startsWith(`${candidateComparable} `)||rawComparable.endsWith(` ${candidateComparable}`))return candidate;
   }
+  // v14.9.27: CVs without a title line: use the most recent employer's job title (e.g. "McDonald's ... Senior Data Engineer").
+  try{
+    const latest=(extractCvFacts(documentText).employers||[])[0];
+    const fromTimeline=latest?.role?compactRoleCandidate(latest.role):'';
+    if(fromTimeline)return pickRoleAlternative(fromTimeline,jdTitle)||fromTimeline;
+  }catch(_){}
   return '';
 }
 function extractExplicitRoleFromJD(documentText) {
@@ -1739,7 +1808,7 @@ function buildPrompt(session, question, retrieved, followupInfo=null, correctedQ
 ${priorAnswersForRegenerate.map((turn,index)=>`Earlier answer ${index+1}:
 ${String(turn?.answer||'').slice(0,3500)}`).join('\n\n')}`
     : 'NO';
-  return `CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}${earlierBlock}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nUSER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n${userInstructions || 'No additional user instructions.'}\nApply these instructions to every answer in this prepared session when they are compatible with factual grounding and the mandatory coding/diagram contracts. Treat requests such as STAR format, very short answers, explanatory style, behavioral-answer style, or experience-first wording as persistent presentation preferences.\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nCODE LANGUAGE HINT\n${codeLanguage || 'No explicit language detected; preserve the language requested or inherited from the referenced coding turn.'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
+  return `${(typeof cvFactsPromptBlock==='function'?cvFactsPromptBlock(session,intentQuestion):'')}CANDIDATE PROFILE\nYears: ${Number.isFinite(session.yearsExperience)?session.yearsExperience:'Not specified'}\nTarget role: ${session.role || profile.targetRole || 'Not specified'}\n${profile.candidateSummary || ''}\nPrimary skills: ${(profile.primarySkills || []).join(', ')}\nCanonical resume/JD vocabulary: ${(profile.domainVocabulary || profile.primarySkills || []).join(', ')}\n\nJOB ALIGNMENT\n${profile.jdSummary || 'No job description supplied; use resume-only grounding.'}\n\nRETRIEVED EVIDENCE\n${evidence || 'No prepared evidence matched.'}\n\nRECENT INTERVIEW CONTEXT\n${history || 'Not supplied because the current question is standalone.'}${earlierBlock}\n\nCONTEXTUAL FOLLOW-UP\n${followup}\n\nRE-ANSWER REQUEST\n${reanswer}\n\nUSER INSTRUCTIONS FOR THIS INTERVIEW SESSION\n${userInstructions || 'No additional user instructions.'}\nApply these instructions to every answer in this prepared session when they are compatible with factual grounding and the mandatory coding/diagram contracts. Treat requests such as STAR format, very short answers, explanatory style, behavioral-answer style, or experience-first wording as persistent presentation preferences.\n\nINPUT SOURCE\n${inputSource||'system-audio-or-typed'}\n\nCODE LANGUAGE HINT\n${codeLanguage || 'No explicit language detected; preserve the language requested or inherited from the referenced coding turn.'}\n\nMULTI-QUESTION POLICY\n${multiQuestionGuidance(intentQuestion)}\n\nRESPONSE MODE\n${responseMode(intentQuestion,info,inputSource)}\n\nSPOKEN ANSWER SHAPE\n${spokenAnswerShape(intentQuestion)}\n\nEXAMPLE POLICY\n${exampleGuidance(intentQuestion,info)}\n\nREFRAMED CURRENT INTENT (this alone controls answer type and requested output)\n${intentQuestion}\n\nRAW CURRENT TRANSCRIPT (context only; incidental words such as code, coding or module do not control the format)\n${correctedQuestion}\n\nDEPTH\n${wantsExpandedAnswer(intentQuestion) ? 'Expanded answer requested.' : 'Default: direct interview answer with concise practical elaboration.'}`;
 }
 // Keep the common policy compact and stable for provider prompt caching.
 // Format-specific instructions are selected per response type, not sent on every request.
@@ -2038,7 +2107,8 @@ app.post('/prepare-context', async (req, res) => {
     const resolvedYears=Number.isFinite(profile.yearsExperience)?profile.yearsExperience:(Number.isFinite(yearsExperience)?yearsExperience:null);
     const resolvedRole=normalizeText(profile.targetRole || role || '').slice(0,160);
 
-    const chunks = [...semanticChunks(resumeText, 'resume'), ...(jdText?semanticChunks(jdText, 'jd'):[])];
+    const cvFacts=extractCvFacts(resumeText);
+    const chunks = [...semanticChunks(normalizeResumeHeadings(resumeText), 'resume'), ...(jdText?semanticChunks(jdText, 'jd'):[])];
     const embeddingStart = Date.now();
     if (!isChatProvider(answerProvider)) {
       const vectors = await embedTexts(chunks.map(c => `${c.source}: ${c.section}\n${c.text}`));
@@ -2048,10 +2118,10 @@ app.post('/prepare-context', async (req, res) => {
     const embeddingMs = Date.now() - embeddingStart;
 
     interviewSessions.set(email, {
-      email, yearsExperience:resolvedYears, role:resolvedRole, answerProvider, userInstructions, profile:{...profile,yearsExperience:resolvedYears,targetRole:resolvedRole}, chunks, turns:[], preparedAt:Date.now(),
+      email, yearsExperience:resolvedYears, role:resolvedRole, answerProvider, userInstructions, profile:{...profile,yearsExperience:resolvedYears,targetRole:resolvedRole}, chunks, cvFacts, turns:[], preparedAt:Date.now(),
       stats:{ resumeChars:resumeText.length, jdChars:jdText.length, chunkCount:chunks.length, parseMs, summaryMs, embeddingMs }
     });
-    console.log(`[RAG] Prepared ${email}: ${chunks.length} chunks in ${Date.now()-t0}ms`);
+    console.log(`[RAG] Prepared ${email}: ${chunks.length} chunks, ${cvFacts.employers.length} employers in ${Date.now()-t0}ms`);
     return res.json({ ok:true, answerProvider, answerModel:answerProvider==='gpt4o'?GPT4O_MODEL:answerProvider==='deepseek'?DEEPSEEK_MODEL:(answerProvider==='cerebras'?CEREBRAS_MODEL:(answerProvider==='terra'?OPENAI_TERRA_MODEL:(answerProvider==='luna'?OPENAI_LUNA_MODEL:LLM_DEFAULT_MODEL))), chunkCount:chunks.length, profile:{ yearsExperience:resolvedYears, targetRole:resolvedRole, primarySkills:(profile.primarySkills || []).slice(0,12), jdProvided:!!jdText }, latency:{ parseMs, summaryMs, embeddingMs, totalMs:Date.now()-t0 } });
   } catch (err) {
     console.error('[RAG] Prepare error:', err.message);

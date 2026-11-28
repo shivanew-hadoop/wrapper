@@ -1,0 +1,178 @@
+
+
+
+
+Professional Summary
+Senior Data Engineer with 12+ years of experience in data engineering and analytics, including Azure Data Engineer work. Built batch and real-time ETL/ELT platforms on AWS and Azure for retail, healthcare, banking, and financial services.
+Built batch transformations with Python and Apache Spark, using Pandas, PySpark, Scala, Spark SQL, and Azure Databricks. Organized data in medallion layers and processed historical workloads with Delta Lake, Hadoop, HDFS, Hive, and YARN.
+Ran cloud workloads on Amazon EC2 and Amazon EMR, with limited late-stage exposure to AWS Glue. Used ADLS Gen2, Amazon S3, and EFS for storage and applied S3 lifecycle policies for retention.
+Orchestrated batch and event-driven pipelines with Azure Data Factory (ADF) and Apache Airflow. Used Apache Oozie, cron, and Unix Shell scripting with Bash for scheduling, dependency checks, retries, and SLA monitoring. [If confirmed: Used AutoSys and Stonebranch Universal Automation Center (Stonebranch UAC) on applicable engagements to schedule and monitor batch jobs.]
+Designed dimensional models in Synapse Analytics and Amazon Redshift using star and snowflake schemas, conformed dimensions, surrogate keys, and SCD Type 2. Served reporting workloads through dedicated and serverless SQL pools.
+Integrated relational, flat-file, and mainframe feeds with Informatica PowerCenter and Talend Open Studio. Used Sqoop, Apache NiFi, Java, SQLAlchemy, PyODBC, SFTP, and managed file transfer to ingest vendor, legacy, and COBOL data.
+Tuned Azure Database for PostgreSQL Flexible Server and Oracle Database, including Oracle 11g. Worked with SQL Database, MySQL, SQL Server 2005/2008, and DB2 using SQL, PL/SQL, T-SQL, partitioning, indexes, and materialized views.
+Built streaming pipelines with Apache Kafka and Apache Flink, using Kafka Streams, Kafka Connect, and Schema Registry. Processed, captured, and routed events with Event Hubs, Event Hubs Capture, Stream Analytics, Azure Functions and Azure Storage, and Service Bus topics and queues.
+Developed REST APIs with FastAPI and Django, exposing governed data through API Management. Applied OAuth 2.0, JWT, RBAC, caching, and structured logging for downstream consumers.
+Delivered dashboards with Power BI and Tableau for retail, clinical, and financial reporting. Used Amazon QuickSight for trading and risk views and Microsoft Excel for ad hoc analysis with PivotTables, VLOOKUP, and formulas.
+Managed metadata, lineage, and access with Microsoft Purview and evaluated Monte Carlo for data quality monitoring. Supported EHR and HEDIS reporting, HL7, FHIR, ICD-10, and CPT data processing, and payment workflows using FIX, SWIFT, ISO 20022, ISO 8583, and ACH. Applied HIPAA, AML, Basel, PCI-DSS, and SOX controls where relevant.
+Provisioned infrastructure with Terraform and Bicep, alongside ARM Templates and AWS CloudFormation. Supported container deployments on AKS, Container Apps, and Container Instances (ACI), with Jenkins, Git, GitHub CI/CD, and AWS CodePipeline for release automation.
+Monitored pipelines with Amazon CloudWatch and Log Analytics, alongside Monitor, Action Groups, Activity Log, and Linux logs. Secured workloads with AWS IAM, KMS, Key Vault, managed identities, private endpoints, virtual networks, Amazon VPC, and virtual machines.
+Prepared model-ready datasets in Machine Learning workspaces using scikit-learn and XGBoost. Used Cognitive Services for NLP extraction and piloted Azure OpenAI Service for dataset summaries. Documented data flows, reporting definitions, and runbooks in Confluence and Microsoft Word.
+
+
+Technical Skill Set
+
+
+
+Category
+Skills / Tools
+Cloud Platforms
+AWS, Azure
+Programming Languages
+Python, Scala, SQL, PL/SQL, T-SQL, Bash, Linux
+Data Processing &amp; Frameworks
+Apache Spark, PySpark, Pandas, Hive, Hadoop, HDFS, YARN, Apache Flink
+Streaming &amp; Messaging
+Apache Kafka, Kafka Streams, Kafka Connect, Schema Registry, Amazon Kinesis Data Streams, Kinesis Firehose, Azure Event Hubs, Azure Service Bus, SNS, SQS
+ETL / ELT &amp; Ingestion
+AWS Glue Jobs, AWS Glue, Informatica PowerCenter, Talend Open Studio, Sqoop, Apache NiFi, Azure Data Factory, ETL, ELT, SFTP, Managed File Transfer (MFT)
+Data Warehousing &amp; Lakehouse
+Amazon Redshift, Amazon Athena, Azure Synapse Analytics, Dedicated SQL Pools, Serverless SQL Pools, Delta Lake, Azure Databricks, AWS Lake Formation
+Databases (Relational &amp; Analytical)
+Amazon RDS, Amazon Aurora, PostgreSQL, MySQL, Oracle Database, Oracle 11g, SQL Server 2005/2008, DB2
+Data Modeling &amp; Governance
+Star Schema, Snowflake Schema, SCD Type 2, Dimensional Data Modeling, AWS Glue Data Catalog, Data Lineage, Operational Runbooks
+APIs &amp; Microservices
+FastAPI, Django, REST APIs, RESTful Services, OAuth2, JWT, RBAC, AWS API Gateway, Azure API Management
+Machine Learning &amp; AI
+Amazon SageMaker, Azure Machine Learning, scikit-learn, XGBoost, Amazon Bedrock, LLMs, NLP-based Models, Azure Cognitive Services
+Containers &amp; Compute
+Amazon ECS, AWS Fargate, EC2, Azure Container Instances (ACI)
+Infrastructure as Code &amp; DevOps
+Terraform, AWS CloudFormation, ARM Templates, Jenkins, Git, GitHub CI/CD, AWS CodePipeline, CI/CD, cron
+Storage &amp; File Systems
+Amazon S3, EFS, Azure Data Lake Storage Gen2, S3 Lifecycle Policies
+Security &amp; Identity
+IAM, AWS KMS, Azure Key Vault, Managed Identities, VPC
+Monitoring &amp; Observability
+Amazon CloudWatch, AWS CloudTrail, Azure Monitor, Log Analytics
+BI &amp; Visualization
+Amazon QuickSight, Tableau, Power BI
+Healthcare Standards
+EHR, HL7, FHIR, ICD-10, CPT, HIPAA
+Banking &amp; Financial Standards
+FIX, SWIFT, ISO 20022, ISO 8583, ACH, SOX, Basel, PCI-DSS, AML, KYC, CCAR
+Methodologies &amp; Delivery
+Agile, Scrum, Kanban, Agile SDLC
+Documentation &amp; Collaboration
+Confluence
+
+Professional Experience
+
+  McDonald’s, ILDec 2022 - Till Now
+  Senior Data Engineer
+
+Mission &amp; Contributions:
+ProjectDescription: Delivered a cloud-native retail data platform on Azure to process batch and real-time POS, supply-chain, and telemetry data. The platform supported analytics, forecasting, and operational reporting through ETL/ELT pipelines, streaming, a governed data lake, secure APIs, and AI-assisted insights.
+Built reusable transformation frameworks with Python, Pandas, Apache Spark, and Spark SQL on Azure Databricks. Cleansed, enriched, and reconciled POS, order, supplier, and clickstream data across the bronze, silver, and gold layers of ADLS Gen2.
+Developed scalable pipelines using Azure Data Factory (ADF) and Databricks, running Python and Scala Spark jobs on complex retail datasets. Published curated data through Synapse Analytics dedicated and serverless SQL pools for operational, risk, and regulatory reporting.
+Managed highly available transactional and analytical stores on Azure Database for PostgreSQL Flexible Server. Applied schema design, indexing, partitioning, and query tuning, with read replicas and failover supporting 24/7 retail operations.
+† Integrated POS, supply-chain, vendor, and internal feeds using Python, SQL, Java, Unix Shell, SFTP, and managed file transfer. Validated checksums and tagged encrypted incremental deliveries in ADLS Gen2 to trace files from receipt through processing.
+Exposed near-real-time retail metrics using FastAPI REST APIs and Azure API Management. Applied OAuth 2.0 and RBAC, cached repeat queries, and used structured logging to troubleshoot dashboard and downstream requests.
+Designed dimensional models in Synapse Analytics using star and snowflake schemas, surrogate keys, and SCD Type 2. Preserved dimension history and used indexing and partitioning for sales analysis, regional comparisons, and assortment planning.
+Governed data lakes and warehouses using Microsoft Purview and ADLS Gen2 access controls. Managed metadata, schema versions, lineage, and permissions, and evaluated open-source and vendor tools against governance and lineage requirements.
+Engineered streaming pipelines using Event Hubs, Event Hubs Capture, Stream Analytics, Azure Functions, Azure Storage (ADLS Gen2), and Service Bus topics and queues. Captured POS and telemetry events for analysis and routed alerts for anomalies and supply-chain exceptions.
+Built executive and operational dashboards in Power BI for sales velocity, fulfillment SLAs, inventory trends, and store performance, with drill-downs from regional summaries to individual restaurant results.
+Ran multi-terabyte batch analyses using Databricks, Spark, Spark SQL, and Hive-backed tables. Prepared historical datasets for sales trends, promotion ROI, and seasonal demand forecasting.
+† Orchestrated batch and event-driven workflows with Apache Airflow and ADF pipelines, coordinating upstream jobs through AutoSys and Stonebranch UAC. Configured dependencies, retries, SLA checks, and alerts to help support teams recover failed runs.
+Prepared reproducible feature datasets in Azure Machine Learning workspaces for demand forecasting and anomaly detection. Standardized feature inputs and validation checks across data science experiments.
+Deployed containerized processing jobs on Azure Kubernetes Service (AKS) and FastAPI workloads on Azure Container Apps. Scaled jobs and API compute as batch volumes and traffic changed with retail demand.
+Provisioned virtual networks, managed identities, ADLS Gen2, Databricks, Data Factory, and Synapse Analytics using Terraform and Bicep. Applied repeatable infrastructure definitions and security baselines across environments.
+Centralized pipeline monitoring with Azure Monitor, Log Analytics, and Action Groups, routing remediation events through Service Bus. Tracked failures, latency, and SLA breaches, and evaluated Monte Carlo for data quality monitoring.
+Secured distributed pipelines using Azure Virtual Machines, ADLS Gen2, Key Vault-managed encryption keys, Private Endpoints, managed identities, and least-privilege RBAC. Restricted storage and processing access based on application and service permissions.
+Implemented observability with Azure Monitor, Log Analytics, and Activity Log. Correlated pipeline failures and performance issues with resource changes and retained operational logs for incident reviews and audits.
+Piloted Azure OpenAI Service after its January 2023 general availability. Generated dataset summaries and enriched catalog descriptions to help analysts find data for self-service reporting. 
+Maintained GitHub CI/CD pipelines for data-processing and API changes. Used peer reviews, automated tests, and regression checks to validate releases and catch issues in existing workflows.
+Documented architecture, data lineage, governance standards, and runbooks in Confluence. Recorded source-to-target flows, support procedures, and recovery steps for audits, onboarding, and production handoffs.
+
+  Philips, MAFeb 2021 – Nov 2022
+  Senior Data Engineer
+
+Mission &amp; Contributions:
+Led Azure-based healthcare data engineering initiatives within Agile, Scrum and Kanban delivery models, collaborating with clinical, compliance, analytics and platform teams to deliver HIPAA-aligned data platforms processing millions of patient records, claims and telemetry events daily.
+
+Developed robust ETL data pipelines for EHR, HL7, claims and telemetry data, implementing automated validation, anomaly detection, enrichment, logging and reconciliation using Python, Spark and SparkSQL-based data processing systems, incorporating data quality frameworks and data quality monitoring within Azure Synapse Analytics.
+Integrated legacy, on-prem and third-party healthcare systems using SQLAlchemy, PyODBC, Java/Python-based data integration services and secure connectivity patterns into Azure Data Lake Storage Gen2 and Azure Synapse, enforcing schema design, data modeling, metadata governance and data integration for downstream analytics.
+Enhanced Azure SQL Database and MySQL environments through indexing strategies, partitioning, query tuning and workload optimization, applying SQL, dimensional data modeling and schema design principles to support transactional and analytical workloads, accelerating HEDIS and provider performance reporting.
+Established enterprise analytical layers in Azure Synapse Analytics using Dedicated SQL Pools and Serverless SQL Pools, processing multi-petabyte healthcare datasets aligned with data lake architecture, medallion architecture and big data technologies to support utilization trends and value-based care initiatives.
+Enabled near-real-time ingestion pipelines using Azure Event Hubs and Azure Service Bus to process lab, pharmacy, device telemetry and care-event data, leveraging scalable data pipelines and data platform architecture for timely care coordination.
+Delivered secure healthcare APIs using FastAPI and Django, implementing RESTful Services protected with OAuth2, JWT and RBAC through Azure API Management, supporting downstream data visualization and dashboarding integrations.
+Coordinated complex ETL and ELT workflows using Azure Data Factory and Apache Airflow-based orchestration frameworks, managing dependencies, SLA tracking, failure handling and lineage capture using data lineage tools across hybrid healthcare data sources.
+Processed healthcare interoperability standards including HL7, FHIR, ICD-10 and CPT using Apache Spark and SparkSQL on Azure Databricks (Python/Scala-based processing), enabling patient aggregation, risk scoring and cost analytics with datasets persisted in Delta Lake.
+Provisioned compliant analytics and data platforms using Azure Container Instances (ACI) and ARM Templates, ensuring standardized, repeatable and auditable deployment aligned with enterprise data architecture and data platform architecture.
+Supported healthcare analytics and predictive initiatives by preparing curated datasets for Azure Machine Learning, enabling readmission risk analysis and fraud-detection workflows within scalable data processing systems.
+Applied Azure Cognitive Services and early NLP-based Models along with open source tools and vendor tools, enabling clinical documentation parsing, structured data extraction and intelligent querying, improving reporting efficiency.
+Produced interactive dashboards using Power BI, visualizing HEDIS Utilization, provider quality metrics, care gaps and operational KPIs, strengthening data visualization, dashboarding and analytical data modeling capabilities.
+Maintained secure healthcare data environments using Azure Key Vault, Managed Identities, Azure Monitor and Log Analytics, implementing observability, audit logging, access controls and data quality monitoring using Monte Carlo (conceptual integration) aligned with HIPAA compliance standards.
+
+  Morgan Stanley , NYNov 2018 – Jan 2021
+  Senior Data Engineer
+
+Mission &amp; Contributions:
+Drove enterprise investment-banking data engineering platforms within Agile SDLC, partnering with trading, risk, compliance and analytics teams to deliver resilient batch and streaming pipelines processing 50M+ daily trade and market events, enabling real-time exposure visibility and regulatory reporting.
+Implemented scalable batch pipelines using PySpark, Scala and Pandas to process trade, position, P&amp;L and market data, performing enrichment, reconciliation and feature engineering to produce analytics-ready and ML-ready datasets.
+Architected low-latency streaming solutions using Apache Kafka, Kafka Streams and Apache Flink to handle real-time trade lifecycle events, intraday risk updates and market feeds, significantly reducing exposure visibility lag.
+Engineered large-scale data processing workflows on Hadoop, HDFS, Hive and YARN, supporting historical risk aggregation, regulatory backfills and multi-year trade analysis across on-prem platforms.
+Optimized core financial ledgers and reference data stores using Oracle Database and PostgreSQL, applying partitioning, indexing, materialized views and query tuning to support settlement processing, position management and regulatory close cycles.
+Coordinated batch and streaming workflows using Apache Airflow, managing dependencies across ingestion, enrichment, reconciliation and reporting pipelines to ensure reliable execution and SLA adherence.
+Modeled dimensional datasets using star schemas and conformed dimensions to support enterprise risk aggregation, executive reporting and regulatory analytics within Amazon Redshift and on-prem analytical environments.
+Enabled machine-learning initiatives by preparing curated historical feature datasets using Spark, Hive and scikit-learn, collaborating with quantitative teams on anomaly detection and trade-pattern analysis with XGBoost.
+Integrated diverse upstream data sources using Sqoop, Apache NiFi, Kafka Connect and custom ingestion frameworks to ingest relational, flat-file and message-based data with auditability and lineage.
+Standardized financial messaging formats including FIX, SWIFT and ISO 20022, embedding SOX and Basel controls into reconciliation, lineage and validation workflows.
+Delivered executive and operational dashboards using Amazon QuickSight and Tableau, providing real-time visibility into trading volumes, VaR, P&amp;L trends and risk metrics.
+Implemented secure hybrid architectures using Amazon VPC, EC2, S3 and EFS, enforcing encryption and access controls with IAM and KMS to meet regulatory and security requirements.
+Established centralized monitoring and alerting using Amazon CloudWatch and application-level logging on Linux, enabling proactive detection of pipeline failures and performance bottlenecks.
+Automated environment provisioning and deployments using Terraform, Jenkins, Git and Bash, enabling repeatable builds, CI/CD enforcement and controlled production releases.
+Authored comprehensive data lineage documentation, AML validation rules, reconciliation logic and operational runbooks in Confluence, supporting audits and regulatory reviews.
+
+  FNBO, NEJul 2015 – Oct 2018
+  Data Engineer
+
+Mission &amp; Contributions:
+Supported enterprise banking data initiatives within Agile delivery models, collaborating with lending, payments, fraud and risk teams to build scalable, batch-centric data pipelines processing 10M+ monthly transactions, improving fraud detection, reconciliation accuracy and regulatory compliance.
+Developed distributed Spark batch jobs using PySpark to perform transaction and loan enrichment, validation, reconciliation and data-quality checks, supporting delinquency reporting and fraud alerting in coordination with business analysts, data architects and compliance stakeholders.
+Executed large-scale batch processing workloads on Spark clusters running on EC2 / EMR, with limited late-stage exposure to AWS Glue during platform modernization efforts toward the end of the engagement.
+Implemented near-real-time ingestion channels using Apache Kafka with Schema Registry, operating self-managed Kafka clusters on EC2 to process payment and account events for fraud monitoring and reconciliation workflows.
+Built end-to-end ETL pipelines using Informatica PowerCenter and Talend Open Studio, extracting structured and semi-structured data from flat files, mainframe (COBOL) systems, Oracle 11g and SQL Server 2005/2008, loading curated datasets into centralized ODS and enterprise data warehouses on Amazon Redshift.
+Utilized Sqoop for bulk data transfers from relational databases into Hadoop-based staging areas, supporting historical backfills and large-scale transactional data ingestion.
+Optimized PL/SQL and T-SQL logic including stored procedures, triggers, indexes and partitioned tables to improve batch load performance, data consistency and dimensional model readiness.
+Coordinated batch job scheduling and dependencies using cron, shell scripting (Bash) and Apache Oozie, ensuring reliable execution of nightly and monthly banking workloads.
+Designed dimensional data models to support loan performance, credit exposure, customer behavior and reconciliation reporting across lending and payments portfolios.
+Produced interactive business dashboards using Tableau, delivering insights into delinquency trends, fraud indicators, portfolio risk and customer activity for business and compliance teams.
+Provisioned cloud infrastructure using EC2, Amazon S3 and EFS, applying CloudFormation templates and IAM policies to enforce secure, repeatable deployment of data processing environments.
+Managed long-term data retention and cost optimization through Amazon S3 lifecycle policies and tiered storage strategies for transactional and historical datasets.
+Automated build and deployment workflows using Jenkins, Git, AWS CodePipeline and scripted promotion processes to support controlled, auditable releases.
+Integrated financial messaging and payment standards including ACH, SWIFT and ISO 8583, embedding PCI-DSS and SOX compliance checks into ingestion, reconciliation and audit pipelines.
+Maintained comprehensive documentation covering process flows, ETL mappings, data lineage and operational runbooks to support audits, regulatory reviews and knowledge transfer.
+
+  IBM, NYDec 2012- Jun 2015
+  Data Analyst
+
+Mission &amp; Contributions:
+Supported operations and finance teams with data quality, EDA and reporting foundations using SQL, Excel and Tableau, ensuring accuracy for monthly cycles and building strong analytical skills for later engineering roles.
+Supported business and technical teams by collecting, cleaning and validating structured datasets from internal systems and flat files to ensure accuracy and consistency for analysis.
+Performed exploratory data analysis using SQL to extract, filter and aggregate data related to operations, customer activity and system performance metrics.
+Created routine and ad-hoc reports using Microsoft Excel (Pivot Tables, VLOOKUP, Formulas) to summarize trends, anomalies and key performance indicators.
+Assisted senior analysts in maintaining and updating relational datasets stored in Oracle and DB2, ensuring data completeness and proper formatting.
+Developed basic data visualizations and charts using Microsoft Excel and Tableau to present analytical findings in a clear, business-friendly format.
+Wrote and optimized simple to intermediate SQL queries for data extraction, reconciliation and validation across multiple source tables.
+Participated in data quality checks by identifying missing values, duplicates and inconsistencies and documenting issues for remediation.
+Supported monthly and quarterly reporting cycles by preparing datasets, validating figures and reconciling results with source systems.
+Assisted in documenting data definitions, report logic and calculation rules using Microsoft Word and Microsoft Excel to support consistency and knowledge sharing.
+Collaborated with cross-functional teams including operations, application support and reporting teams to understand data requirements and reporting needs.
+Used Python (basic scripting) for data cleaning and simple analysis tasks such as formatting, filtering and file-based data processing.
+Helped monitor scheduled data refreshes and report executions using internal scheduling tools, escalating data issues to senior team members when required.
+Followed established SDLC and reporting processes, supporting testing and validation activities during report or data model changes.
+Maintained compliance with internal data governance and security guidelines while handling sensitive business and customer data.
+Qualification Badges
+
+AWS Certified Solutions Architect Associate, Microsoft Certified Azure Data Engineer Associate.
